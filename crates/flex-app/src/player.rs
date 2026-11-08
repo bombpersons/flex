@@ -1,8 +1,8 @@
 //! Full-screen video playback with a minimal d-pad OSD.
 //!
-//! OK / Play-Pause: pause/play · Left/Right: seek (hold to go faster) · Up: subtitles ·
-//! Down: audio · Hold OK: next video effect · Back: hide the OSD, or stop if it's already
-//! hidden · Stop: stop.
+//! OK / Play-Pause: pause/play · Left/Right: seek (hold to go faster) · 0–9: jump to
+//! 0%–90% of the way through · Up: subtitles · Down: audio · Hold OK: next video effect ·
+//! Back: hide the OSD, or stop if it's already hidden · Stop: stop.
 //! F2: playback stats (dropped frames, decoder, refresh rate).
 //! Mouse: moving it shows the OSD; click or drag the seek bar to seek.
 //!
@@ -273,6 +273,10 @@ impl Player {
                 let _ = self.mpv.set_flag("pause", !self.paused());
             }
             Action::Stop if !press.repeat => return Nav::Pop,
+            // Like YouTube: 0 is the start, 1 is 10% through, ... 9 is 90%.
+            Action::Number(n) if !press.repeat => {
+                self.command(&["seek", &(u32::from(n.min(9)) * 10).to_string(), "absolute-percent"]);
+            }
             Action::Left | Action::Right => {
                 let step = if press.repeat { 30 } else { 10 };
                 let step = if press.action == Action::Left { -step } else { step };
