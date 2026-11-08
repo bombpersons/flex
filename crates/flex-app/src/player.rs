@@ -658,6 +658,20 @@ impl Player {
         let sampler = sh.plugins.wants_light().then(|| sh.ambient.sampler.clone());
         // The video effect: drawn every frame, so it moves while paused too.
         sh.effects.step(ctx.input(|i| i.unstable_dt).min(0.25), self.loaded && !self.paused());
+        let effects = sh.effect_renderer.clone();
+        let held = effects.lock().unwrap_or_else(|e| e.into_inner()).held_back();
+        if held != self.audio_held {
+            self.audio_held = held;
+            let _ = self.mpv.set_string("audio-delay", &format!("{held:.3}"));
+        }
+        let clock = sh.effects.active().is_some().then(|| self.effect_inputs.tick(&self.mpv, sh.effects.needs().audio));
+        // Changing as the new shot reaches the screen, which, with the picture held back, is
+        // a little after the cut was found.
+        if let Some((video_time, _)) = &clock
+            && effects.lock().unwrap_or_else(|e| e.into_inner()).cut_shown(video_time - held)
+        {
+            sh.effects.scene_changed();
+        }
         let effect = sh.effects.active();
         if let Some(effect) = &effect {
             let status = sh.effect_renderer.lock().unwrap_or_else(|e| e.into_inner()).status(effect).cloned();
@@ -666,16 +680,9 @@ impl Player {
             }
             ctx.request_repaint();
         }
-        let effects = sh.effect_renderer.clone();
-        let held = effects.lock().unwrap_or_else(|e| e.into_inner()).held_back();
-        if held != self.audio_held {
-            self.audio_held = held;
-            let _ = self.mpv.set_string("audio-delay", &format!("{held:.3}"));
-        }
-        let frame = match &effect {
-            Some(effect) => {
+        let frame = match (&effect, clock) {
+            (Some(effect), Some((video_time, audio))) => {
                 let needs = sh.effects.needs();
-                let (video_time, audio) = self.effect_inputs.tick(&self.mpv, needs.audio);
                 let pts = self.mpv.get_f64("time-pos").map_or(video_time, |p| p as f32);
                 let depth = needs.depth.then(|| {
                     sh.depth.wanted(needs.segment);
@@ -686,9 +693,9 @@ impl Player {
                     sh.faces.clone()
                 });
                 let fading = sh.effects.fading();
-                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces })
+                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts(), rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces })
             }
-            None => {
+            _ => {
                 self.effect_inputs.stop(&self.mpv);
                 self.effect_inputs = Default::default();
                 None

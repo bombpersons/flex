@@ -167,13 +167,19 @@ pub struct Shuffle {
     /// How long each effect stays, in seconds, not counting the fade: somewhere between these.
     pub shortest: f32,
     pub longest: f32,
-    /// How long one effect takes to fade into the next, in seconds.
+    /// How long one effect takes to fade into the next, in seconds: 0 is straight away.
     pub fade: f32,
+    /// Change where the shot changes, once the shortest turn is up, instead of at a random
+    /// moment. After the longest turn it changes anyway.
+    pub at_cuts: bool,
+    /// How far each effect's settings are moved at random whenever it comes up, in percent:
+    /// 0 leaves them alone, 100 can land anywhere in their range.
+    pub randomise: f32,
 }
 
 impl Default for Shuffle {
     fn default() -> Self {
-        Self { on: false, shortest: 20.0, longest: 60.0, fade: 4.0 }
+        Self { on: false, shortest: 20.0, longest: 60.0, fade: 4.0, at_cuts: false, randomise: 0.0 }
     }
 }
 
@@ -199,11 +205,14 @@ pub struct Effects {
     /// The chosen effect's id (kept even if its file has gone).
     chosen: Option<String>,
     settings: HashMap<String, Settings>,
+    /// Random settings for this turn of shuffle, in place of `settings`, and never saved.
+    rolled: HashMap<String, Settings>,
     /// The chosen effect's shader state, from the app: (ok, text).
     pub status: Option<(bool, String)>,
     shuffle: Shuffle,
-    /// Seconds of playing until shuffle moves on.
+    /// Seconds of playing until shuffle moves on, and since it last did.
     until_next: f32,
+    turn: f32,
     fading: Option<Fading>,
     /// What shuffle hasn't played yet this time round.
     turns: Vec<String>,
@@ -249,6 +258,7 @@ impl Effects {
         self.chosen = id.map(str::to_owned);
         self.status = None;
         self.fading = None;
+        self.rolled.clear();
         if id.is_none() && self.shuffle.on {
             self.shuffle.on = false;
             self.save_shuffle(db);
@@ -269,14 +279,18 @@ impl Effects {
 
     pub fn set_shuffle(&mut self, shuffle: Shuffle, db: &Db) {
         let (started, stopped) = (shuffle.on && !self.shuffle.on, !shuffle.on && self.shuffle.on);
+        let restart = started || shuffle.at_cuts != self.shuffle.at_cuts;
         self.shuffle = shuffle;
         self.save_shuffle(db);
-        if started {
-            if self.chosen().is_none() {
-                self.chosen = self.next_turn();
-                self.status = None;
-            }
+        if started && self.chosen().is_none() {
+            self.chosen = self.next_turn();
+            self.status = None;
+        }
+        if restart {
             self.wait();
+        }
+        if !shuffle.on || shuffle.randomise <= 0.0 {
+            self.rolled.clear();
         }
         if stopped {
             // Stay on whichever came up.
@@ -303,6 +317,9 @@ impl Effects {
     /// Call once per frame, with the seconds since the last. The fade keeps going while
     /// paused, but only playing counts towards the next change.
     pub fn step(&mut self, dt: f32, playing: bool) {
+        if playing {
+            self.turn += dt;
+        }
         if let Some(fading) = &mut self.fading {
             fading.elapsed += dt;
             if fading.elapsed < self.shuffle.fade {
@@ -319,13 +336,65 @@ impl Effects {
         if self.until_next > 0.0 && !broken {
             return;
         }
+        self.change_turn(!broken);
+    }
+
+    /// Picks this turn's settings for an effect, each somewhere between how it's been set and
+    /// a random point in its range.
+    fn roll_settings(&mut self, id: &str) {
+        let amount = f64::from(self.shuffle.randomise / 100.0).clamp(0.0, 1.0);
+        let Some(effect) = self.effects.iter().find(|e| e.id == id).cloned().filter(|_| amount > 0.0) else { return };
+        let mut rolled = Settings::default();
+        for spec in effect.settings() {
+            let current = self.settings.get(id).and_then(|s| s.get(&spec.key));
+            let value = match spec.kind {
+                SettingKind::Number => {
+                    let (min, max) = (spec.min.unwrap_or(0.0), spec.max.unwrap_or(100.0));
+                    let base = current.and_then(serde_json::Value::as_f64).unwrap_or(min);
+                    let anywhere = min + f64::from(self.roll()) * (max - min);
+                    let moved = base + (anywhere - base) * amount;
+                    let snapped = spec.step.filter(|s| *s > 0.0).map_or(moved, |step| min + ((moved - min) / step).round() * step);
+                    let value = ((snapped * 1e4).round() / 1e4).clamp(min, max);
+                    if value.fract() == 0.0 { serde_json::json!(value as i64) } else { serde_json::json!(value) }
+                }
+                // Flipping half the time at most, so all the way up isn't always opposite.
+                SettingKind::Bool => {
+                    let on = current.and_then(serde_json::Value::as_bool).unwrap_or(false);
+                    serde_json::json!(on != (f64::from(self.roll()) < amount * 0.5))
+                }
+                SettingKind::Choice if !spec.options.is_empty() && f64::from(self.roll()) < amount => {
+                    let at = (self.roll() * spec.options.len() as f32) as usize;
+                    serde_json::json!(spec.options[at.min(spec.options.len() - 1)].id)
+                }
+                _ => continue,
+            };
+            rolled.insert(spec.key.clone(), value);
+        }
+        self.rolled.insert(id.to_owned(), rolled);
+    }
+
+    fn change_turn(&mut self, may_fade: bool) {
         self.wait();
         let Some(next) = self.next_turn() else { return };
+        self.rolled.retain(|id, _| Some(id) == self.chosen.as_ref());
+        self.roll_settings(&next);
         let from = self.chosen.replace(next);
         self.status = None;
-        if !broken && self.shuffle.fade > 0.0 {
-            self.fading = from.map(|from| Fading { from, elapsed: 0.0 });
+        self.fading = from.filter(|_| may_fade && self.shuffle.fade > 0.0).map(|from| Fading { from, elapsed: 0.0 });
+    }
+
+    /// Whether the player should look for scene cuts.
+    pub fn wants_cuts(&self) -> bool {
+        self.shuffle.on && self.shuffle.at_cuts
+    }
+
+    /// The shot has just changed: moves to the next effect if this one has had its turn.
+    pub fn scene_changed(&mut self) {
+        let shortest = self.shuffle.shortest.min(self.shuffle.longest);
+        if !self.wants_cuts() || self.turn < shortest {
+            return;
         }
+        self.change_turn(true);
     }
 
     /// The effect fading out, and how far `active` has faded in over it (0–1), during a fade.
@@ -373,7 +442,8 @@ impl Effects {
     fn wait(&mut self) {
         let (a, b) = (self.shuffle.shortest, self.shuffle.longest);
         let (shortest, longest) = (a.min(b).max(0.0), a.max(b));
-        self.until_next = shortest + self.roll() * (longest - shortest);
+        self.until_next = if self.shuffle.at_cuts { longest } else { shortest + self.roll() * (longest - shortest) };
+        self.turn = 0.0;
     }
 
     /// The next effect, going through them all in a random order before any comes round
@@ -408,7 +478,7 @@ impl Effects {
     }
 
     pub fn value(&self, id: &str, key: &str) -> Option<&serde_json::Value> {
-        self.settings.get(id)?.get(key)
+        self.rolled.get(id).and_then(|s| s.get(key)).or_else(|| self.settings.get(id)?.get(key))
     }
 
     pub fn set_setting(&mut self, id: &str, key: &str, value: serde_json::Value, db: &Db) {
@@ -418,6 +488,9 @@ impl Effects {
 
     /// Changes a setting without saving it yet (e.g. while a slider is dragged).
     pub fn set_value(&mut self, id: &str, key: &str, value: serde_json::Value) {
+        if let Some(rolled) = self.rolled.get_mut(id) {
+            rolled.insert(key.to_owned(), value.clone());
+        }
         self.settings.entry(id.to_owned()).or_default().insert(key.to_owned(), value);
     }
 
@@ -546,7 +619,7 @@ mod tests {
         let mut effects = Effects::new(&dirs, &db);
         assert!(!effects.needs().audio, "nothing's on");
 
-        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, randomise: 0.0 }, &db);
         let first = effects.chosen().expect("shuffle starts one").id.clone();
         let needs = effects.needs();
         assert_eq!((needs.audio, needs.depth, needs.faces, needs.scale), (true, true, false, 1.0), "all that it might pick");
@@ -582,6 +655,41 @@ mod tests {
         assert_ne!(effects.chosen().unwrap().id, broken);
         assert!(effects.fading().is_none());
 
+        // At cuts: not before the shortest turn, and only when asked to.
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 30.0, fade: 2.0, at_cuts: true, randomise: 0.0 }, &db);
+        let before = effects.chosen().unwrap().id.clone();
+        effects.step(9.0, true);
+        effects.scene_changed();
+        assert_eq!(effects.chosen().unwrap().id, before, "too soon");
+        effects.step(2.0, true);
+        effects.scene_changed();
+        assert_ne!(effects.chosen().unwrap().id, before);
+        assert_eq!(effects.fading().unwrap().0.id, before, "fades there too");
+        let at_cut = effects.chosen().unwrap().id.clone();
+        effects.step(29.0, true);
+        assert_eq!(effects.chosen().unwrap().id, at_cut, "only the longest turn moves it without a cut");
+        effects.step(2.0, true);
+        assert_ne!(effects.chosen().unwrap().id, at_cut);
+        // A fade of 0 switches at once, whichever way it's changing.
+        effects.set_shuffle(Shuffle { on: true, shortest: 1.0, longest: 30.0, fade: 0.0, at_cuts: true, randomise: 0.0 }, &db);
+        effects.step(2.0, true);
+        let sharp = effects.chosen().unwrap().id.clone();
+        effects.scene_changed();
+        assert_ne!(effects.chosen().unwrap().id, sharp);
+        assert!(effects.fading().is_none());
+        effects.set_shuffle(Shuffle { on: true, shortest: 5.0, longest: 5.0, fade: 0.0, at_cuts: false, randomise: 0.0 }, &db);
+        let sharp = effects.chosen().unwrap().id.clone();
+        effects.step(6.0, true);
+        assert_ne!(effects.chosen().unwrap().id, sharp);
+        assert!(effects.fading().is_none());
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, randomise: 0.0 }, &db);
+        effects.step(2.0, false);
+        effects.step(11.0, true);
+        let moved = effects.chosen().unwrap().id.clone();
+        effects.step(2.5, true);
+        effects.scene_changed();
+        assert_eq!(effects.chosen().unwrap().id, moved, "cuts are ignored unless asked for");
+
         // Choosing one stops any fade; choosing none stops shuffle; both are kept.
         effects.set_in_shuffle("c", false, &db);
         effects.choose(Some("a"), &db);
@@ -589,6 +697,58 @@ mod tests {
         assert!(!Effects::new(&dirs, &db).in_shuffle("c"));
         effects.choose(None, &db);
         assert!(!effects.shuffle().on);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shuffle_can_roll_settings_without_touching_the_saved_ones() {
+        let root = std::env::temp_dir().join(format!("flex-effects-roll-{}", std::process::id()));
+        let toml = "[[settings]]\nkey = \"size\"\nlabel = \"Size\"\ntype = \"number\"\nmin = 0\nmax = 10\nstep = 2\ndefault = 4\n\
+                    [[settings]]\nkey = \"mode\"\nlabel = \"Mode\"\ntype = \"choice\"\ndefault = \"a\"\n\
+                    options = [{ id = \"a\", label = \"A\" }, { id = \"b\", label = \"B\" }]\n";
+        for name in ["one", "two"] {
+            write(&root, &format!("{name}.frag"), "");
+            write(&root, &format!("{name}.toml"), toml);
+        }
+        let db = Db::open_in_memory().unwrap();
+        let dirs = [root.clone()];
+        let mut effects = Effects::new(&dirs, &db);
+        effects.choose(Some("one"), &db);
+        let on = Shuffle { on: true, shortest: 1.0, longest: 1.0, fade: 0.0, at_cuts: false, randomise: 100.0 };
+        effects.set_shuffle(on, &db);
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            effects.step(2.0, true);
+            let id = effects.chosen().unwrap().id.clone();
+            let size = effects.value(&id, "size").unwrap().as_i64().expect("on the grid");
+            assert!((0..=10).contains(&size) && size % 2 == 0, "{size}");
+            seen.insert((size, effects.value(&id, "mode").unwrap().as_str().unwrap().to_owned()));
+        }
+        assert!(seen.len() >= 8, "{seen:?}");
+
+        // A change made now shows now, and is what's saved; the rolled values never are.
+        let id = effects.chosen().unwrap().id.clone();
+        effects.set_setting(&id, "size", serde_json::json!(6), &db);
+        assert_eq!(effects.value(&id, "size").unwrap(), 6);
+        let other = if id == "one" { "two" } else { "one" };
+        let restarted = Effects::new(&dirs, &db);
+        assert_eq!(restarted.value(&id, "size").unwrap(), 6);
+        assert_eq!(restarted.value(other, "size").unwrap(), 4);
+
+        // Half way: never further than half the way to the ends of the range.
+        effects.set_shuffle(Shuffle { randomise: 50.0, ..on }, &db);
+        for _ in 0..100 {
+            effects.step(2.0, true);
+            let id = effects.chosen().unwrap().id.clone();
+            let base = if id == "one" || other == "one" { Effects::new(&dirs, &db).value(&id, "size").unwrap().as_i64().unwrap() } else { 4 };
+            let size = effects.value(&id, "size").unwrap().as_i64().unwrap();
+            assert!((size - base).abs() <= 4, "{size} from {base}");
+        }
+
+        // Turned off, it's back to the saved ones.
+        effects.set_shuffle(Shuffle { randomise: 0.0, ..on }, &db);
+        assert_eq!(effects.value(&id, "size").unwrap(), 6);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

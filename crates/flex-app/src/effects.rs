@@ -78,6 +78,7 @@ pub struct Renderer {
     depth: DepthGl,
     held: HeldFrames,
     faces: FaceGl,
+    cuts: CutGl,
     copy: Option<glow::Program>,
     slots: [Slot; 2],
     /// Which of `slots` has the chosen effect; the other has the one fading out, if any.
@@ -94,6 +95,8 @@ pub struct Frame {
     pub fading: Option<(ActiveEffect, f32)>,
     /// The size mpv draws at, relative to the screen.
     pub video_scale: f32,
+    /// Shuffle wants to know where the shot changes.
+    pub find_cuts: bool,
     /// Where the picture is, without black bars (0–1 from the bottom left).
     pub rect: [f32; 4],
     pub video_time: f32,
@@ -559,6 +562,9 @@ impl Renderer {
                 Some(link) => self.faces.update(gl, link, o.video.fbo, size, rect, frame.pts, frame.video_time),
                 None => self.faces.delay = 0.0,
             }
+            if frame.find_cuts {
+                self.cuts.update(gl, o.video.fbo, size, rect, frame.pts);
+            }
             // The picture is held back to the frame depth and faces have caught up with.
             let (video_texture, pts) = if frame.depth.is_some() || frame.faces.is_some() {
                 self.held.push(gl, &o.video, size, frame.pts);
@@ -661,6 +667,7 @@ impl Renderer {
             self.depth.release(gl);
             self.held.free(gl);
             self.faces.release(gl);
+            self.cuts.release(gl);
             if let Some(vao) = self.vao.take() {
                 gl.delete_vertex_array(vao);
             }
@@ -670,6 +677,11 @@ impl Renderer {
     /// How far behind the picture is being held (seconds), which the sound has to match.
     pub fn held_back(&self) -> f32 {
         self.depth.delay.max(self.faces.delay)
+    }
+
+    /// Whether a scene cut has reached `shown` in the video since this was last asked.
+    pub fn cut_shown(&mut self, shown: f32) -> bool {
+        self.cuts.due.take_if(|at| *at <= shown).is_some()
     }
 
     pub fn holds_gl(&self) -> bool {
@@ -1222,6 +1234,151 @@ struct FaceGl {
     delay: f32,
 }
 
+/// The tiny picture compared from frame to frame to find cuts.
+const CUT_SIZE: (i32, i32) = (32, 18);
+/// A halfway size, as one big step down would only look at a few pixels of the frame.
+const CUT_HALFWAY: (i32, i32) = (128, 72);
+/// A cut changes the picture this much on average (0–255 a channel), and this many times as much
+/// as the frames before it changed, which rules out fast action.
+const CUT_CHANGE: f32 = 20.0;
+const CUT_OVER_USUAL: f32 = 4.0;
+
+/// Spots a sudden change in the picture.
+#[derive(Default)]
+struct CutFinder {
+    last: Vec<u8>,
+    last_time: f32,
+    usual: f32,
+    was_cut: bool,
+}
+
+impl CutFinder {
+    /// `rgba` is this frame's tiny picture, from `time` in the video.
+    fn is_cut(&mut self, rgba: &[u8], time: f32) -> bool {
+        // A seek: not the film cutting.
+        let continues = self.last.len() == rgba.len() && time >= self.last_time && time < self.last_time + 1.0;
+        let mut cut = false;
+        if continues {
+            let change: u32 = self.last.as_chunks::<4>().0.iter().zip(rgba.as_chunks::<4>().0).map(|(a, b)| (0..3).map(|c| u32::from(a[c].abs_diff(b[c]))).sum::<u32>()).sum();
+            let change = change as f32 / (rgba.len() / 4 * 3) as f32;
+            cut = !self.was_cut && change > CUT_CHANGE && change > self.usual * CUT_OVER_USUAL;
+            if !cut {
+                self.usual += (change - self.usual) * 0.25;
+            }
+        } else {
+            self.usual = 0.0;
+        }
+        self.last.clear();
+        self.last.extend_from_slice(rgba);
+        self.last_time = time;
+        self.was_cut = cut;
+        cut
+    }
+}
+
+/// Reads back a tiny copy of each new frame (a frame late, so the CPU never waits for the GPU).
+#[derive(Default)]
+struct CutGl {
+    objects: Option<(Target, Target, glow::Buffer)>,
+    failed: bool,
+    pending: Option<(Fence, f32)>,
+    last_time: Option<f32>,
+    finder: CutFinder,
+    /// The newest cut found that hasn't reached the screen yet.
+    due: Option<f32>,
+}
+
+impl CutGl {
+    unsafe fn update(&mut self, gl: &glow::Context, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32) {
+        let bytes = (CUT_SIZE.0 * CUT_SIZE.1 * 4) as usize;
+        let rgba8 = [(glow::RGBA8, glow::UNSIGNED_BYTE)];
+        unsafe {
+            if self.failed {
+                return;
+            }
+            if self.objects.is_none() {
+                let made = create_target(gl, CUT_HALFWAY, &rgba8).and_then(|halfway| {
+                    let small = create_target(gl, CUT_SIZE, &rgba8)?;
+                    let pbo = gl.create_buffer()?;
+                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
+                    gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, bytes as i32, glow::STREAM_READ);
+                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                    Ok((halfway, small, pbo))
+                });
+                match made {
+                    Ok(o) => self.objects = Some(o),
+                    Err(e) => {
+                        log::warn!("scene cuts: {e}");
+                        self.failed = true;
+                        return;
+                    }
+                }
+            }
+            let Some((halfway, small, pbo)) = self.objects.as_ref() else { return };
+            if let Some((Fence(fence), at)) = self.pending {
+                match gl.client_wait_sync(fence, 0, 0) {
+                    glow::TIMEOUT_EXPIRED => {}
+                    status => {
+                        gl.delete_sync(fence);
+                        self.pending = None;
+                        if status != glow::WAIT_FAILED {
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
+                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
+                            if !ptr.is_null() {
+                                if self.finder.is_cut(std::slice::from_raw_parts(ptr, bytes), at) {
+                                    log::debug!("scene cut at {at:.3}");
+                                    self.due = Some(at);
+                                }
+                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                            }
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                        }
+                    }
+                }
+            }
+            if self.pending.is_none() && self.last_time != Some(time) {
+                self.last_time = Some(time);
+                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
+                let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
+                gl.disable(glow::SCISSOR_TEST);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(halfway.fbo));
+                gl.blit_framebuffer(x0, y0, x1, y1, 0, 0, CUT_HALFWAY.0, CUT_HALFWAY.1, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(halfway.fbo));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(small.fbo));
+                gl.blit_framebuffer(0, 0, CUT_HALFWAY.0, CUT_HALFWAY.1, 0, 0, CUT_SIZE.0, CUT_SIZE.1, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(small.fbo));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+                gl.read_pixels(0, 0, CUT_SIZE.0, CUT_SIZE.1, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+                    self.pending = Some((Fence(fence), time));
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+        }
+    }
+
+    unsafe fn release(&mut self, gl: &glow::Context) {
+        unsafe {
+            if let Some((Fence(fence), _)) = self.pending.take() {
+                gl.delete_sync(fence);
+            }
+            if let Some((halfway, small, pbo)) = self.objects.take() {
+                for t in [halfway, small] {
+                    gl.delete_framebuffer(t.fbo);
+                    gl.delete_texture(t.texture);
+                }
+                gl.delete_buffer(pbo);
+            }
+        }
+        self.last_time = None;
+        self.finder = CutFinder::default();
+        self.due = None;
+    }
+}
+
 /// How many reports are kept to draw from: over a second's worth.
 const FACE_REPORTS: usize = 32;
 
@@ -1486,6 +1643,24 @@ mod hold_tests {
         let mut slots = [None; crate::faces::MAX_FACES];
         slots[0] = Some(crate::faces::Shown { coords: [x; crate::faces::COORDS], seen: 1.0 });
         crate::faces::Report { time, after_cut, slots }
+    }
+
+    #[test]
+    fn a_sudden_change_is_a_cut_but_steady_action_and_seeks_are_not() {
+        let frame = |v: u8| vec![v; 64];
+        let mut f = CutFinder::default();
+        assert!(!f.is_cut(&frame(50), 0.0), "nothing to compare with");
+        assert!(!f.is_cut(&frame(52), 0.04));
+        assert!(f.is_cut(&frame(150), 0.08));
+        assert!(!f.is_cut(&frame(151), 0.12));
+        assert!(!f.is_cut(&frame(250), 5.0), "a seek");
+        // Everything changing a lot, frame after frame.
+        let mut f = CutFinder::default();
+        let mut cuts = 0;
+        for i in 0..60 {
+            cuts += u32::from(f.is_cut(&frame(if i % 2 == 0 { 40 } else { 80 }), i as f32 * 0.04));
+        }
+        assert!(cuts <= 1, "{cuts}");
     }
 
     #[test]

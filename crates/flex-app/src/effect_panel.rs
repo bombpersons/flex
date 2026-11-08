@@ -22,15 +22,18 @@ const HEADER: f32 = 56.0;
 const FOOTER: f32 = 100.0;
 /// (lowest, highest, step), in seconds.
 const TURN: (f32, f32, f32) = (5.0, 600.0, 5.0);
-const FADE: (f32, f32, f32) = (0.5, 15.0, 0.5);
+const FADE: (f32, f32, f32) = (0.0, 15.0, 0.5);
+const RANDOMISE: (f32, f32, f32) = (0.0, 100.0, 10.0);
 
 #[derive(Clone)]
 enum Line {
     Effect,
     Shuffle,
+    ChangeAt,
     Shortest,
     Longest,
     Fade,
+    Randomise,
     Setting(Box<SettingSpec>),
     InShuffle,
     Defaults,
@@ -63,7 +66,7 @@ pub struct EffectPanel {
 fn lines(sh: &Shared) -> Vec<Line> {
     let mut lines = vec![Line::Effect, Line::Shuffle];
     if sh.effects.shuffle().on {
-        lines.extend([Line::Shortest, Line::Longest, Line::Fade]);
+        lines.extend([Line::ChangeAt, Line::Shortest, Line::Longest, Line::Fade, Line::Randomise]);
     }
     if let Some(effect) = sh.effects.chosen() {
         lines.extend(effect.settings().cloned().map(Box::new).map(Line::Setting));
@@ -146,7 +149,7 @@ impl EffectPanel {
             Action::Down => self.selected = (self.selected + 1).min(last),
             Action::Left | Action::Right => {
                 // Holding a key down shouldn't race through whole shaders.
-                if !press.repeat || !matches!(lines[self.selected], Line::Effect | Line::Shuffle | Line::InShuffle | Line::Defaults) {
+                if !press.repeat || !matches!(lines[self.selected], Line::Effect | Line::Shuffle | Line::ChangeAt | Line::InShuffle | Line::Defaults) {
                     self.change(sh, &lines[self.selected], if press.action == Action::Left { -1.0 } else { 1.0 }, press.repeat);
                 }
             }
@@ -161,7 +164,7 @@ impl EffectPanel {
         match line {
             Line::Defaults => self.defaults(sh),
             // There's no "next" for a value along a bar.
-            Line::Shortest | Line::Longest | Line::Fade => {}
+            Line::Shortest | Line::Longest | Line::Fade | Line::Randomise => {}
             Line::Setting(spec) if spec.kind == SettingKind::Number => {}
             _ => self.change(sh, line, 1.0, false),
         }
@@ -193,6 +196,7 @@ impl EffectPanel {
                 effects.choose(next.as_deref(), db);
             }
             Line::Shuffle => set_shuffle(sh, Shuffle { on: !shuffle.on, ..shuffle }),
+            Line::ChangeAt => set_shuffle(sh, Shuffle { at_cuts: !shuffle.at_cuts, ..shuffle }),
             Line::Shortest => {
                 let shortest = timed(shuffle.shortest, TURN);
                 set_shuffle(sh, Shuffle { shortest, longest: shuffle.longest.max(shortest), ..shuffle });
@@ -202,6 +206,7 @@ impl EffectPanel {
                 set_shuffle(sh, Shuffle { longest, shortest: shuffle.shortest.min(longest), ..shuffle });
             }
             Line::Fade => set_shuffle(sh, Shuffle { fade: timed(shuffle.fade, FADE), ..shuffle }),
+            Line::Randomise => set_shuffle(sh, Shuffle { randomise: timed(shuffle.randomise, RANDOMISE), ..shuffle }),
             Line::Setting(spec) => {
                 let Some(id) = sh.effects.chosen().map(|e| e.id.clone()) else { return };
                 let Some(value) = changed(spec, sh.effects.value(&id, &spec.key), direction.into()) else { return };
@@ -241,6 +246,7 @@ impl EffectPanel {
                 set_shuffle(sh, Shuffle { longest, shortest: shuffle.shortest.min(longest), ..shuffle });
             }
             Line::Fade => set_shuffle(sh, Shuffle { fade: timed(FADE), ..shuffle }),
+            Line::Randomise => set_shuffle(sh, Shuffle { randomise: timed(RANDOMISE), ..shuffle }),
             Line::Setting(spec) => {
                 let Some(id) = sh.effects.chosen().map(|e| e.id.clone()) else { return };
                 let (min, max) = (spec.min.unwrap_or(0.0), spec.max.unwrap_or(100.0));
@@ -260,9 +266,11 @@ impl EffectPanel {
         match line {
             Line::Effect => ("Effect".into(), chosen.map_or("Off".into(), |e| e.manifest.name.clone()), None),
             Line::Shuffle => ("Shuffle".into(), on_off(shuffle.on), None),
+            Line::ChangeAt => ("Change at".into(), (if shuffle.at_cuts { "Scene cuts" } else { "Any time" }).into(), None),
             Line::Shortest => ("Shortest turn".into(), seconds(shuffle.shortest), timed(shuffle.shortest, TURN)),
             Line::Longest => ("Longest turn".into(), seconds(shuffle.longest), timed(shuffle.longest, TURN)),
-            Line::Fade => ("Fade".into(), seconds(shuffle.fade), timed(shuffle.fade, FADE)),
+            Line::Fade => ("Fade".into(), if shuffle.fade > 0.0 { seconds(shuffle.fade) } else { "Off".into() }, timed(shuffle.fade, FADE)),
+            Line::Randomise => ("Random settings".into(), if shuffle.randomise > 0.0 { format!("{}%", shuffle.randomise) } else { "Off".into() }, timed(shuffle.randomise, RANDOMISE)),
             Line::InShuffle => ("In the shuffle".into(), (if chosen.is_some_and(|e| sh.effects.in_shuffle(&e.id)) { "yes" } else { "no" }).into(), None),
             Line::Defaults => ("Back to the defaults".into(), String::new(), None),
             Line::Setting(spec) => {
@@ -295,8 +303,12 @@ impl EffectPanel {
                 }
             }
             Line::Shuffle => "Effects take turns at random, fading from one to the next.".into(),
+            Line::ChangeAt if sh.effects.shuffle().at_cuts => "The next effect starts on the frame the shot changes.".into(),
+            Line::ChangeAt => "The next effect starts at a random moment.".into(),
+            Line::Shortest | Line::Longest if sh.effects.shuffle().at_cuts => "Cuts are ignored until the shortest turn is up. After the longest it changes anyway.".into(),
             Line::Shortest | Line::Longest => "Each effect stays for a random time between these.".into(),
-            Line::Fade => "How long one effect takes to fade into the next.".into(),
+            Line::Fade => "How long one effect takes to fade into the next. Off switches instantly.".into(),
+            Line::Randomise => "Each time an effect comes up, its settings move this far at random from yours, which aren't changed.".into(),
             Line::InShuffle => "Whether shuffle picks this effect.".into(),
             Line::Defaults => String::new(),
             Line::Setting(spec) => spec.detail.clone(),

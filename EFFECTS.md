@@ -11,7 +11,11 @@ and adjust its settings while you watch. They're also in Settings â†’ Picture â†
 
 Turn on Shuffle in the panel and effects take turns at random, each staying for a random time
 between the shortest and longest you set, then fading into the next. Every effect plays once
-before any comes round again, and the clock stops while the video's paused. "In the shuffle"
+before any comes round again, and the clock stops while the video's paused. Set "Change at"
+to Scene cuts and the next effect starts on the frame the shot changes instead, once the
+shortest turn is up. Either way, Fade sets how long the change takes, and Off makes it instant. Random settings
+moves an effect's settings at random each time it comes up, without changing the ones you've
+set. "In the shuffle"
 leaves out the effect you're on. Shuffle keeps sound, depth, masks and faces running for
 whatever it might pick next, so that nothing stutters at the changes; leave out the effects
 that use them if the GPU struggles.
@@ -49,6 +53,28 @@ Flex comes with these to start from, in [`effects`](effects):
   beat.
 - **Big Heads**: everyone's head swells up on top of a normal-sized body and pulses with the
   sound.
+- **Upside-Down Face**: eyes and mouth turned over inside each face, or the whole face.
+- **Mouth Eyes**: eyes and mouth swap places.
+- **Cyclops**: everyone's eyes merge into one big one.
+- **Pinocchio**: noses grow for as long as a shot lasts and snap back at the cut.
+- **Silhouette Cosmos**: people become person-shaped windows into a drifting galaxy.
+- **Invisible Man**: people vanish and the room behind them is filled in from what's been seen.
+- **Clone Army**: rows of the same people stretch away behind them.
+- **Wallpaper Crawl**: walls writhe, and eyes open in them and watch the people.
+- **Aquarium**: the room floods, with rippling light, bubbles and blue distance.
+- **Snow Globe**: snow falls behind whatever's near and settles on things; a beat shakes it off.
+- **Thermal Vision**: heat colours, with people and faces hottest.
+- **Night of the Living**: grey-green people with hollow eyes, under a flickering light.
+- **Black Hole**: drifts through the room, dragging the distance in first.
+- **Melting Clocks**: everything but people sags and drips over its edges.
+- **Fractal Zoom**: an endless fall through copies of the live picture, centred on a face.
+- **Oil on Water**: rainbow bands like petrol on a puddle, curling around people.
+- **Reaction-Diffusion Skin**: living zebra and coral patterns grow over the picture.
+- **Datamosh**: the wrong frames get dragged around by the right movement; the beat cleans it.
+- **Pixel Sort Waterfall**: bright pixels pour down the screen and pool at the bottom.
+- **Colour Time Split**: red, green and blue run at different moments.
+- **Inkblot**: the picture folds into a mirrored Rorschach blot that keeps changing.
+- **Strobe Sculpture**: people leave rising, glowing statues of themselves on the beat.
 - **Soundstage**: sounds light up what's closest and roll back through the scene.
 
 ## Making one
