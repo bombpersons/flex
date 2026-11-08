@@ -13,6 +13,8 @@ Flex comes with two to start from, in [`effects`](effects):
 - **Melt**: a turning kaleidoscope with glowing trails that change colour; beats kick it.
 - **Dream**: a DeepDream-like feedback loop where edges curl into tendrils, bright
   patches blossom and details sprout texture.
+- **Depth**: uses a neural network's guess at how far away everything is, for rainbow
+  contours rippling through the scene, or fog.
 
 ## Making one
 
@@ -62,6 +64,8 @@ don't declare them yourself:
 | `float u_level`, `u_bass`, `u_mid`, `u_treble` | how loud the sound is overall, below 150 Hz, 150 Hz–2 kHz and above 2 kHz (0–1, with `audio = true`) |
 | `float u_beat` | 1 on a beat (a jump in the bass), fading to 0 in about half a second |
 | `sampler2D u_spectrum` | the sound's spectrum: x is frequency (30 Hz to 11 kHz, log-spaced, 64 bands), y is age (0 is now, 1 is about two seconds ago); values 0–1 in `.r` |
+| `float depth_at(vec2 uv)` | a function: how near that point of the screen is, from 0 (far) to 1 (near) (with `depth = true`; 0 until the first depth map arrives) |
+| `sampler2D u_depth`, `float u_has_depth` | the depth map itself, covering the picture rather than the screen, and 1 once there is one |
 
 `uv` and `u_video_rect` run from 0 to 1, starting at the bottom left. Effects cover the
 whole screen, black bars included, so they can draw into them.
@@ -77,6 +81,7 @@ name = "Wobble"                # shown in Settings; defaults to the file's name
 description = "Makes it wobble"
 feedback = true                # give the shader its own last frame (u_prev); default false
 audio = true                   # the sound uniforms; default false
+depth = true                   # how far away things are; default false
 scale = 1.0                    # work at this fraction of the screen's size (0.25–1), then
                                # scale up: lower is lighter on the GPU; default 1
 
@@ -106,6 +111,20 @@ explosions don't max everything out for long. It needs ffmpeg (next to Flex, or 
 `PATH`), and only works for files: YouTube and discs get silence (all zeros). Over a
 network share it doubles what's read from the file, so leave it off unless the effect
 uses it.
+
+### Depth
+
+With `depth = true`, Flex works out how far away everything in the picture is, using
+[Depth Anything V2 Small](https://github.com/DepthAnything/Depth-Anything-V2) (Apache-2.0)
+running on the GPU as compute shaders, built on the kernels from Maisy's
+[neurofield](https://github.com/bombpersons/neurofield). The first time an effect asks for
+it Flex downloads the model (99 MB) into its data folder.
+
+Depth is relative rather than in real distances, and is worked out about 20 times a
+second at 518 × 294, so it arrives a frame or two after the picture and is softer than it.
+It's smoothed over time so it doesn't flicker. It uses a fair bit of the GPU, so leave it
+off unless the effect uses it; the model is unloaded a little while after the last
+effect that wanted it. F2 and F3 show how long it's taking.
 
 ## Testing
 

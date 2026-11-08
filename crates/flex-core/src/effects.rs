@@ -26,6 +26,10 @@ pub struct Manifest {
     /// Give the shader the sound. Costs reading the file's audio a second time.
     #[serde(default)]
     pub audio: bool,
+    /// Give the shader depth (`u_depth`), from a neural network on the GPU. Costs GPU time
+    /// and a 99 MB download the first time.
+    #[serde(default)]
+    pub depth: bool,
     /// Size to work at, relative to the screen (0.25–1): lower is lighter on the GPU.
     #[serde(default = "full")]
     pub scale: f32,
@@ -39,7 +43,7 @@ fn full() -> f32 {
 
 impl Default for Manifest {
     fn default() -> Self {
-        Self { name: String::new(), description: String::new(), feedback: false, audio: false, scale: 1.0, settings: Vec::new() }
+        Self { name: String::new(), description: String::new(), feedback: false, audio: false, depth: false, scale: 1.0, settings: Vec::new() }
     }
 }
 
@@ -120,6 +124,7 @@ pub struct ActiveEffect {
     pub shader: PathBuf,
     pub feedback: bool,
     pub audio: bool,
+    pub depth: bool,
     pub scale: f32,
     /// `s_<key>` = number, bool (0/1) or choice (its index).
     pub uniforms: Vec<(String, f32)>,
@@ -241,6 +246,7 @@ impl Effects {
             shader: e.shader.clone(),
             feedback: e.manifest.feedback,
             audio: e.manifest.audio,
+            depth: e.manifest.depth,
             scale: if scale.is_finite() { scale.clamp(0.25, 1.0) } else { 1.0 },
             uniforms,
         })

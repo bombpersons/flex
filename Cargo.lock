@@ -1306,6 +1306,7 @@ dependencies = [
  "env_logger",
  "evdev",
  "flex-core",
+ "flex-depth",
  "flex-plugin",
  "flex-web",
  "image",

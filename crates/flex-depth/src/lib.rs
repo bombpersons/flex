@@ -49,6 +49,10 @@ const B_MEM: u32 = 16;
 /// Bytes per uniform slot (wgpu's minimum dynamic-offset alignment).
 const SLOT: u64 = 256;
 const MAX_OPS: usize = 1024;
+/// Dispatches per submission. Run as one the network holds the GPU for tens of milliseconds
+/// and whatever else is drawing (the video!) waits behind it; split up, and waiting for each
+/// part, other work gets in between.
+const OPS_PER_SUBMIT: usize = 8;
 
 /// One dispatch's sizes and offsets (in floats); see depth.wgsl.
 #[repr(C)]
@@ -818,19 +822,23 @@ impl Depth {
             }
         }
         self.queue.write_buffer(&self.mem, self.s.patches as u64 * 4, bytemuck::cast_slice(&patches));
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = enc.begin_compute_pass(&Default::default());
-            for (i, (kernel, _, g)) in self.ops.list.iter().enumerate() {
-                if g.contains(&0) {
-                    continue;
+        for (part, ops) in self.ops.list.chunks(OPS_PER_SUBMIT).enumerate() {
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                for (i, (kernel, _, g)) in ops.iter().enumerate() {
+                    if g.contains(&0) {
+                        continue;
+                    }
+                    pass.set_pipeline(&self.pipelines[*kernel as usize]);
+                    let slot = (part * OPS_PER_SUBMIT + i) as u64 * SLOT;
+                    pass.set_bind_group(0, &self.bind, &[slot as u32]);
+                    pass.dispatch_workgroups(g[0], g[1], g[2]);
                 }
-                pass.set_pipeline(&self.pipelines[*kernel as usize]);
-                pass.set_bind_group(0, &self.bind, &[(i as u64 * SLOT) as u32]);
-                pass.dispatch_workgroups(g[0], g[1], g[2]);
             }
+            self.queue.submit([enc.finish()]);
+            self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{e}"))?;
         }
-        self.queue.submit([enc.finish()]);
         Ok(())
     }
 

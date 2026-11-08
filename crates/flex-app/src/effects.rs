@@ -55,6 +55,7 @@ pub struct Renderer {
     vao: Option<glow::VertexArray>,
     /// `u_spectrum`: BANDS × HISTORY.
     spectrum: Option<glow::Texture>,
+    depth: DepthGl,
     copy: Option<glow::Program>,
     /// The effect's program; `None` if it didn't compile.
     program: Option<glow::Program>,
@@ -79,6 +80,8 @@ pub struct Frame {
     pub video_time: f32,
     /// The sound, when the effect asked for it and there is some.
     pub audio: Option<Arc<Features>>,
+    /// The depth worker, when the effect asked for depth.
+    pub depth: Option<crate::depth::Link>,
 }
 
 /// The player's side: a smooth playback clock, and the sound for effects that want it.
@@ -204,6 +207,10 @@ pub fn window(ctx: &egui::Context, open: &mut bool, sh: &mut Shared, frame: Opti
                 }
             }
 
+            if let Some(depth) = frame.and_then(|f| f.depth.as_ref()) {
+                ui.separator();
+                ui.label(format!("Depth: {}", depth.status().describe()));
+            }
             if let Some(a) = frame.and_then(|f| f.audio.as_deref()) {
                 ui.separator();
                 ui.label("Sound");
@@ -306,6 +313,13 @@ uniform float u_mid;
 uniform float u_treble;
 uniform float u_beat;
 uniform sampler2D u_spectrum;
+uniform sampler2D u_depth;
+uniform float u_has_depth;
+// Depth at a point on screen, from 0 (far) to 1 (near); 0 until there is some.
+float depth_at(vec2 uv) {
+    vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
+    return texture(u_depth, p).r * u_has_depth;
+}
 ";
 
 /// The effect's fragment shader: Flex's header, the plugin's file (which defines
@@ -409,6 +423,10 @@ impl Renderer {
             let Some(o) = &self.objects else { return false };
 
             render(o.video.fbo.0.get() as i32, size.0, size.1);
+            let depth_texture = match &frame.depth {
+                Some(link) => self.depth.update(gl, link, o.video.fbo, size, rect, frame.video_time),
+                None => None,
+            };
 
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
@@ -450,6 +468,10 @@ impl Renderer {
                 }
                 gl.uniform_1_i32(at("u_spectrum").as_ref(), 2);
             }
+            gl.active_texture(glow::TEXTURE3);
+            gl.bind_texture(glow::TEXTURE_2D, depth_texture);
+            gl.uniform_1_i32(at("u_depth").as_ref(), 3);
+            gl.uniform_1_f32(at("u_has_depth").as_ref(), if depth_texture.is_some() && self.depth.serial > 0 { 1.0 } else { 0.0 });
             for (name, value) in &effect.uniforms {
                 gl.uniform_1_f32(at(name).as_ref(), *value);
             }
@@ -470,8 +492,10 @@ impl Renderer {
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
             gl.bind_texture(glow::TEXTURE_2D, None);
-            gl.active_texture(glow::TEXTURE2);
-            gl.bind_texture(glow::TEXTURE_2D, None);
+            for unit in [glow::TEXTURE2, glow::TEXTURE3] {
+                gl.active_texture(unit);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+            }
             gl.active_texture(glow::TEXTURE0);
             gl.bind_vertex_array(None);
             gl.use_program(None);
@@ -499,6 +523,7 @@ impl Renderer {
             if let Some(t) = self.spectrum.take() {
                 gl.delete_texture(t);
             }
+            self.depth.release(gl);
             if let Some(vao) = self.vao.take() {
                 gl.delete_vertex_array(vao);
             }
@@ -662,6 +687,148 @@ unsafe fn create_target(gl: &glow::Context, (w, h): (i32, i32), formats: &[(u32,
             gl.delete_texture(texture);
         }
         Err("framebuffers incomplete".into())
+    }
+}
+
+/// A GL fence, only touched on the GL thread (the renderer sits in a Mutex shared with the
+/// UI thread, which only reads its status).
+#[derive(Clone, Copy)]
+struct Fence(glow::Fence);
+
+unsafe impl Send for Fence {}
+
+struct DepthObjects {
+    /// The picture shrunk to the model's size, and a buffer to read it back through.
+    capture: Target,
+    pbo: glow::Buffer,
+    /// `u_depth`.
+    texture: glow::Texture,
+}
+
+/// Small frames read back for the depth worker (a frame late, so the CPU never waits for
+/// the GPU), and the depth maps it sends back as a texture.
+#[derive(Default)]
+struct DepthGl {
+    gl: Option<DepthObjects>,
+    failed: bool,
+    pending: Option<Fence>,
+    /// The video time of the last frame sent, so a paused frame isn't sent again and again.
+    last_time: Option<f32>,
+    /// The depth map in the texture.
+    serial: u64,
+}
+
+impl DepthGl {
+    /// Picks up a frame read back last time and hands it over, uploads a new depth map, and
+    /// reads back this frame if the worker's free. Returns the depth texture.
+    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::depth::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32) -> Option<glow::Texture> {
+        use crate::depth::{HEIGHT, WIDTH};
+        unsafe {
+            if self.failed {
+                return None;
+            }
+            if self.gl.is_none() {
+                match create_depth(gl) {
+                    Ok(o) => self.gl = Some(o),
+                    Err(e) => {
+                        log::warn!("depth: {e}");
+                        self.failed = true;
+                        return None;
+                    }
+                }
+            }
+            let o = self.gl.as_ref()?;
+            let bytes = WIDTH * HEIGHT * 4;
+            if let Some(Fence(fence)) = self.pending {
+                match gl.client_wait_sync(fence, 0, 0) {
+                    glow::TIMEOUT_EXPIRED => {}
+                    status => {
+                        gl.delete_sync(fence);
+                        self.pending = None;
+                        if status != glow::WAIT_FAILED {
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(o.pbo));
+                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
+                            if !ptr.is_null() {
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec());
+                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                            }
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                        }
+                    }
+                }
+            }
+            if let Some(map) = link.latest().filter(|m| m.serial != self.serial) {
+                gl.bind_texture(glow::TEXTURE_2D, Some(o.texture));
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                let data: &[u8] = std::slice::from_raw_parts(map.values.as_ptr().cast(), map.values.len() * 4);
+                let (w, h) = (WIDTH as i32, HEIGHT as i32);
+                gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(data)));
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                self.serial = map.serial;
+            }
+            if self.pending.is_none() && link.ready_for_frame() && self.last_time != Some(time) {
+                self.last_time = Some(time);
+                // Just the picture, without black bars.
+                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
+                let (x1, y1) = ((rect[2] * size.0 as f32) as i32, (rect[3] * size.1 as f32) as i32);
+                gl.disable(glow::SCISSOR_TEST);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(o.capture.fbo));
+                gl.blit_framebuffer(x0, y0, x1.max(x0 + 1), y1.max(y0 + 1), 0, 0, WIDTH as i32, HEIGHT as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(o.capture.fbo));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(o.pbo));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+                gl.read_pixels(0, 0, WIDTH as i32, HEIGHT as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+                    self.pending = Some(Fence(fence));
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+            Some(o.texture)
+        }
+    }
+
+    unsafe fn release(&mut self, gl: &glow::Context) {
+        unsafe {
+            if let Some(Fence(fence)) = self.pending.take() {
+                gl.delete_sync(fence);
+            }
+            if let Some(o) = self.gl.take() {
+                gl.delete_framebuffer(o.capture.fbo);
+                gl.delete_texture(o.capture.texture);
+                gl.delete_buffer(o.pbo);
+                gl.delete_texture(o.texture);
+            }
+            self.serial = 0;
+            self.last_time = None;
+        }
+    }
+}
+
+unsafe fn create_depth(gl: &glow::Context) -> Result<DepthObjects, String> {
+    use crate::depth::{HEIGHT, WIDTH};
+    unsafe {
+        let size = (WIDTH as i32, HEIGHT as i32);
+        let capture = create_target(gl, size, &[(glow::RGBA8, glow::UNSIGNED_BYTE)])?;
+        let pbo = gl.create_buffer()?;
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
+        gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (WIDTH * HEIGHT * 4) as i32, glow::STREAM_READ);
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        let zeros = vec![0u8; WIDTH * HEIGHT * 4];
+        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R16F as i32, size.0, size.1, 0, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(&zeros)));
+        for (param, value) in [
+            (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+            (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
+        }
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        Ok(DepthObjects { capture, pbo, texture })
     }
 }
 

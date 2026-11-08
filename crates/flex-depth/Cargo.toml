@@ -4,6 +4,7 @@ description = "Depth Anything V2 Small as wgpu compute shaders, for Flex's video
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"

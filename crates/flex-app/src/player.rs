@@ -466,6 +466,9 @@ impl Player {
                 None if e.audio => lines.push("Effect sound: none (not a local file, or no ffmpeg)".into()),
                 None => {}
             }
+            if let Some(depth) = &frame.depth {
+                lines.push(format!("Effect depth: {}", depth.status().describe()));
+            }
         }
         if let Some(light) = light {
             let [r, g, b] = light.zones[0];
@@ -661,7 +664,11 @@ impl Player {
         let frame = match &effect {
             Some(effect) => {
                 let (video_time, audio) = self.effect_inputs.tick(&self.mpv, &self.req.path, effect);
-                Some(crate::effects::Frame { effect: effect.clone(), rect: [0.0, 0.0, 1.0, 1.0], video_time, audio })
+                let depth = effect.depth.then(|| {
+                    sh.depth.wanted();
+                    sh.depth.clone()
+                });
+                Some(crate::effects::Frame { effect: effect.clone(), rect: [0.0, 0.0, 1.0, 1.0], video_time, audio, depth })
             }
             None => {
                 self.effect_inputs = Default::default();

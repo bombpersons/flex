@@ -339,6 +339,8 @@ pub struct Shared {
     pub ambient: crate::ambient::Ambient,
     /// Video effects found on disk, and which one is on.
     pub effects: flex_core::effects::Effects,
+    /// Depth for effects that ask for it (runs only while one does).
+    pub depth: crate::depth::Link,
     /// The effect's GL side, used in the player's paint callback.
     pub effect_renderer: std::sync::Arc<std::sync::Mutex<crate::effects::Renderer>>,
     /// The last playback state sent to plugins.
@@ -397,6 +399,7 @@ impl Shared {
             ambient,
             effects,
             effect_renderer: Default::default(),
+            depth: Default::default(),
             playback_sent: None,
             playback_last: None,
             awake: Default::default(),
