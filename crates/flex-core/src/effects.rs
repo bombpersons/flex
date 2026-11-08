@@ -197,8 +197,18 @@ impl Effects {
     }
 
     pub fn set_setting(&mut self, id: &str, key: &str, value: serde_json::Value, db: &Db) {
-        let settings = self.settings.entry(id.to_owned()).or_default();
-        settings.insert(key.to_owned(), value);
+        self.set_value(id, key, value);
+        self.save(id, db);
+    }
+
+    /// Changes a setting without saving it yet (e.g. while a slider is dragged).
+    pub fn set_value(&mut self, id: &str, key: &str, value: serde_json::Value) {
+        self.settings.entry(id.to_owned()).or_default().insert(key.to_owned(), value);
+    }
+
+    /// Saves an effect's settings.
+    pub fn save(&self, id: &str, db: &Db) {
+        let Some(settings) = self.settings.get(id) else { return };
         let json = serde_json::Value::Object(settings.clone()).to_string();
         if let Err(e) = db.set_setting(&settings_key(id), &json) {
             log::warn!("saving video effect settings: {e:#}");

@@ -113,5 +113,8 @@ uses it.
   changes. If it doesn't compile, the video plays without the effect, Settings → Picture
   → Video effects shows the first error, and the whole compiler output goes to Flex's
   log (Settings → "Open logs folder").
+- F3 while a video plays opens a window for choosing the effect and changing its
+  settings with sliders while you watch (plus Anime4K and SVP), with meters for the
+  sound levels. Changes are kept, the same as in Settings.
 - F2 shows which effect is on, the time it's given, and the sound levels.
 - `flex --windowed some-video.mkv` starts Flex straight into a video.

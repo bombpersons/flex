@@ -3,7 +3,8 @@
 //! OK / Play-Pause: pause/play · Left/Right: seek (hold to go faster) · 0–9: jump to
 //! 0%–90% of the way through · Up: subtitles · Down: audio · Hold OK: next video effect ·
 //! Back: hide the OSD, or stop if it's already hidden · Stop: stop.
-//! F2: playback stats (dropped frames, decoder, refresh rate).
+//! F2: playback stats (dropped frames, decoder, refresh rate). F3: the video effects
+//! window (choose an effect, change its settings, Anime4K and SVP, while it plays).
 //! Mouse: moving it shows the OSD; click or drag the seek bar to seek.
 //!
 //! The subtitle track chosen with Up is remembered (by name and language, or "off") and
@@ -90,6 +91,8 @@ pub struct Player {
     /// Display refresh rate last passed to mpv.
     display_fps: Option<f64>,
     show_stats: bool,
+    /// F3: the video effects window.
+    show_effects_window: bool,
     /// Where the OSD panel was last drawn, if it's showing (clicks there don't pause).
     osd_panel: Option<Rect>,
     /// While the seek bar is held: the position under the mouse, and when it last seeked.
@@ -160,6 +163,7 @@ impl Player {
             up_held: None,
             display_fps: None,
             show_stats: false,
+            show_effects_window: false,
             osd_panel: None,
             drag: None,
             youtube,
@@ -628,6 +632,9 @@ impl Player {
         if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
             self.show_stats = !self.show_stats;
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
+            self.show_effects_window = !self.show_effects_window;
+        }
         if self.loaded {
             self.duration = self.mpv.get_f64("duration").or(self.duration);
             if now - self.last_save >= SAVE_EVERY_SECS {
@@ -746,6 +753,14 @@ impl Player {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         } else {
             self.osd_panel = None;
+        }
+        if self.show_effects_window {
+            let mut open = true;
+            if let Some(new) = crate::effects::window(&ctx, &mut open, sh, frame.as_ref(), self.picture) {
+                self.picture.apply_live(&new, &self.mpv);
+                self.picture = new;
+            }
+            self.show_effects_window = open;
         }
         if let Some((track, until)) = self.message {
             if now < until {

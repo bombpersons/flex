@@ -10,12 +10,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use eframe::egui;
 use eframe::egui_glow;
 use eframe::glow::{self, HasContext};
 use flex_core::audio::{self, Analyser, Features, Tap};
 use flex_core::effects::ActiveEffect;
+use flex_core::plugins::{SettingKind, SettingSpec};
+use flex_plugin::serde_json;
 
 use crate::mpv::Mpv;
+use crate::picture::{Picture, Upscale};
+use crate::shared::Shared;
 
 /// How often the shader file is checked for changes.
 const RECHECK: Duration = Duration::from_millis(500);
@@ -129,6 +134,160 @@ impl Inputs {
         let analyser = self.analyser.get_or_insert_with(Analyser::new);
         let features = analyser.update(have.then_some(self.window.as_slice()), self.clock, dt as f32);
         (self.clock as f32, Some(Arc::new(features.clone())))
+    }
+}
+
+/// F3 in the player: a floating window for choosing the effect and changing its
+/// settings (and Anime4K and SVP) while the video plays. Changes are kept, as in
+/// Settings. Returns this video's new picture options when Anime4K or SVP changed.
+pub fn window(ctx: &egui::Context, open: &mut bool, sh: &mut Shared, frame: Option<&Frame>, picture: Picture) -> Option<Picture> {
+    let mut new_picture = None;
+    let right = ctx.content_rect().right();
+    egui::Window::new("Video effects")
+        .open(open)
+        .default_pos(egui::pos2(right - 560.0, 60.0))
+        .default_width(520.0)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.spacing_mut().slider_width = 260.0;
+            ui.weak("F3 to hide · changes are kept");
+
+            // Which effect.
+            let names: Vec<(String, String)> = sh.effects.list().iter().map(|e| (e.id.clone(), e.manifest.name.clone())).collect();
+            let current = sh.effects.chosen().map(|e| e.id.clone());
+            let current_name = sh.effects.chosen().map_or("Off".to_owned(), |e| e.manifest.name.clone());
+            let mut pick: Option<Option<String>> = None;
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("effect").selected_text(current_name).show_ui(ui, |ui| {
+                    if ui.selectable_label(current.is_none(), "Off").clicked() {
+                        pick = Some(None);
+                    }
+                    for (id, name) in &names {
+                        if ui.selectable_label(current.as_deref() == Some(id), name).clicked() {
+                            pick = Some(Some(id.clone()));
+                        }
+                    }
+                });
+                if ui.button("Look for new").on_hover_text("New or removed files in the effects folders").clicked() {
+                    sh.refresh_effects();
+                }
+            });
+            if let Some(pick) = pick {
+                let (effects, db) = sh.effects_mut();
+                effects.choose(pick.as_deref(), db);
+            }
+
+            if let Some(effect) = sh.effects.chosen().cloned() {
+                let warn = egui::Color32::from_rgb(255, 140, 110);
+                if let Some((false, error)) = &sh.effects.status {
+                    ui.colored_label(warn, error);
+                }
+                if let Some(problem) = &effect.problem {
+                    ui.colored_label(warn, problem);
+                }
+                if !effect.manifest.description.is_empty() {
+                    ui.weak(&effect.manifest.description);
+                }
+                let specs: Vec<SettingSpec> = effect.settings().cloned().collect();
+                egui::Grid::new("effect-settings").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                    for spec in &specs {
+                        setting(ui, sh, &effect.id, spec);
+                        ui.end_row();
+                    }
+                });
+                if !specs.is_empty() && ui.button("Back to the defaults").clicked() {
+                    let (effects, db) = sh.effects_mut();
+                    for spec in specs.iter().filter(|s| s.default.is_some()) {
+                        effects.set_value(&effect.id, &spec.key, spec.default.clone().unwrap_or_default());
+                    }
+                    effects.save(&effect.id, db);
+                }
+            }
+
+            if let Some(a) = frame.and_then(|f| f.audio.as_deref()) {
+                ui.separator();
+                ui.label("Sound");
+                for (name, v) in [("level", a.level), ("bass", a.bass), ("mid", a.mid), ("treble", a.treble), ("beat", a.beat)] {
+                    let height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+                    ui.add(egui::ProgressBar::new(v.clamp(0.0, 1.0)).desired_height(height).text(format!("{name} {v:.2}")));
+                }
+            }
+
+            ui.separator();
+            ui.label("Picture (as in Settings → Picture)");
+            let upscale = picture.upscale.unwrap_or(Upscale::Off);
+            let mut chosen = upscale;
+            ui.horizontal(|ui| {
+                ui.label("Anime4K");
+                egui::ComboBox::from_id_salt("anime4k").selected_text(upscale.label()).show_ui(ui, |ui| {
+                    for u in Upscale::ALL {
+                        ui.selectable_value(&mut chosen, u, u.label());
+                    }
+                });
+            });
+            if chosen != upscale {
+                sh.set_picture_upscale(chosen);
+                new_picture = Some(Picture { upscale: (chosen != Upscale::Off).then_some(chosen), ..picture });
+            }
+            let mut smooth = picture.smooth;
+            if ui.checkbox(&mut smooth, "60fps smoothing (SVP)").changed() {
+                sh.set_picture_smooth(smooth);
+                let base = new_picture.unwrap_or(picture);
+                new_picture = Some(Picture { smooth: smooth && sh.picture_smooth(), ..base });
+            }
+        });
+    new_picture
+}
+
+/// One setting's label and control. Sliders save when let go.
+fn setting(ui: &mut egui::Ui, sh: &mut Shared, id: &str, spec: &SettingSpec) {
+    let label = ui.label(&spec.label);
+    if !spec.detail.is_empty() {
+        label.on_hover_text(&spec.detail);
+    }
+    let value = sh.effects.value(id, &spec.key).cloned();
+    let (effects, db) = sh.effects_mut();
+    match spec.kind {
+        SettingKind::Number => {
+            let (min, max) = (spec.min.unwrap_or(0.0), spec.max.unwrap_or(100.0));
+            let mut v = value.as_ref().and_then(serde_json::Value::as_f64).unwrap_or(min);
+            let mut slider = egui::Slider::new(&mut v, min..=max).suffix(&spec.unit);
+            if let Some(step) = spec.step.filter(|s| *s > 0.0) {
+                slider = slider.step_by(step);
+            }
+            let r = ui.add(slider);
+            if r.changed() {
+                let v = if v.fract() == 0.0 { serde_json::json!(v as i64) } else { serde_json::json!(v) };
+                effects.set_value(id, &spec.key, v);
+            }
+            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                effects.save(id, db);
+            }
+        }
+        SettingKind::Bool => {
+            let mut on = value.as_ref().and_then(serde_json::Value::as_bool).unwrap_or(false);
+            if ui.checkbox(&mut on, "").changed() {
+                effects.set_setting(id, &spec.key, serde_json::json!(on), db);
+            }
+        }
+        SettingKind::Choice => {
+            let current = value.as_ref().and_then(serde_json::Value::as_str).unwrap_or("").to_owned();
+            let shown = spec.options.iter().find(|o| o.id == current).map_or(current.clone(), |o| o.label.clone());
+            let mut pick = None;
+            egui::ComboBox::from_id_salt(("effect-choice", &spec.key)).selected_text(shown).show_ui(ui, |ui| {
+                for o in &spec.options {
+                    if ui.selectable_label(o.id == current, &o.label).clicked() {
+                        pick = Some(o.id.clone());
+                    }
+                }
+            });
+            if let Some(pick) = pick {
+                effects.set_setting(id, &spec.key, serde_json::json!(pick), db);
+            }
+        }
+        SettingKind::Text | SettingKind::Button => {
+            ui.label("");
+        }
     }
 }
 
