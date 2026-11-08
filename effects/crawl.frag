@@ -1,0 +1,74 @@
+// Wallpaper Crawl: the walls flow along a moving noise field, and a grid of eyes hides in them.
+// Each eye opens now and then and looks at the first face it can find.
+
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float noise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+float fbm(vec2 p) {
+    float sum = 0.0, amount = 0.5;
+    for (int i = 0; i < 5; i++) {
+        sum += amount * noise(p);
+        p = p * 2.03 + vec2(17.1, 9.2);
+        amount *= 0.5;
+    }
+    return sum;
+}
+
+vec3 hue(float t) {
+    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
+}
+
+// An eye at `q` (roughly -1 to 1 inside it), looking along `look`, opened by `open`.
+vec4 eye(vec2 q, vec2 look, float open) {
+    float lid = 0.05 + 0.5 * open;
+    float top = lid * (1.0 - q.x * q.x);
+    float shape = (1.0 - smoothstep(-0.03, 0.03, abs(q.y) - top)) * step(abs(q.x), 1.0);
+    if (shape <= 0.0) return vec4(0.0);
+    vec2 iris_at = look * vec2(0.3, 0.12);
+    float d = length(q - iris_at);
+    vec3 c = vec3(0.92, 0.88, 0.8) * (0.75 + 0.25 * smoothstep(0.0, top, top - abs(q.y)));
+    c = mix(c, vec3(0.5, 0.25, 0.06) + 0.25 * sin(atan(q.y - iris_at.y, q.x - iris_at.x) * 18.0), (1.0 - smoothstep(0.3, 0.34, d)));
+    c = mix(c, vec3(0.01), (1.0 - smoothstep(0.12, 0.15, d)));
+    c += vec3(0.9) * (1.0 - smoothstep(0.03, 0.05, length(q - iris_at - vec2(0.07, 0.07))));
+    return vec4(c, shape);
+}
+
+vec4 effect(vec2 uv) {
+    vec3 c = texture(u_video, uv).rgb;
+    float wall = smoothstep(0.35, 0.7, wall_at(uv));
+    if (wall <= 0.0) return vec4(c, 1.0);
+    vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
+    vec2 p = uv * aspect;
+    float t = u_video_time;
+    vec2 flow = vec2(fbm(p * 4.0 + vec2(t * 0.25, 0.0)), fbm(p * 4.0 + vec2(5.2, -t * 0.2))) - 0.47;
+    vec2 from = uv + flow * 0.06 * s_crawl / 100.0 * (1.0 + u_bass);
+    vec3 moved = texture(u_video, clamp(from, u_video_rect.xy, u_video_rect.zw)).rgb;
+    moved = mix(moved, moved * hue(flow.x * 2.0 + t * 0.05) * 1.8, s_colour / 100.0);
+
+    float size = 0.14;
+    vec2 cell = floor(p / size);
+    float chosen = hash(cell + 11.0);
+    if (chosen < s_eyes / 100.0) {
+        float rhythm = sin(t * (0.4 + 0.5 * hash(cell)) + 30.0 * hash(cell + 2.0));
+        float open = smoothstep(0.1, 0.6, rhythm);
+        // A blink now and then.
+        open *= 1.0 - smoothstep(0.96, 1.0, sin(t * 2.3 + 9.0 * hash(cell + 4.0)));
+        if (open > 0.0) {
+            vec2 centre = (cell + 0.5) * size;
+            vec2 target = u_face_count > 0 ? face_point(0, 2) * aspect : vec2(aspect.x * 0.5 + 0.3 * sin(t * 0.7), 0.4);
+            vec2 q = (p - centre) / (size * 0.42) * vec2(1.0, 1.4);
+            vec4 e = eye(q, normalize(target - centre), open);
+            moved = mix(moved, e.rgb, e.a);
+        }
+    }
+    return vec4(mix(c, moved, wall), 1.0);
+}

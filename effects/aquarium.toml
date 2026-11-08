@@ -1,0 +1,46 @@
+name = "Aquarium"
+description = "The room floods from the bottom up, with rippling light and bubbles, and far things vanish into the blue."
+depth = true
+audio = true
+
+[[settings]]
+key = "level"
+label = "Water level"
+type = "number"
+detail = "How high it comes"
+min = 20
+max = 120
+step = 5
+unit = "%"
+default = 85
+
+[[settings]]
+key = "rise"
+label = "Time to fill"
+type = "number"
+min = 0
+max = 60
+step = 5
+unit = " s"
+default = 15
+
+[[settings]]
+key = "murk"
+label = "Murk"
+type = "number"
+detail = "How much the distance fades"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 55
+
+[[settings]]
+key = "light"
+label = "Rippling light"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 60

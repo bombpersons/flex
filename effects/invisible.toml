@@ -1,0 +1,26 @@
+name = "Invisible Man"
+description = "People vanish, leaving only a shimmer in the air, and the room is filled in from what was seen behind them."
+segment = true
+feedback = true
+
+[[settings]]
+key = "shimmer"
+label = "Shimmer"
+type = "number"
+detail = "How much the air moves where someone is standing"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 50
+
+[[settings]]
+key = "memory"
+label = "Memory"
+type = "number"
+detail = "How long the room behind someone is remembered before guessing"
+min = 2
+max = 30
+step = 1
+unit = " s"
+default = 10

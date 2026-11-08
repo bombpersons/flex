@@ -1,0 +1,25 @@
+name = "Colour Time Split"
+description = "Red, green and blue run at different moments, so anything that moves turns into a rainbow."
+feedback = true
+
+[[settings]]
+key = "lag"
+label = "Lag"
+type = "number"
+detail = "How far behind green and blue run"
+min = 10
+max = 100
+step = 5
+unit = "%"
+default = 80
+
+[[settings]]
+key = "order"
+label = "First colour"
+type = "choice"
+default = "red"
+options = [
+    { id = "red", label = "Red" },
+    { id = "green", label = "Green" },
+    { id = "blue", label = "Blue" },
+]

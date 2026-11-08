@@ -1,0 +1,66 @@
+// Night of the Living: drains people to grey-green with veins under the skin, blacks out their
+// eyes and mouths, and grades everything else like an old horror film. The flicker stays gentle.
+
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float noise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+float fbm(vec2 p) {
+    float sum = 0.0, amount = 0.5;
+    for (int i = 0; i < 5; i++) {
+        sum += amount * noise(p);
+        p = p * 2.03 + vec2(17.1, 9.2);
+        amount *= 0.5;
+    }
+    return sum;
+}
+
+vec4 effect(vec2 uv) {
+    vec3 c = texture(u_video, uv).rgb;
+    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(c, 1.0);
+    vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
+    vec2 p = uv * aspect;
+    float t = u_time;
+    float luma = dot(c, vec3(0.3, 0.59, 0.11));
+    float person = smoothstep(0.35, 0.7, person_at(uv));
+
+    vec3 world = mix(vec3(luma), c, 0.25) * vec3(0.72, 0.8, 1.0);
+    float ridge = abs(fbm(p * 22.0) - 0.5);
+    float veins = (1.0 - smoothstep(0.0, 0.03, ridge)) * s_rot / 100.0;
+    float blotch = fbm(p * 7.0 + 3.0);
+    vec3 skin = pow(luma, 1.25) * vec3(0.72, 0.9, 0.62) + vec3(0.03, 0.06, 0.02);
+    skin *= mix(1.0, 0.45 + 1.0 * blotch, s_rot / 100.0);
+    skin = mix(skin, vec3(0.1, 0.04, 0.12), veins * 0.75);
+    c = mix(world, skin, person * mix(0.5, 1.0, s_rot / 100.0));
+
+    for (int i = 0; i < u_face_count; i++) {
+        float seen = u_face_seen[i];
+        if (seen <= 0.0) continue;
+        vec2 right = face_point(i, 0) * aspect, left = face_point(i, 1) * aspect;
+        vec2 mouth = 0.5 * (face_point(i, 3) + face_point(i, 4)) * aspect;
+        float spread = max(length(left - right), 0.25 * (u_faces[i].w - u_faces[i].y));
+        for (int e = 0; e < 2; e++) {
+            vec2 eye = e == 0 ? right : left;
+            float d = length((p - eye) / vec2(1.0, 0.8)) / spread;
+            c = mix(c, vec3(0.0), (1.0 - smoothstep(0.18, 0.42, d)) * seen);
+            c += vec3(0.7, 0.75, 0.45) * (1.0 - smoothstep(0.02, 0.08, d)) * seen * 0.8;
+        }
+        float m = length((p - mouth) / vec2(1.2, 0.55)) / spread;
+        c = mix(c, vec3(0.02, 0.0, 0.0), (1.0 - smoothstep(0.3, 0.55, m)) * seen * 0.85);
+    }
+
+    float flick = noise(vec2(t * 9.0, 1.0)) * 0.6 + noise(vec2(t * 23.0, 4.0)) * 0.4;
+    c *= 1.0 - s_flicker / 100.0 * 0.45 * smoothstep(0.35, 0.8, flick);
+    vec2 off = uv - 0.5;
+    c *= 1.0 - dot(off, off) * 1.3;
+    c += (hash(uv * 311.0 + fract(t) * 91.0) - 0.5) * s_grain / 100.0 * 0.22;
+    return vec4(c, 1.0);
+}

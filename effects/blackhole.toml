@@ -1,0 +1,45 @@
+name = "Black Hole"
+description = "A black hole drifts through the room, bending the picture round itself and dragging the distance in first."
+depth = true
+audio = true
+
+[[settings]]
+key = "size"
+label = "Size"
+type = "number"
+min = 20
+max = 300
+step = 10
+unit = "%"
+default = 100
+
+[[settings]]
+key = "pull"
+label = "Pull"
+type = "number"
+min = 0
+max = 200
+step = 10
+unit = "%"
+default = 100
+
+[[settings]]
+key = "drift"
+label = "Drift"
+type = "number"
+min = 0
+max = 200
+step = 10
+unit = "%"
+default = 60
+
+[[settings]]
+key = "resist"
+label = "Near things resist"
+type = "number"
+detail = "How much less the things up close are bent"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 80

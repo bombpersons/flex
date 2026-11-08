@@ -1,0 +1,35 @@
+name = "Fractal Zoom"
+description = "An endless fall into the picture, diving through the faces in it, each window holding another."
+faces = true
+audio = true
+
+[[settings]]
+key = "speed"
+label = "Speed"
+type = "number"
+min = 10
+max = 300
+step = 10
+unit = "%"
+default = 100
+
+[[settings]]
+key = "window"
+label = "Window"
+type = "number"
+detail = "How big each picture inside the last one is"
+min = 20
+max = 70
+step = 5
+unit = "%"
+default = 45
+
+[[settings]]
+key = "hue"
+label = "Colour drift"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 30

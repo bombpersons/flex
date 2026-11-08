@@ -1,0 +1,44 @@
+name = "Silhouette Cosmos"
+description = "People become person-shaped windows into a drifting galaxy."
+segment = true
+audio = true
+
+[[settings]]
+key = "stars"
+label = "Stars"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 60
+
+[[settings]]
+key = "speed"
+label = "Drift"
+type = "number"
+min = 0
+max = 200
+step = 10
+unit = "%"
+default = 60
+
+[[settings]]
+key = "rim"
+label = "Glowing edge"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 60
+
+[[settings]]
+key = "react"
+label = "Reaction to sound"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 40
