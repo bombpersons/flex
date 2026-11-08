@@ -6,6 +6,7 @@
 //! another texture, which is copied to the screen. The shader file is checked for changes
 //! twice a second and reloaded, so it can be edited while a video plays.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use eframe::egui;
 use eframe::egui_glow;
 use eframe::glow::{self, HasContext};
-use flex_core::audio::{self, Analyser, Features, Tap};
+use flex_core::audio::{self, Analyser, Features, Levels};
 use flex_core::effects::ActiveEffect;
 use flex_core::plugins::{SettingKind, SettingSpec};
 use flex_plugin::serde_json;
@@ -91,15 +92,44 @@ pub struct Inputs {
     /// once per video frame).
     clock: f64,
     last: Option<Instant>,
-    tap: Option<Tap>,
+    /// The channels and layout mpv's audio filter was added for.
+    filter: Option<(usize, String)>,
+    /// The filter's last report as mpv gave it, to spot new ones.
+    metadata: Option<String>,
+    /// Reports waiting for their sound to be heard, and the latest one that has been.
+    waiting: VecDeque<(Instant, Levels)>,
+    levels: Option<Levels>,
     analyser: Option<Analyser>,
-    window: Vec<f32>,
-    no_ffmpeg: bool,
 }
 
 impl Inputs {
-    /// Call once per frame while an effect is on; `path` is the playing file.
-    pub fn tick(&mut self, mpv: &Mpv, path: &Path, effect: &ActiveEffect) -> (f32, Option<Arc<Features>>) {
+    /// Adds mpv's audio filter, or replaces it if the sound's channels changed.
+    fn keep_filter(&mut self, mpv: &Mpv) {
+        let (Some(channels), Some(layout)) = (mpv.get_i64("audio-params/channel-count"), mpv.get_string("audio-params/channels")) else { return };
+        let wanted = (channels.max(1) as usize, layout);
+        if self.filter.as_ref() == Some(&wanted) {
+            return;
+        }
+        self.stop(mpv);
+        let filter = format!("@{}:lavfi=[{}]", audio::FILTER_LABEL, audio::filter_graph(wanted.0, &wanted.1));
+        if let Err(e) = mpv.command(&["af", "add", &filter]) {
+            log::warn!("video effects: no sound for effects: {e:#}");
+        }
+        self.filter = Some(wanted);
+    }
+
+    /// Takes mpv's audio filter out, when nothing wants the sound any more.
+    pub fn stop(&mut self, mpv: &Mpv) {
+        if self.filter.take().is_some() {
+            let _ = mpv.command(&["af", "remove", &format!("@{}", audio::FILTER_LABEL)]);
+        }
+        self.metadata = None;
+        self.waiting.clear();
+        self.levels = None;
+    }
+
+    /// Call once per frame while an effect is on.
+    pub fn tick(&mut self, mpv: &Mpv, effect: &ActiveEffect) -> (f32, Option<Arc<Features>>) {
         let now = Instant::now();
         let dt = self.last.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
         self.last = Some(now);
@@ -114,31 +144,32 @@ impl Inputs {
             None => {}
         }
 
-        if !effect.audio || !path.is_file() {
-            self.tap = None;
+        if !effect.audio {
+            self.stop(mpv);
             self.analyser = None;
             return (self.clock as f32, None);
         }
-        let stream = match mpv.get_flag("current-tracks/audio/external") {
-            Some(true) => None, // a separate audio file: fall back to the video's own
-            _ => mpv.get_i64("current-tracks/audio/ff-index"),
-        };
-        if self.tap.as_ref().is_none_or(|t| t.path() != path || t.stream() != stream) && !self.no_ffmpeg {
-            match flex_core::find_tool("ffmpeg") {
-                Some(ffmpeg) => self.tap = Some(Tap::new(&ffmpeg, path, stream)),
-                None => {
-                    log::warn!("video effects: no ffmpeg, so no sound for effects");
-                    self.no_ffmpeg = true;
+        self.keep_filter(mpv);
+        if let Some((channels, _)) = self.filter {
+            let metadata = mpv.get_string(&format!("af-metadata/{}", audio::FILTER_LABEL));
+            if metadata.is_some() && metadata != self.metadata {
+                if let Some(levels) = metadata.as_deref().and_then(|m| audio::read_levels(m, channels)) {
+                    self.waiting.push_back((now, levels));
                 }
+                self.metadata = metadata;
             }
         }
-        self.window.resize(audio::WINDOW, 0.0);
-        let have = self.tap.as_mut().is_some_and(|tap| tap.window(self.clock, &mut self.window));
+        while self.waiting.front().is_some_and(|(at, _)| now.duration_since(*at) >= HEARD_AFTER) {
+            self.levels = self.waiting.pop_front().map(|(_, levels)| levels);
+        }
         let analyser = self.analyser.get_or_insert_with(Analyser::new);
-        let features = analyser.update(have.then_some(self.window.as_slice()), self.clock, dt as f32);
+        let features = analyser.update(self.levels.as_ref(), self.clock, dt as f32);
         (self.clock as f32, Some(Arc::new(features.clone())))
     }
 }
+
+/// How long after mpv's audio filter sees some sound it comes out of the speakers.
+const HEARD_AFTER: Duration = Duration::from_millis(400);
 
 /// F3 in the player: a floating window for choosing the effect and changing its
 /// settings (and Anime4K and SVP) while the video plays. Changes are kept, as in

@@ -112,14 +112,13 @@ the shader gets the chosen option's position (0, 1, ...).
 
 ### Sound
 
-With `audio = true`, Flex reads the playing file's sound a second time with ffmpeg
-(libmpv can't share what it plays), just ahead of the playback position, so the levels
-follow the picture exactly, stop when paused and catch up after a seek. Levels are
-against the loudest sound of the last few seconds, so quiet scenes still move things and
-explosions don't max everything out for long. It needs ffmpeg (next to Flex, or on the
-`PATH`), and only works for files: YouTube and discs get silence (all zeros). Over a
-network share it doubles what's read from the file, so leave it off unless the effect
-uses it.
+With `audio = true`, a filter inside mpv measures how loud each of 32 frequency bands is, so
+it works for anything Flex can play, YouTube included, and nothing reads the file a second
+time. It reports about 5 to 10 times a second and values ease between reports, so sound
+moves things a little less sharply than the picture changes, and very short sounds can be
+missed. `u_spectrum` is stretched to its 64 bands from those 32. Levels are against the
+loudest sound of the last few seconds, so quiet scenes still move things and explosions
+don't max everything out for long.
 
 ### Depth
 

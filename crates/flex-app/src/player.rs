@@ -663,7 +663,7 @@ impl Player {
         let effects = sh.effect_renderer.clone();
         let frame = match &effect {
             Some(effect) => {
-                let (video_time, audio) = self.effect_inputs.tick(&self.mpv, &self.req.path, effect);
+                let (video_time, audio) = self.effect_inputs.tick(&self.mpv, effect);
                 let depth = effect.depth.then(|| {
                     sh.depth.wanted();
                     sh.depth.clone()
@@ -671,6 +671,7 @@ impl Player {
                 Some(crate::effects::Frame { effect: effect.clone(), rect: [0.0, 0.0, 1.0, 1.0], video_time, audio, depth })
             }
             None => {
+                self.effect_inputs.stop(&self.mpv);
                 self.effect_inputs = Default::default();
                 None
             }
