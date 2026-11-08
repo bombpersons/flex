@@ -360,6 +360,22 @@ float depth_at(vec2 uv) {
     vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
     return texture(u_depth, p).r * u_has_depth;
 }
+uniform sampler2D u_masks;
+uniform float u_has_masks;
+// How much of a point on screen is a person, a wall or sky, each from 0 to 1.
+vec4 masks_at(vec2 uv) {
+    vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
+    return texture(u_masks, p) * u_has_masks;
+}
+float person_at(vec2 uv) {
+    return masks_at(uv).r;
+}
+float wall_at(vec2 uv) {
+    return masks_at(uv).g;
+}
+float sky_at(vec2 uv) {
+    return masks_at(uv).b;
+}
 const int MAX_FACES = 8;
 uniform int u_face_count;
 // Each face: x0, y0, x1, y1 on screen. Its five points: right eye, left eye, nose, right and
@@ -484,17 +500,18 @@ impl Renderer {
 
             render(o.video.fbo.0.get() as i32, size.0, size.1);
             // With depth, the picture is held back to the frame depth has caught up with.
-            let (video_texture, depth_texture) = match &frame.depth {
+            let (video_texture, depth_texture, mask_texture) = match &frame.depth {
                 Some(link) => {
                     self.depth.update(gl, link, o.video.fbo, size, rect, frame.pts, frame.video_time);
                     self.held.push(gl, &o.video, size, frame.pts);
                     let (texture, pts) = self.held.pick(frame.video_time - self.depth.delay).unwrap_or((o.video.texture, frame.pts));
-                    (texture, self.depth.map_for(pts))
+                    let (depth, masks) = self.depth.map_for(pts);
+                    (texture, depth, masks)
                 }
                 None => {
                     self.held.free(gl);
                     self.depth.delay = 0.0;
-                    (o.video.texture, None)
+                    (o.video.texture, None, None)
                 }
             };
             let faces = match &frame.faces {
@@ -546,6 +563,10 @@ impl Renderer {
             gl.bind_texture(glow::TEXTURE_2D, depth_texture);
             gl.uniform_1_i32(at("u_depth").as_ref(), 3);
             gl.uniform_1_f32(at("u_has_depth").as_ref(), if depth_texture.is_some() && self.depth.serial > 0 { 1.0 } else { 0.0 });
+            gl.active_texture(glow::TEXTURE4);
+            gl.bind_texture(glow::TEXTURE_2D, mask_texture);
+            gl.uniform_1_i32(at("u_masks").as_ref(), 4);
+            gl.uniform_1_f32(at("u_has_masks").as_ref(), if mask_texture.is_some() && self.depth.has_masks { 1.0 } else { 0.0 });
             gl.uniform_1_i32(at("u_face_count").as_ref(), faces.count);
             gl.uniform_4_f32_slice(at("u_faces").as_ref(), &faces.boxes);
             gl.uniform_2_f32_slice(at("u_face_points").as_ref(), &faces.points);
@@ -570,7 +591,7 @@ impl Renderer {
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
             gl.bind_texture(glow::TEXTURE_2D, None);
-            for unit in [glow::TEXTURE2, glow::TEXTURE3] {
+            for unit in [glow::TEXTURE2, glow::TEXTURE3, glow::TEXTURE4] {
                 gl.active_texture(unit);
                 gl.bind_texture(glow::TEXTURE_2D, None);
             }
@@ -804,6 +825,8 @@ struct DepthObjects {
     pbo: glow::Buffer,
     /// The latest depth maps and the video frames they're of, for `u_depth`.
     maps: Vec<(glow::Texture, Option<f32>)>,
+    /// `u_masks`, each to go with the depth map in the same place in `maps`.
+    masks: Vec<glow::Texture>,
 }
 
 /// Depth maps kept, so a held-back frame can have the one made from it.
@@ -902,6 +925,8 @@ struct DepthGl {
     pending: Option<Fence>,
     /// The video time of the last frame sent, so a paused frame isn't sent again and again.
     last_time: Option<f32>,
+    /// Whether masks have arrived.
+    has_masks: bool,
     /// The newest depth map, and how many have arrived.
     serial: u64,
     arrived: u32,
@@ -916,10 +941,11 @@ struct DepthGl {
 }
 
 impl DepthGl {
-    /// The depth map made from the frame nearest `time`.
-    fn map_for(&self, time: f32) -> Option<glow::Texture> {
-        let maps = &self.gl.as_ref()?.maps;
-        maps.iter().filter_map(|(t, at)| at.map(|at| (*t, (at - time).abs()))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(t, _)| t).or(maps.first().map(|m| m.0))
+    /// The depth map and masks made from the frame nearest `time`.
+    fn map_for(&self, time: f32) -> (Option<glow::Texture>, Option<glow::Texture>) {
+        let Some(o) = self.gl.as_ref() else { return (None, None) };
+        let nearest = o.maps.iter().enumerate().filter_map(|(i, (_, at))| at.map(|at| (i, (at - time).abs()))).min_by(|a, b| a.1.total_cmp(&b.1)).map_or(0, |(i, _)| i);
+        (o.maps.get(nearest).map(|m| m.0), o.masks.get(nearest).copied())
     }
 
     /// Picks up a frame read back last time and hands it over, stores a new depth map, and
@@ -970,6 +996,11 @@ impl DepthGl {
                 let data: &[u8] = std::slice::from_raw_parts(map.values.as_ptr().cast(), map.values.len() * 4);
                 let (w, h) = (WIDTH as i32, HEIGHT as i32);
                 gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(data)));
+                if let Some(masks) = &map.masks {
+                    gl.bind_texture(glow::TEXTURE_2D, Some(o.masks[slot]));
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(masks)));
+                    self.has_masks = true;
+                }
                 gl.bind_texture(glow::TEXTURE_2D, None);
                 self.serial = map.serial;
                 o.maps[slot].1 = Some(map.time);
@@ -1018,7 +1049,11 @@ impl DepthGl {
                 for (texture, _) in o.maps {
                     gl.delete_texture(texture);
                 }
+                for texture in o.masks {
+                    gl.delete_texture(texture);
+                }
             }
+            self.has_masks = false;
             self.serial = 0;
             self.arrived = 0;
             self.next_map = 0;
@@ -1176,7 +1211,20 @@ unsafe fn create_depth(gl: &glow::Context) -> Result<DepthObjects, String> {
         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
         let zeros = vec![0u8; WIDTH * HEIGHT * 4];
         let mut maps = Vec::with_capacity(DEPTH_MAPS);
+        let mut masks = Vec::with_capacity(DEPTH_MAPS);
         for _ in 0..DEPTH_MAPS {
+            let mask = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(mask));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, size.0, size.1, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&zeros)));
+            for (param, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
+            }
+            masks.push(mask);
             let texture = gl.create_texture()?;
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R16F as i32, size.0, size.1, 0, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(&zeros)));
@@ -1191,7 +1239,7 @@ unsafe fn create_depth(gl: &glow::Context) -> Result<DepthObjects, String> {
             maps.push((texture, None));
         }
         gl.bind_texture(glow::TEXTURE_2D, None);
-        Ok(DepthObjects { capture, pbo, maps })
+        Ok(DepthObjects { capture, pbo, maps, masks })
     }
 }
 

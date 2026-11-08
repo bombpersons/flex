@@ -38,6 +38,10 @@ const FUSION: usize = 64;
 const HEAD: usize = 32;
 /// The position embedding's grid (518 / 14).
 const POS_GRID: usize = 37;
+/// The network that finds people, walls and sky (`tools/segment`), which runs on the depth
+/// model's features.
+const MASK_HEAD: &[u8] = include_bytes!("segment.safetensors");
+const MASK_CLASSES: usize = 4;
 /// What the softmax kernel has room for.
 const MAX_TOKENS: usize = 64 * 32;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
@@ -275,6 +279,18 @@ struct Block {
     fc2: Linear,
 }
 
+/// The layers of the network in `tools/segment`.
+struct MaskHead {
+    token9: Linear,
+    token12: Linear,
+    context: Conv,
+    mid: Conv,
+    fused: Linear,
+    fine1: Conv,
+    fine2: Conv,
+    out: Linear,
+}
+
 struct Fusion {
     res1: (Conv, Conv),
     res2: (Conv, Conv),
@@ -305,6 +321,15 @@ struct Layout {
     up: u32,
     h2: u32,
     out: u32,
+    token_sum: u32,
+    context: u32,
+    context_up: u32,
+    mid: u32,
+    mid_up: u32,
+    fine1: u32,
+    fine2: u32,
+    logits: u32,
+    masks: u32,
     end: u32,
 }
 
@@ -343,6 +368,29 @@ impl Ops {
             ..Default::default()
         };
         self.push(Kernel::Matmul, p, [groups(l.out, 32), groups(rows, 32), 1]);
+    }
+
+    /// Tokens [n][l.inp] at `a` through a 1x1 convolution, to channels-first [l.out][n] at `c`.
+    fn tokens_to_image(&mut self, a: u32, n: usize, l: Linear, c: u32, flags: u32) {
+        let p = Params {
+            m: n as u32,
+            k: l.inp as u32,
+            n: l.out as u32,
+            batch: 1,
+            a_off: a,
+            a_rs: l.inp as u32,
+            a_cs: 1,
+            b_off: l.w,
+            b_rs: l.out as u32,
+            b_cs: 1,
+            c_off: c,
+            c_rs: 1,
+            c_cs: n as u32,
+            bias_off: l.b,
+            flags,
+            ..Default::default()
+        };
+        self.push(Kernel::Matmul, p, [groups(l.out, 32), groups(n, 32), 1]);
     }
 
     /// A 1x1 convolution over channels-first [l.inp][pixels] at `a` to [l.out][pixels] at `c`.
@@ -486,18 +534,21 @@ pub struct Depth {
     s: Layout,
     /// The picture's size in patches (width, height).
     grid: (usize, usize),
+    /// Whether the masks are worked out too.
+    with_masks: bool,
     adapter: String,
 }
 
 impl Depth {
     /// Loads `model.safetensors` for pictures `grid` patches wide and high (each patch is
-    /// 14 pixels; 37 × 21 is 518 × 294).
-    pub fn load(weights: &Path, grid: (usize, usize)) -> Result<Self> {
+    /// 14 pixels; 37 × 21 is 518 × 294), and with `with_masks` the network that finds people,
+    /// walls and sky too.
+    pub fn load(weights: &Path, grid: (usize, usize), with_masks: bool) -> Result<Self> {
         let bytes = std::fs::read(weights).with_context(|| format!("reading {}", weights.display()))?;
-        Self::from_bytes(&bytes, grid)
+        Self::from_bytes(&bytes, grid, with_masks)
     }
 
-    pub fn from_bytes(bytes: &[u8], (gw, gh): (usize, usize)) -> Result<Self> {
+    pub fn from_bytes(bytes: &[u8], (gw, gh): (usize, usize), with_masks: bool) -> Result<Self> {
         if gw == 0 || gh == 0 {
             bail!("an empty picture");
         }
@@ -578,6 +629,21 @@ impl Depth {
         let head1 = conv(&mut up, &wt, "head.conv1")?;
         let head2 = conv(&mut up, &wt, "head.conv2")?;
         let head3 = linear(&mut up, &wt, "head.conv3", None)?;
+        let mask_head = if with_masks {
+            let wt = Weights { t: read_safetensors(MASK_HEAD)? };
+            Some(MaskHead {
+                token9: linear(&mut up, &wt, "token9", None)?,
+                token12: linear(&mut up, &wt, "token12", None)?,
+                context: conv(&mut up, &wt, "context")?,
+                mid: conv(&mut up, &wt, "mid")?,
+                fused: linear(&mut up, &wt, "fused", None)?,
+                fine1: conv(&mut up, &wt, "fine1")?,
+                fine2: conv(&mut up, &wt, "fine2")?,
+                out: linear(&mut up, &wt, "out", None)?,
+            })
+        } else {
+            None
+        };
 
         // Sizes of each level: reassembled at 4x, 2x, 1x and 1/2 the patch grid.
         let level = |k: usize| match k {
@@ -625,6 +691,17 @@ impl Depth {
         s.up = alloc(HEAD * out_h * out_w);
         s.h2 = alloc(HEAD * out_h * out_w);
         s.out = alloc(out_h * out_w);
+        if with_masks {
+            s.token_sum = alloc(128 * n);
+            s.context = alloc(128 * n);
+            s.context_up = alloc(128 * level(0).0 * level(0).1);
+            s.mid = alloc(64 * level(0).0 * level(0).1);
+            s.mid_up = alloc(64 * fh * fw);
+            s.fine1 = alloc(48 * fh * fw);
+            s.fine2 = alloc(48 * fh * fw);
+            s.logits = alloc(MASK_CLASSES * fh * fw);
+            s.masks = alloc(MASK_CLASSES * out_h * out_w);
+        }
         s.end = end;
 
         // The forward pass.
@@ -647,25 +724,7 @@ impl Depth {
         }
         for k in 0..4 {
             // Tokens (without the class token) to channels-first [C][gh][gw].
-            let l = reassemble_proj[k];
-            let p = Params {
-                m: n as u32,
-                k: D as u32,
-                n: l.out as u32,
-                batch: 1,
-                a_off: s.feat[k] + D as u32,
-                a_rs: D as u32,
-                a_cs: 1,
-                b_off: l.w,
-                b_rs: l.out as u32,
-                b_cs: 1,
-                c_off: s.proj[k],
-                c_rs: 1,
-                c_cs: n as u32,
-                bias_off: l.b,
-                ..Default::default()
-            };
-            ops.push(Kernel::Matmul, p, [groups(l.out, 32), groups(n, 32), 1]);
+            ops.tokens_to_image(s.feat[k] + D as u32, n, reassemble_proj[k], s.proj[k], 0);
             match (k, resize[k]) {
                 (0, Some(cv)) => ops.conv_transpose(s.proj[k], NECK[k], (gh, gw), cv, 4, s.reassembled[k]),
                 (1, Some(cv)) => ops.conv_transpose(s.proj[k], NECK[k], (gh, gw), cv, 2, s.reassembled[k]),
@@ -698,6 +757,20 @@ impl Depth {
         ops.resize(s.h1, HEAD, (fh, fw), (out_h, out_w), s.up);
         ops.conv3x3(s.up, HEAD, (out_h, out_w), head2, HEAD, s.h2, 1, RELU);
         ops.conv1x1(s.h2, out_h * out_w, head3, s.out, RELU);
+        if let Some(h) = &mask_head {
+            let near = level(0);
+            ops.tokens_to_image(s.feat[2] + D as u32, n, h.token9, s.token_sum, 0);
+            ops.tokens_to_image(s.feat[3] + D as u32, n, h.token12, s.token_sum, ACCUMULATE);
+            ops.conv3x3(s.token_sum, 128, (gh, gw), h.context, 128, s.context, 1, RELU_IN | RELU);
+            ops.resize(s.context, 128, (gh, gw), near, s.context_up);
+            ops.conv3x3(s.context_up, 128, near, h.mid, 64, s.mid, 1, RELU);
+            ops.resize(s.mid, 64, near, (fh, fw), s.mid_up);
+            ops.conv1x1(s.fused[3], fh * fw, h.fused, s.mid_up, ACCUMULATE);
+            ops.conv3x3(s.mid_up, 64, (fh, fw), h.fine1, 48, s.fine1, 1, RELU_IN | RELU);
+            ops.conv3x3(s.fine1, 48, (fh, fw), h.fine2, 48, s.fine2, 1, RELU);
+            ops.conv1x1(s.fine2, fh * fw, h.out, s.logits, 0);
+            ops.resize(s.logits, MASK_CLASSES, (fh, fw), (out_h, out_w), s.masks);
+        }
         if ops.list.len() > MAX_OPS {
             bail!("{} dispatches, room for {MAX_OPS}", ops.list.len());
         }
@@ -794,7 +867,7 @@ impl Depth {
         }
         queue.write_buffer(&params, 0, &slots);
         drop(w); // the bind group keeps it
-        Ok(Self { device, queue, pipelines, mem, bind, readback, ops, s, grid: (gw, gh), adapter: adapter.get_info().name })
+        Ok(Self { device, queue, pipelines, mem, bind, readback, ops, s, grid: (gw, gh), with_masks, adapter: adapter.get_info().name })
     }
 
     /// The picture size it takes, in pixels.
@@ -813,6 +886,29 @@ impl Depth {
         self.submit(rgb)?;
         let (w, h) = self.size();
         self.read(self.s.out, w * h)
+    }
+
+    /// After `run`, how likely each pixel is to be each class: [other, person, wall, sky] planes
+    /// of `size()`, row by row from the top.
+    pub fn masks(&self) -> Result<Vec<f32>> {
+        if !self.with_masks {
+            bail!("loaded without masks");
+        }
+        let (w, h) = self.size();
+        let pixels = w * h;
+        let mut planes = self.read(self.s.masks, MASK_CLASSES * pixels)?;
+        for i in 0..pixels {
+            let mut logits = [0.0; MASK_CLASSES];
+            for (c, l) in logits.iter_mut().enumerate() {
+                *l = planes[c * pixels + i];
+            }
+            let top = logits.iter().fold(f32::MIN, |a, b| a.max(*b));
+            let total: f32 = logits.iter().map(|l| (l - top).exp()).sum();
+            for (c, l) in logits.iter().enumerate() {
+                planes[c * pixels + i] = (l - top).exp() / total;
+            }
+        }
+        Ok(planes)
     }
 
     /// Uploads the picture and runs every dispatch.
@@ -893,6 +989,32 @@ mod tests {
         assert_eq!(bicubic(&src, 1, (4, 4), (4, 4)), src);
     }
 
+    /// Compares the masks with PyTorch's (needs the weights, a GPU, and a file from
+    /// tools/segment/reference.py):
+    /// `FLEX_DEPTH_WEIGHTS=…/model.safetensors FLEX_SEG_REF=ref.safetensors cargo test -p flex-depth masks_match -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn masks_match_pytorch() {
+        let weights = std::env::var("FLEX_DEPTH_WEIGHTS").expect("FLEX_DEPTH_WEIGHTS");
+        let reference = read_safetensors(&std::fs::read(std::env::var("FLEX_SEG_REF").expect("FLEX_SEG_REF")).unwrap()).unwrap();
+        let rgb: Vec<u8> = reference["rgb"].1.iter().map(|v| *v as u8).collect();
+        let mut depth = Depth::load(Path::new(&weights), (37, 21), true).unwrap();
+        depth.run(&rgb).unwrap();
+        let got = depth.masks().unwrap();
+        let expected = &reference["masks"].1;
+        assert_eq!(got.len(), expected.len());
+        let worst = got.iter().zip(expected).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        eprintln!("worst difference in a mask: {worst:.2e}");
+        assert!(worst < 2e-3, "worst difference {worst:.2e}");
+        let runs = 20;
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            depth.run(&rgb).unwrap();
+            depth.masks().unwrap();
+        }
+        eprintln!("{:.1} ms a picture with masks", started.elapsed().as_secs_f64() * 1000.0 / runs as f64);
+    }
+
     /// Compares every stage with PyTorch's (needs the weights and a reference file from
     /// tools/reference.py, and a GPU):
     /// `FLEX_DEPTH_WEIGHTS=…/model.safetensors FLEX_DEPTH_REF=ref.safetensors cargo test -p flex-depth matches_pytorch -- --ignored --nocapture`
@@ -905,7 +1027,7 @@ mod tests {
         let (h, w) = (shape[0], shape[1]);
         let rgb: Vec<u8> = rgb.iter().map(|v| *v as u8).collect();
         let started = std::time::Instant::now();
-        let mut depth = Depth::load(Path::new(&weights), (w / PATCH, h / PATCH)).unwrap();
+        let mut depth = Depth::load(Path::new(&weights), (w / PATCH, h / PATCH), false).unwrap();
         eprintln!("loaded in {:?} on {}", started.elapsed(), depth.adapter());
         depth.submit(&rgb).unwrap();
 

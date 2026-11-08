@@ -30,6 +30,10 @@ pub struct Manifest {
     /// and a 99 MB download the first time.
     #[serde(default)]
     pub depth: bool,
+    /// Give the shader where people, walls and sky are (`person_at`, `wall_at`, `sky_at`), from
+    /// a small network that runs on top of depth's.
+    #[serde(default)]
+    pub segment: bool,
     /// Give the shader where faces are (`u_faces`, `face_at`), from a small neural network on
     /// the GPU.
     #[serde(default)]
@@ -47,7 +51,7 @@ fn full() -> f32 {
 
 impl Default for Manifest {
     fn default() -> Self {
-        Self { name: String::new(), description: String::new(), feedback: false, audio: false, depth: false, faces: false, scale: 1.0, settings: Vec::new() }
+        Self { name: String::new(), description: String::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, scale: 1.0, settings: Vec::new() }
     }
 }
 
@@ -129,6 +133,7 @@ pub struct ActiveEffect {
     pub feedback: bool,
     pub audio: bool,
     pub depth: bool,
+    pub segment: bool,
     pub faces: bool,
     pub scale: f32,
     /// `s_<key>` = number, bool (0/1) or choice (its index).
@@ -252,6 +257,7 @@ impl Effects {
             feedback: e.manifest.feedback,
             audio: e.manifest.audio,
             depth: e.manifest.depth,
+            segment: e.manifest.segment,
             faces: e.manifest.faces,
             scale: if scale.is_finite() { scale.clamp(0.25, 1.0) } else { 1.0 },
             uniforms,

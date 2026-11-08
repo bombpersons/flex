@@ -1,0 +1,3 @@
+name = "Masks"
+description = "Shows what Flex can tell apart in the picture: people in red, walls in blue and sky in cyan. Handy when making an effect."
+segment = true

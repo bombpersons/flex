@@ -58,6 +58,8 @@ pub enum Status {
         ms: f32,
         /// The size the model is running at, in pixels.
         size: (usize, usize),
+        /// Whether people, walls and sky are being found too.
+        masks: bool,
     },
     Failed(String),
 }
@@ -68,7 +70,7 @@ impl Status {
             Status::Off => "off".into(),
             Status::Starting => "starting…".into(),
             Status::Downloading(p) => format!("downloading the depth model ({p}%)…"),
-            Status::Ready { adapter, ms, size } => format!("{ms:.0} ms a frame at {}×{} on {adapter}", size.0, size.1),
+            Status::Ready { adapter, ms, size, masks } => format!("{ms:.0} ms a frame at {}×{}{} on {adapter}", size.0, size.1, if *masks { " with masks" } else { "" }),
             Status::Failed(e) => format!("⚠ {e}"),
         }
     }
@@ -81,6 +83,9 @@ pub struct DepthMap {
     pub serial: u64,
     /// The video frame it's of, by mpv's position.
     pub time: f32,
+    /// How much of each pixel is a person (red), wall (green) and sky (blue), RGBA, bottom row
+    /// first, `WIDTH` × `HEIGHT`, when an effect asked for them.
+    pub masks: Option<Vec<u8>>,
 }
 
 struct State {
@@ -91,6 +96,8 @@ struct State {
     busy: bool,
     output: Option<Arc<DepthMap>>,
     last_wanted: Instant,
+    /// Whether an effect wants people, walls and sky as well as depth.
+    masks_wanted: bool,
     /// Into `LEVELS`, kept so the next video starts at the size that worked for this one.
     level: usize,
 }
@@ -135,6 +142,32 @@ impl Pace {
         self.changed = now;
         Some(level)
     }
+}
+
+/// Mask classes effects get: person, wall and sky.
+const MASKS: usize = 3;
+
+/// The model's [other, person, wall, sky] planes as person, wall and sky at `WIDTH` × `HEIGHT`.
+fn mask_planes(planes: &[f32], size: (usize, usize)) -> [Vec<f32>; MASKS] {
+    let pixels = size.0 * size.1;
+    std::array::from_fn(|c| {
+        let plane = &planes[(c + 1) * pixels..][..pixels];
+        if size == (WIDTH, HEIGHT) { plane.to_vec() } else { scaled(plane, size, (WIDTH, HEIGHT)) }
+    })
+}
+
+/// Masks (rows from the top) as a texture's bytes: RGBA, bottom row first.
+fn mask_bytes(planes: &[Vec<f32>; MASKS]) -> Vec<u8> {
+    let mut out = vec![255u8; WIDTH * HEIGHT * 4];
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let px = &mut out[((HEIGHT - 1 - y) * WIDTH + x) * 4..][..MASKS];
+            for (byte, plane) in px.iter_mut().zip(planes) {
+                *byte = (plane[y * WIDTH + x].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+        }
+    }
+    out
 }
 
 /// For each pixel along a side of `to`: the two pixels of `from` it falls between, and how far.
@@ -232,7 +265,7 @@ pub struct Link(Arc<(Mutex<State>, Condvar)>);
 
 impl Default for Link {
     fn default() -> Self {
-        let state = State { status: Status::Off, running: false, input: None, busy: false, output: None, last_wanted: Instant::now(), level: 0 };
+        let state = State { status: Status::Off, running: false, input: None, busy: false, output: None, last_wanted: Instant::now(), masks_wanted: false, level: 0 };
         Self(Arc::new((Mutex::new(state), Condvar::new())))
     }
 }
@@ -246,10 +279,12 @@ impl Link {
         self.0.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// An effect wants depth: starts the worker if it isn't running. Call every frame.
-    pub fn wanted(&self) {
+    /// An effect wants depth, and maybe `masks` too: starts the worker if it isn't running.
+    /// Call every frame.
+    pub fn wanted(&self, masks: bool) {
         let mut state = self.lock();
         state.last_wanted = Instant::now();
+        state.masks_wanted = masks;
         if state.running || matches!(state.status, Status::Failed(_)) {
             return;
         }
@@ -287,7 +322,11 @@ impl Link {
 
     fn work(&self) {
         let path = model_path();
-        let mut pace = Pace::new(self.lock().level, Instant::now());
+        let (level, mut with_masks) = {
+            let state = self.lock();
+            (state.level, state.masks_wanted)
+        };
+        let mut pace = Pace::new(level, Instant::now());
         let result = (|| -> anyhow::Result<Depth> {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
@@ -301,7 +340,7 @@ impl Link {
                 }
             };
             flex_core::update::download_verified(flex_depth::WEIGHTS_URL, "the depth model", total, flex_depth::WEIGHTS_SHA256, &path, progress)?;
-            Depth::load(&path, LEVELS[pace.level])
+            Depth::load(&path, LEVELS[pace.level], with_masks)
         })();
         let mut depth = match result {
             Ok(depth) => depth,
@@ -314,9 +353,10 @@ impl Link {
             }
         };
         log::info!("depth: running on {}", depth.adapter());
-        self.lock().status = Status::Ready { adapter: depth.adapter().to_owned(), ms: 0.0, size: depth.size() };
+        self.lock().status = Status::Ready { adapter: depth.adapter().to_owned(), ms: 0.0, size: depth.size(), masks: with_masks };
 
         let mut previous: Option<Vec<f32>> = None;
+        let mut previous_masks: Option<[Vec<f32>; MASKS]> = None;
         let mut last_own: Option<Vec<f32>> = None;
         let mut range: Option<(f32, f32)> = None;
         let mut serial = 0;
@@ -346,10 +386,11 @@ impl Link {
             let started = Instant::now();
             let size = depth.size();
             let result = if size == (WIDTH, HEIGHT) { depth.run(&rgb) } else { depth.run(&scaled_rgb(&rgb, (WIDTH, HEIGHT), size)) };
+            let result = result.and_then(|raw| Ok((raw, if with_masks { Some(depth.masks()?) } else { None })));
             let ms = started.elapsed().as_secs_f32() * 1000.0;
-            let raw = match result {
-                Ok(raw) if size == (WIDTH, HEIGHT) => raw,
-                Ok(raw) => scaled(&raw, size, (WIDTH, HEIGHT)),
+            let (raw, planes) = match result {
+                Ok((raw, planes)) if size == (WIDTH, HEIGHT) => (raw, planes),
+                Ok((raw, planes)) => (scaled(&raw, size, (WIDTH, HEIGHT)), planes),
                 Err(e) => {
                     log::warn!("depth: {e:#}");
                     let mut state = self.lock();
@@ -366,6 +407,7 @@ impl Link {
             // A new shot has nothing to do with the last one: start again from this picture.
             if last_own.as_ref().is_some_and(|last| mean_change(&own, last) > CUT) {
                 previous = None;
+                previous_masks = None;
                 range = None;
             }
             last_own = Some(own);
@@ -386,19 +428,35 @@ impl Link {
             }
             serial += 1;
             previous = Some(values.clone());
+            let masks = planes.map(|planes| {
+                let mut now = mask_planes(&planes, size);
+                if let Some(before) = &previous_masks {
+                    for (plane, before) in now.iter_mut().zip(before) {
+                        settle(plane, before, (WIDTH, HEIGHT));
+                    }
+                }
+                let rgba = mask_bytes(&now);
+                previous_masks = Some(now);
+                rgba
+            });
             {
                 let mut state = self.lock();
-                state.output = Some(Arc::new(DepthMap { values, serial, time }));
-                state.status = Status::Ready { adapter: depth.adapter().to_owned(), ms, size };
+                state.output = Some(Arc::new(DepthMap { values, serial, time, masks }));
+                state.status = Status::Ready { adapter: depth.adapter().to_owned(), ms, size, masks: with_masks };
             }
             // Still "busy" while waiting, so no frame is read back in the meantime.
             std::thread::sleep(MIN_INTERVAL.saturating_sub(started.elapsed()));
-            if let Some(level) = pace.update(ms, Instant::now()) {
-                log::info!("depth: {ms:.0} ms a frame, moving to {} × {} patches", LEVELS[level].0, LEVELS[level].1);
+            let moved = pace.update(ms, Instant::now());
+            let masks_wanted = self.lock().masks_wanted;
+            if moved.is_some() || masks_wanted != with_masks {
+                let level = pace.level;
+                log::info!("depth: {ms:.0} ms a frame, running at {} × {} patches, masks {masks_wanted}", LEVELS[level].0, LEVELS[level].1);
                 self.lock().level = level;
+                with_masks = masks_wanted;
+                previous_masks = None;
                 // The old one goes first: a slow GPU may not have room for both.
                 drop(depth);
-                depth = match Depth::load(&path, LEVELS[level]) {
+                depth = match Depth::load(&path, LEVELS[level], with_masks) {
                     Ok(depth) => depth,
                     Err(e) => {
                         log::warn!("depth: {e:#}");
@@ -492,6 +550,17 @@ mod tests {
         // Fine here; the size above would be slower than ROOM.
         let ms = ROOM * tokens(1) / tokens(0) + 5.0;
         assert_eq!(pace.update(ms, now + SETTLE), None);
+    }
+
+    #[test]
+    fn masks_skip_other_and_go_bottom_row_first() {
+        // 4 classes of 2 × 1 pictures would need scaling; use the full size for the layout.
+        let pixels = WIDTH * HEIGHT;
+        let mut planes = vec![0.0; 4 * pixels];
+        planes[pixels] = 1.0; // person, at the top left
+        let bytes = mask_bytes(&mask_planes(&planes, (WIDTH, HEIGHT)));
+        assert_eq!(&bytes[(HEIGHT - 1) * WIDTH * 4..][..4], &[255, 0, 0, 255]);
+        assert_eq!(&bytes[..4], &[0, 0, 0, 255]);
     }
 
     #[test]

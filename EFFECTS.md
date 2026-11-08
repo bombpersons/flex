@@ -23,6 +23,7 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Rubber Sheet**: stretches the film over a wobbling mesh shaped by depth: waves, ripples,
   facets or wireframe.
 - **Undertow**: the background melts and pours away while whoever's up close stays solid.
+- **Masks**: shows what Flex can tell apart in the picture: people, walls and sky.
 - **Faces**: shows what Flex can see of the faces in the picture, for checking and for
   making effects.
 - **Spotlight**: faces stay as they are while everything around them melts and dims.
@@ -79,6 +80,7 @@ don't declare them yourself:
 | `sampler2D u_spectrum` | the sound's spectrum: x is frequency (30 Hz to 11 kHz, log-spaced, 64 bands), y is age (0 is now, 1 is about two seconds ago); values 0–1 in `.r` |
 | `float depth_at(vec2 uv)` | a function: how near that point of the screen is, from 0 (far) to 1 (near) (with `depth = true`; 0 until the first depth map arrives) |
 | `sampler2D u_depth`, `float u_has_depth` | the depth map itself, covering the picture rather than the screen, and 1 once there is one |
+| `float person_at(vec2 uv)`, `wall_at`, `sky_at` | functions: how much of that point of the screen is a person, a wall or sky, from 0 to 1 (with `segment = true`; 0 until the first masks arrive). `vec4 masks_at(vec2 uv)` gives all three in r, g and b |
 | `int u_face_count`, `vec4 u_faces[MAX_FACES]` | how far through the arrays to look, and each face's box on screen: x0, y0, x1, y1 (with `faces = true`) |
 | `float u_face_seen[MAX_FACES]` | 0 to 1, fading as a face comes and goes; multiply by it so faces don't pop. It's 0 for empty slots |
 | `vec2 face_point(int face, int point)` | where on the screen a face's point is: 0 right eye, 1 left eye, 2 nose, 3 right corner of the mouth, 4 left (the person's own right and left) |
@@ -99,6 +101,7 @@ description = "Makes it wobble"
 feedback = true                # give the shader its own last frame (u_prev); default false
 audio = true                   # the sound uniforms; default false
 depth = true                   # how far away things are; default false
+segment = true                 # where people, walls and sky are; default false
 faces = true                   # where faces are; default false
 scale = 1.0                    # work at this fraction of the screen's size (0.25–1), then
                                # scale up: lower is lighter on the GPU; default 1
@@ -145,6 +148,14 @@ holds the picture and the sound back by that much, usually under a tenth of a se
 each frame is drawn with the depth map made from it. It uses a fair bit of the GPU, so leave
 it off unless the effect uses it; the model is unloaded a little while after the last effect
 that wanted it. F2 and F3 show how long it's taking and at what size.
+
+### People, walls and sky
+
+With `segment = true`, a small network that runs on top of the depth model tells people,
+walls and sky apart, so an effect can use them alongside `depth_at` without paying for depth
+twice (it costs depth's time plus about a fifth). It was trained on COCO and ADE20K. People
+and sky are solid, including in animation; walls are the weakest, so anything flat and dark
+behind someone can be called a wall, and their edges are worth treating as soft.
 
 ### Faces
 

@@ -676,8 +676,8 @@ impl Player {
             Some(effect) => {
                 let (video_time, audio) = self.effect_inputs.tick(&self.mpv, effect);
                 let pts = self.mpv.get_f64("time-pos").map_or(video_time, |p| p as f32);
-                let depth = effect.depth.then(|| {
-                    sh.depth.wanted();
+                let depth = (effect.depth || effect.segment).then(|| {
+                    sh.depth.wanted(effect.segment);
                     sh.depth.clone()
                 });
                 let faces = effect.faces.then(|| {
