@@ -69,6 +69,8 @@ pub struct Player {
     position: Option<f64>,
     /// The playback clock and sound for the video effect.
     effect_inputs: crate::effects::Inputs,
+    /// What mpv's audio-delay is set to, to match the picture being held back for depth.
+    audio_held: f32,
     effect_label: String,
     /// For the history: when this session started, the furthest position recorded, whether
     /// it reached "watched", and whether the session has been logged.
@@ -150,6 +152,7 @@ impl Player {
             duration: None,
             position: None,
             effect_inputs: Default::default(),
+            audio_held: 0.0,
             effect_label: String::new(),
             session_start: crate::shared::now_unix(),
             recorded: None,
@@ -664,9 +667,15 @@ impl Player {
             ctx.request_repaint();
         }
         let effects = sh.effect_renderer.clone();
+        let held = effects.lock().unwrap_or_else(|e| e.into_inner()).held_back();
+        if held != self.audio_held {
+            self.audio_held = held;
+            let _ = self.mpv.set_string("audio-delay", &format!("{held:.3}"));
+        }
         let frame = match &effect {
             Some(effect) => {
                 let (video_time, audio) = self.effect_inputs.tick(&self.mpv, effect);
+                let pts = self.mpv.get_f64("time-pos").map_or(video_time, |p| p as f32);
                 let depth = effect.depth.then(|| {
                     sh.depth.wanted();
                     sh.depth.clone()
@@ -675,7 +684,7 @@ impl Player {
                     sh.faces.wanted();
                     sh.faces.clone()
                 });
-                Some(crate::effects::Frame { effect: effect.clone(), rect: [0.0, 0.0, 1.0, 1.0], video_time, audio, depth, faces })
+                Some(crate::effects::Frame { effect: effect.clone(), rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces })
             }
             None => {
                 self.effect_inputs.stop(&self.mpv);

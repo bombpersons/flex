@@ -57,6 +57,7 @@ pub struct Renderer {
     /// `u_spectrum`: BANDS × HISTORY.
     spectrum: Option<glow::Texture>,
     depth: DepthGl,
+    held: HeldFrames,
     faces: FaceGl,
     copy: Option<glow::Program>,
     /// The effect's program; `None` if it didn't compile.
@@ -80,6 +81,8 @@ pub struct Frame {
     /// Where the picture is, without black bars (0–1 from the bottom left).
     pub rect: [f32; 4],
     pub video_time: f32,
+    /// mpv's position: unlike `video_time`, the same for all of one video frame.
+    pub pts: f32,
     /// The sound, when the effect asked for it and there is some.
     pub audio: Option<Arc<Features>>,
     /// The depth worker, when the effect asked for depth.
@@ -480,9 +483,19 @@ impl Renderer {
             let Some(o) = &self.objects else { return false };
 
             render(o.video.fbo.0.get() as i32, size.0, size.1);
-            let depth_texture = match &frame.depth {
-                Some(link) => self.depth.update(gl, link, o.video.fbo, size, rect, frame.video_time),
-                None => None,
+            // With depth, the picture is held back to the frame depth has caught up with.
+            let (video_texture, depth_texture) = match &frame.depth {
+                Some(link) => {
+                    self.depth.update(gl, link, o.video.fbo, size, rect, frame.pts, frame.video_time);
+                    self.held.push(gl, &o.video, size, frame.pts);
+                    let (texture, pts) = self.held.pick(frame.video_time - self.depth.delay).unwrap_or((o.video.texture, frame.pts));
+                    (texture, self.depth.map_for(pts))
+                }
+                None => {
+                    self.held.free(gl);
+                    self.depth.delay = 0.0;
+                    (o.video.texture, None)
+                }
             };
             let faces = match &frame.faces {
                 Some(link) => self.faces.update(gl, link, o.video.fbo, size, rect, frame.video_time),
@@ -499,7 +512,7 @@ impl Renderer {
             gl.viewport(0, 0, size.0, size.1);
             gl.use_program(Some(program));
             gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(o.video.texture));
+            gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(prev.texture));
             let at = |name: &str| gl.get_uniform_location(program, name);
@@ -589,6 +602,7 @@ impl Renderer {
                 gl.delete_texture(t);
             }
             self.depth.release(gl);
+            self.held.free(gl);
             self.faces.release(gl);
             if let Some(vao) = self.vao.take() {
                 gl.delete_vertex_array(vao);
@@ -597,6 +611,11 @@ impl Renderer {
             self.checked = None;
             self.started = None;
         }
+    }
+
+    /// How far behind the picture is being held (seconds), which the sound has to match.
+    pub fn held_back(&self) -> f32 {
+        self.depth.delay
     }
 
     pub fn holds_gl(&self) -> bool {
@@ -678,6 +697,7 @@ impl Renderer {
     }
 
     unsafe fn free_objects(&mut self, gl: &glow::Context) {
+        unsafe { self.held.free(gl) };
         if let Some(o) = self.objects.take() {
             for t in [o.video].into_iter().chain(o.out) {
                 unsafe {
@@ -782,8 +802,95 @@ struct DepthObjects {
     /// The picture shrunk to the model's size, and a buffer to read it back through.
     capture: Target,
     pbo: glow::Buffer,
-    /// `u_depth`.
-    texture: glow::Texture,
+    /// The latest depth maps and the video frames they're of, for `u_depth`.
+    maps: Vec<(glow::Texture, Option<f32>)>,
+}
+
+/// Depth maps kept, so a held-back frame can have the one made from it.
+const DEPTH_MAPS: usize = 6;
+/// The most the picture is held back (seconds).
+const MOST_HELD: f32 = 0.25;
+/// How much longer to hold than depth takes, and how far that has to drift before the hold
+/// changes (moving it skips the picture and the sound a little).
+const HOLD_MARGIN: f32 = 0.01;
+const HOLD_STEP: f32 = 0.015;
+/// Depth maps to see before trusting how long they take.
+const HOLD_AFTER_MAPS: u32 = 20;
+/// The most video frames kept, and the memory they can use.
+const HELD_FRAMES: usize = 8;
+const HELD_BYTES: usize = 256 << 20;
+
+/// How long to hold the picture, given how late depth maps are arriving.
+fn next_delay(current: f32, late: f32) -> f32 {
+    let want = (late + HOLD_MARGIN).clamp(0.0, MOST_HELD);
+    if (want - current).abs() > HOLD_STEP { want } else { current }
+}
+
+/// Of frames at these positions, newest first, the one to show at `at`: the newest that's
+/// due, or the oldest if none are yet.
+fn pick_frame(times: &[f32], at: f32) -> Option<usize> {
+    times.iter().position(|t| *t <= at).or(times.len().checked_sub(1))
+}
+
+/// The last few video frames, so the picture can wait for depth.
+#[derive(Default)]
+struct HeldFrames {
+    slots: Vec<Target>,
+    /// Newest first: which slot, and the frame's position.
+    frames: std::collections::VecDeque<(usize, f32)>,
+}
+
+impl HeldFrames {
+    /// Keeps a copy of this frame, if it's a new one.
+    unsafe fn push(&mut self, gl: &glow::Context, video: &Target, size: (i32, i32), pts: f32) {
+        unsafe {
+            let newest = self.frames.front().map(|f| f.1);
+            if newest == Some(pts) {
+                return;
+            }
+            // A seek: what's kept is from somewhere else.
+            if newest.is_some_and(|n| pts < n || pts > n + 1.0) {
+                self.frames.clear();
+            }
+            if self.slots.is_empty() {
+                let most = (HELD_BYTES / (size.0.max(1) as usize * size.1.max(1) as usize * 4)).clamp(2, HELD_FRAMES);
+                for _ in 0..most {
+                    match create_target(gl, size, &[(glow::RGBA8, glow::UNSIGNED_BYTE)]) {
+                        Ok(t) => self.slots.push(t),
+                        Err(e) => {
+                            log::warn!("video effects: holding frames back: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+            if self.slots.is_empty() {
+                return;
+            }
+            let slot = if self.frames.len() == self.slots.len() { self.frames.pop_back().map_or(0, |f| f.0) } else { self.frames.len() };
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video.fbo));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.slots[slot].fbo));
+            gl.blit_framebuffer(0, 0, size.0, size.1, 0, 0, size.0, size.1, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.frames.push_front((slot, pts));
+        }
+    }
+
+    /// The frame to show at `at`, and its position.
+    fn pick(&self, at: f32) -> Option<(glow::Texture, f32)> {
+        let times: Vec<f32> = self.frames.iter().map(|f| f.1).collect();
+        pick_frame(&times, at).map(|i| (self.slots[self.frames[i].0].texture, self.frames[i].1))
+    }
+
+    unsafe fn free(&mut self, gl: &glow::Context) {
+        self.frames.clear();
+        for t in self.slots.drain(..) {
+            unsafe {
+                gl.delete_framebuffer(t.fbo);
+                gl.delete_texture(t.texture);
+            }
+        }
+    }
 }
 
 /// Small frames read back for the depth worker (a frame late, so the CPU never waits for
@@ -795,18 +902,35 @@ struct DepthGl {
     pending: Option<Fence>,
     /// The video time of the last frame sent, so a paused frame isn't sent again and again.
     last_time: Option<f32>,
-    /// The depth map in the texture.
+    /// The newest depth map, and how many have arrived.
     serial: u64,
+    arrived: u32,
+    /// Which of `maps` the next depth map goes in.
+    next_map: usize,
+    /// The position of the frame being read back.
+    pending_time: f32,
+    /// How late depth maps arrive after their frame (seconds), on average.
+    late: f32,
+    /// How far the picture is being held back to match (seconds).
+    delay: f32,
 }
 
 impl DepthGl {
-    /// Picks up a frame read back last time and hands it over, uploads a new depth map, and
-    /// reads back this frame if the worker's free. Returns the depth texture.
-    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::depth::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32) -> Option<glow::Texture> {
+    /// The depth map made from the frame nearest `time`.
+    fn map_for(&self, time: f32) -> Option<glow::Texture> {
+        let maps = &self.gl.as_ref()?.maps;
+        maps.iter().filter_map(|(t, at)| at.map(|at| (*t, (at - time).abs()))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(t, _)| t).or(maps.first().map(|m| m.0))
+    }
+
+    /// Picks up a frame read back last time and hands it over, stores a new depth map, and
+    /// reads back this frame if the worker's free. `time` is the frame's position and `clock`
+    /// the smooth playback time.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::depth::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
         use crate::depth::{HEIGHT, WIDTH};
         unsafe {
             if self.failed {
-                return None;
+                return;
             }
             if self.gl.is_none() {
                 match create_depth(gl) {
@@ -814,11 +938,11 @@ impl DepthGl {
                     Err(e) => {
                         log::warn!("depth: {e}");
                         self.failed = true;
-                        return None;
+                        return;
                     }
                 }
             }
-            let o = self.gl.as_ref()?;
+            let Some(o) = self.gl.as_mut() else { return };
             let bytes = WIDTH * HEIGHT * 4;
             if let Some(Fence(fence)) = self.pending {
                 match gl.client_wait_sync(fence, 0, 0) {
@@ -830,7 +954,7 @@ impl DepthGl {
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(o.pbo));
                             let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
                             if !ptr.is_null() {
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec());
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), self.pending_time);
                                 gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
                             }
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -839,16 +963,29 @@ impl DepthGl {
                 }
             }
             if let Some(map) = link.latest().filter(|m| m.serial != self.serial) {
-                gl.bind_texture(glow::TEXTURE_2D, Some(o.texture));
+                let slot = self.next_map;
+                self.next_map = (slot + 1) % o.maps.len();
+                gl.bind_texture(glow::TEXTURE_2D, Some(o.maps[slot].0));
                 gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
                 let data: &[u8] = std::slice::from_raw_parts(map.values.as_ptr().cast(), map.values.len() * 4);
                 let (w, h) = (WIDTH as i32, HEIGHT as i32);
                 gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(data)));
                 gl.bind_texture(glow::TEXTURE_2D, None);
                 self.serial = map.serial;
+                o.maps[slot].1 = Some(map.time);
+                let late = clock - map.time;
+                // Outside this, it's a seek and says nothing about how long depth takes.
+                if (0.0..0.5).contains(&late) {
+                    self.arrived += 1;
+                    self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
+                    if self.arrived >= HOLD_AFTER_MAPS {
+                        self.delay = next_delay(self.delay, self.late);
+                    }
+                }
             }
             if self.pending.is_none() && link.ready_for_frame() && self.last_time != Some(time) {
                 self.last_time = Some(time);
+                self.pending_time = time;
                 // Just the picture, without black bars.
                 let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
                 let (x1, y1) = ((rect[2] * size.0 as f32) as i32, (rect[3] * size.1 as f32) as i32);
@@ -866,7 +1003,6 @@ impl DepthGl {
                 }
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
-            Some(o.texture)
         }
     }
 
@@ -879,9 +1015,14 @@ impl DepthGl {
                 gl.delete_framebuffer(o.capture.fbo);
                 gl.delete_texture(o.capture.texture);
                 gl.delete_buffer(o.pbo);
-                gl.delete_texture(o.texture);
+                for (texture, _) in o.maps {
+                    gl.delete_texture(texture);
+                }
             }
             self.serial = 0;
+            self.arrived = 0;
+            self.next_map = 0;
+            self.delay = 0.0;
             self.last_time = None;
         }
     }
@@ -1033,20 +1174,24 @@ unsafe fn create_depth(gl: &glow::Context) -> Result<DepthObjects, String> {
         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
         gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (WIDTH * HEIGHT * 4) as i32, glow::STREAM_READ);
         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-        let texture = gl.create_texture()?;
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         let zeros = vec![0u8; WIDTH * HEIGHT * 4];
-        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R16F as i32, size.0, size.1, 0, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(&zeros)));
-        for (param, value) in [
-            (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
-            (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
-            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
-            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
-        ] {
-            gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
+        let mut maps = Vec::with_capacity(DEPTH_MAPS);
+        for _ in 0..DEPTH_MAPS {
+            let texture = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R16F as i32, size.0, size.1, 0, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(&zeros)));
+            for (param, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
+            }
+            maps.push((texture, None));
         }
         gl.bind_texture(glow::TEXTURE_2D, None);
-        Ok(DepthObjects { capture, pbo, texture })
+        Ok(DepthObjects { capture, pbo, maps })
     }
 }
 
@@ -1115,5 +1260,29 @@ mod tests {
     fn status_takes_the_first_line_of_the_log() {
         assert_eq!(first_line("\n  0:3(12): error: syntax error\n0:4: more\n"), "0:3(12): error: syntax error");
         assert_eq!(first_line(""), "unknown error");
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::*;
+
+    #[test]
+    fn the_newest_frame_that_is_due_is_shown() {
+        let newest_first = [1.25, 1.2, 1.15, 1.1];
+        assert_eq!(pick_frame(&newest_first, 1.22), Some(1));
+        assert_eq!(pick_frame(&newest_first, 2.0), Some(0));
+        // Nothing's due yet: the oldest there is.
+        assert_eq!(pick_frame(&newest_first, 1.0), Some(3));
+        assert_eq!(pick_frame(&[], 1.0), None);
+    }
+
+    #[test]
+    fn the_hold_only_moves_when_depth_drifts_enough() {
+        assert_eq!(next_delay(0.0, 0.07), 0.07 + HOLD_MARGIN);
+        let settled = 0.08;
+        assert_eq!(next_delay(settled, 0.075), settled);
+        assert_eq!(next_delay(settled, 0.11), 0.11 + HOLD_MARGIN);
+        assert_eq!(next_delay(0.0, 2.0), MOST_HELD);
     }
 }

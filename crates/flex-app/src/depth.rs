@@ -18,9 +18,9 @@ const LEVELS: [(usize, usize); 5] = [(37, 21), (32, 18), (28, 16), (24, 14), (21
 pub const WIDTH: usize = LEVELS[0].0 * flex_depth::PATCH;
 pub const HEIGHT: usize = LEVELS[0].1 * flex_depth::PATCH;
 /// A depth map taking longer than this, on average (ms), moves to a smaller size.
-const TOO_SLOW: f32 = 75.0;
+const TOO_SLOW: f32 = 35.0;
 /// A bigger size is tried if it should take no longer than this (ms).
-const ROOM: f32 = 60.0;
+const ROOM: f32 = 28.0;
 /// How quickly that average follows.
 const PACE_FOLLOW: f32 = 0.15;
 /// How long to wait after changing size before judging the new one.
@@ -42,8 +42,9 @@ const AROUND: usize = 7;
 const RANGE_FOLLOW: f32 = 0.2;
 /// The average change between depth maps, each scaled by its own range, that means a new shot.
 const CUT: f32 = 0.18;
-/// At most this often, to leave the GPU time for the video (~20 depth maps a second).
-const MIN_INTERVAL: Duration = Duration::from_millis(50);
+/// At most this often, to leave the GPU time for the video (~30 depth maps a second, so a
+/// film's every frame gets one if the GPU can manage it).
+const MIN_INTERVAL: Duration = Duration::from_millis(33);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -78,13 +79,15 @@ impl Status {
 pub struct DepthMap {
     pub values: Vec<f32>,
     pub serial: u64,
+    /// The video frame it's of, by mpv's position.
+    pub time: f32,
 }
 
 struct State {
     status: Status,
     running: bool,
     /// A frame waiting: RGBA, bottom row first (as read back from GL), `WIDTH` × `HEIGHT`.
-    input: Option<Vec<u8>>,
+    input: Option<(Vec<u8>, f32)>,
     busy: bool,
     output: Option<Arc<DepthMap>>,
     last_wanted: Instant,
@@ -268,12 +271,13 @@ impl Link {
     /// Whether the worker would take a frame now.
     pub fn ready_for_frame(&self) -> bool {
         let state = self.lock();
-        matches!(state.status, Status::Ready { .. }) && state.input.is_none() && !state.busy
+        // Even while busy: read back now, the next frame is ready the moment this one's done.
+        matches!(state.status, Status::Ready { .. }) && state.input.is_none()
     }
 
-    /// Hands over a frame (RGBA, bottom row first, `WIDTH` × `HEIGHT`).
-    pub fn submit(&self, rgba: Vec<u8>) {
-        self.lock().input = Some(rgba);
+    /// Hands over a frame (RGBA, bottom row first, `WIDTH` × `HEIGHT`) and its position.
+    pub fn submit(&self, rgba: Vec<u8>, time: f32) {
+        self.lock().input = Some((rgba, time));
         self.0.1.notify_all();
     }
 
@@ -331,7 +335,7 @@ impl Link {
                     state = self.0.1.wait_timeout(state, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
                 }
             };
-            let Some(rgba) = input else { break };
+            let Some((rgba, time)) = input else { break };
             // GL's rows run bottom-up; the model's top-down.
             for y in 0..HEIGHT {
                 let src = &rgba[(HEIGHT - 1 - y) * WIDTH * 4..][..WIDTH * 4];
@@ -384,7 +388,7 @@ impl Link {
             previous = Some(values.clone());
             {
                 let mut state = self.lock();
-                state.output = Some(Arc::new(DepthMap { values, serial }));
+                state.output = Some(Arc::new(DepthMap { values, serial, time }));
                 state.status = Status::Ready { adapter: depth.adapter().to_owned(), ms, size };
             }
             // Still "busy" while waiting, so no frame is read back in the meantime.
@@ -474,11 +478,11 @@ mod tests {
     fn pace_waits_before_retrying_a_size_that_was_too_slow() {
         let now = Instant::now();
         let mut pace = Pace::new(0, now);
-        assert_eq!(pace.update(80.0, now + SETTLE), Some(1));
+        assert_eq!(pace.update(TOO_SLOW + 1.0, now + SETTLE), Some(1));
         // Fast enough to go back up, by the estimate, but it only just failed.
         let t = now + SETTLE * 3;
-        assert_eq!(pace.update(30.0, t), None);
-        assert_eq!(pace.update(30.0, now + SETTLE + RETRY), Some(0));
+        assert_eq!(pace.update(10.0, t), None);
+        assert_eq!(pace.update(10.0, now + SETTLE + RETRY), Some(0));
     }
 
     #[test]
