@@ -3,8 +3,11 @@
 //! (see `effects::Renderer`) whenever it's free, and picks up the faces as they come.
 //!
 //! A detector on its own jitters and misses frames, which would look bad in a shader, so
-//! `Tracker` keeps each face in one slot, smooths it, and fades it in and out.
+//! `Tracker` keeps each face in one slot, smooths it, and fades it in and out. Smoothing looks
+//! at the frames either side of each one, so it adds no lag, and reports say which frame
+//! they're about, so the picture can be held back until the faces for it are known.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -18,8 +21,12 @@ pub const MAX_FACES: usize = 8;
 pub const COORDS: usize = 14;
 /// Nothing wanted faces for this long: stop.
 const IDLE: Duration = Duration::from_secs(20);
-/// At most this often (~15 a second): faces don't move that fast.
-const MIN_INTERVAL: Duration = Duration::from_millis(66);
+/// Least time between detections, and the least it can be as a multiple of how long one takes,
+/// so a slow GPU isn't kept busy with this.
+const MIN_INTERVAL: Duration = Duration::from_millis(20);
+const INTERVAL_PER_RUN: f32 = 3.0;
+/// Reports waiting for the player to collect them.
+const MOST_WAITING: usize = 16;
 /// How much a box must overlap a face already being tracked to be that face.
 const SAME_FACE: f32 = 0.2;
 /// Detections in a row before a new face shows, which filters out one-off false ones.
@@ -27,10 +34,9 @@ const CONFIRM: u32 = 2;
 /// How long a face that's gone missing is kept, and how long fading in or out takes (seconds).
 const HOLD: f64 = 0.3;
 const FADE: f64 = 0.15;
-/// One Euro filter: how steady a still face is, and how much faster it follows when moving.
-const MIN_CUTOFF: f32 = 1.5;
-const SPEED_CUTOFF: f32 = 12.0;
-const DERIVATIVE_CUTOFF: f32 = 1.0;
+/// How much the detections around a report count, from the report's own outwards: reports
+/// are this many detections behind the newest, less one.
+const WEIGHTS: [f32; 3] = [3.0, 2.0, 1.0];
 /// The average change in brightness (0–255) between frames that means a new shot.
 const CUT: f32 = 32.0;
 
@@ -68,11 +74,23 @@ pub struct Shown {
 
 pub type Slots = [Option<Shown>; MAX_FACES];
 
+/// The faces in one video frame.
+#[derive(Clone, Debug)]
+pub struct Report {
+    /// The frame's position in the video (seconds).
+    pub time: f32,
+    /// The first after a cut or seek: don't blend it with the one before.
+    pub after_cut: bool,
+    pub slots: Slots,
+}
+
 struct Input {
     /// RGBA, bottom row first (as read back from GL), `WIDTH` × `HEIGHT`.
     rgba: Vec<u8>,
     /// How much of that the picture fills, from the top left.
     filled: (f32, f32),
+    /// The frame's position in the video (seconds).
+    time: f32,
 }
 
 struct State {
@@ -80,7 +98,7 @@ struct State {
     running: bool,
     input: Option<Input>,
     busy: bool,
-    output: Option<Arc<Slots>>,
+    reports: VecDeque<Report>,
     last_wanted: Instant,
 }
 
@@ -90,7 +108,7 @@ pub struct Link(Arc<(Mutex<State>, Condvar)>);
 
 impl Default for Link {
     fn default() -> Self {
-        let state = State { status: Status::Off, running: false, input: None, busy: false, output: None, last_wanted: Instant::now() };
+        let state = State { status: Status::Off, running: false, input: None, busy: false, reports: VecDeque::new(), last_wanted: Instant::now() };
         Self(Arc::new((Mutex::new(state), Condvar::new())))
     }
 }
@@ -129,14 +147,22 @@ impl Link {
     }
 
     /// Hands over a frame: RGBA, bottom row first, `WIDTH` × `HEIGHT`, with the picture filling
-    /// `filled` of it from the top left.
-    pub fn submit(&self, rgba: Vec<u8>, filled: (f32, f32)) {
-        self.lock().input = Some(Input { rgba, filled });
+    /// `filled` of it from the top left. `time` is its position in the video.
+    pub fn submit(&self, rgba: Vec<u8>, filled: (f32, f32), time: f32) {
+        self.lock().input = Some(Input { rgba, filled, time });
         self.0.1.notify_all();
     }
 
-    pub fn latest(&self) -> Option<Arc<Slots>> {
-        self.lock().output.clone()
+    /// The reports that have come in since the last call, oldest first.
+    pub fn take_reports(&self) -> Vec<Report> {
+        self.lock().reports.drain(..).collect()
+    }
+
+    fn publish(&self, reports: impl IntoIterator<Item = Report>) {
+        let mut state = self.lock();
+        state.reports.extend(reports);
+        let extra = state.reports.len().saturating_sub(MOST_WAITING);
+        state.reports.drain(..extra);
     }
 
     fn work(&self) {
@@ -157,6 +183,8 @@ impl Link {
         let mut tracker = Tracker::default();
         let mut rgb = vec![0u8; WIDTH * HEIGHT * 3];
         let mut last_gray: Vec<u8> = Vec::new();
+        let mut last_time: Option<f32> = None;
+        let mut after_cut = true;
         loop {
             let input = {
                 let mut state = self.lock();
@@ -180,10 +208,14 @@ impl Link {
                 }
             }
             let gray: Vec<u8> = rgb.as_chunks::<3>().0.iter().step_by(16).map(|p| p[1]).collect();
-            if is_cut(&last_gray, &gray) {
+            let seeked = last_time.is_some_and(|t| input.time < t || input.time > t + 1.0);
+            if seeked || is_cut(&last_gray, &gray) {
+                self.publish(tracker.finish());
                 tracker = Tracker::default();
+                after_cut = true;
             }
             last_gray = gray;
+            last_time = Some(input.time);
 
             let started = Instant::now();
             let found = match face.run(&rgb) {
@@ -198,21 +230,20 @@ impl Link {
             };
             let ms = started.elapsed().as_secs_f32() * 1000.0;
             let found: Vec<[f32; COORDS]> = found.iter().map(|d| coords(d, input.filled)).collect();
-            let slots = tracker.update(&found, start.elapsed().as_secs_f64());
-            let faces = slots.iter().flatten().filter(|s| s.seen > 0.0).count();
-            {
-                let mut state = self.lock();
-                state.output = Some(Arc::new(slots));
-                state.status = Status::Ready { adapter: face.adapter().to_owned(), ms, faces };
-            }
-            std::thread::sleep(MIN_INTERVAL.saturating_sub(started.elapsed()));
+            let report = tracker.update(&found, start.elapsed().as_secs_f64(), input.time).map(|mut report| {
+                report.after_cut = std::mem::take(&mut after_cut);
+                report
+            });
+            self.publish(report);
+            self.lock().status = Status::Ready { adapter: face.adapter().to_owned(), ms, faces: tracker.showing() };
+            std::thread::sleep(MIN_INTERVAL.max(Duration::from_secs_f32(ms * INTERVAL_PER_RUN / 1000.0)).saturating_sub(started.elapsed()));
             self.lock().busy = false;
         }
         drop(face);
         log::info!("faces: stopped");
         let mut state = self.lock();
         state.running = false;
-        state.output = None;
+        state.reports.clear();
         if matches!(state.status, Status::Ready { .. }) {
             state.status = Status::Off;
         }
@@ -246,28 +277,48 @@ fn overlap(a: &[f32; COORDS], b: &[f32; COORDS]) -> f32 {
     inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter).max(1e-9)
 }
 
-fn smoothing(cutoff: f32, dt: f32) -> f32 {
-    1.0 / (1.0 + 1.0 / (std::f32::consts::TAU * cutoff * dt.max(1e-3)))
-}
-
 /// A face being followed.
 struct Track {
-    value: [f32; COORDS],
-    speed: [f32; COORDS],
+    /// What's been detected lately: which detection, and where.
+    recent: VecDeque<(u64, [f32; COORDS])>,
     updated: f64,
     hits: u32,
     seen: f32,
 }
 
 impl Track {
-    fn follow(&mut self, target: &[f32; COORDS], now: f64) {
-        let dt = (now - self.updated) as f32;
-        for ((value, speed), target) in self.value.iter_mut().zip(&mut self.speed).zip(target) {
-            *speed += ((target - *value) / dt.max(1e-3) - *speed) * smoothing(DERIVATIVE_CUTOFF, dt);
-            *value += (target - *value) * smoothing(MIN_CUTOFF + SPEED_CUTOFF * speed.abs(), dt);
+    fn new(detection: u64, face: [f32; COORDS], now: f64) -> Self {
+        Self { recent: VecDeque::from([(detection, face)]), updated: now, hits: 1, seen: 0.0 }
+    }
+
+    fn newest(&self) -> &[f32; COORDS] {
+        &self.recent[self.recent.len() - 1].1
+    }
+
+    fn follow(&mut self, detection: u64, target: &[f32; COORDS], now: f64) {
+        self.recent.push_back((detection, *target));
+        if self.recent.len() > 2 * WEIGHTS.len() - 1 {
+            self.recent.pop_front();
         }
         self.updated = now;
         self.hits += 1;
+    }
+
+    /// Where it was at `detection`: an average of the detections either side, which leaves
+    /// movement where it was and only takes out the jitter.
+    fn at(&self, detection: u64) -> [f32; COORDS] {
+        let (mut sum, mut total) = ([0.0; COORDS], 0.0);
+        for (at, face) in &self.recent {
+            let Some(weight) = WEIGHTS.get(at.abs_diff(detection) as usize) else { continue };
+            total += weight;
+            for (sum, v) in sum.iter_mut().zip(face) {
+                *sum += v * weight;
+            }
+        }
+        if total == 0.0 {
+            return *self.newest(); // being held after going missing
+        }
+        sum.map(|v| v / total)
     }
 }
 
@@ -276,20 +327,26 @@ impl Track {
 struct Tracker {
     slots: [Option<Track>; MAX_FACES],
     last: Option<f64>,
+    detections: u64,
+    /// Detections not reported yet: which, and the frame's position.
+    unreported: VecDeque<(u64, f32)>,
 }
 
 impl Tracker {
-    /// `found` is what's been detected at `now` (seconds).
-    fn update(&mut self, found: &[[f32; COORDS]], now: f64) -> Slots {
+    /// `found` is what's been detected at `now` (seconds) in the frame at `time` in the video.
+    /// Returns the report for an earlier frame, now that the frames after it are known.
+    fn update(&mut self, found: &[[f32; COORDS]], now: f64, time: f32) -> Option<Report> {
         let dt = now - self.last.unwrap_or(now);
         self.last = Some(now);
+        let detection = self.detections;
+        self.detections += 1;
 
         // The most overlapping pairs first, so a face can't be taken by a worse match.
         let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
         for (s, track) in self.slots.iter().enumerate() {
             let Some(track) = track else { continue };
             for (f, face) in found.iter().enumerate() {
-                let amount = overlap(&track.value, face);
+                let amount = overlap(track.newest(), face);
                 if amount >= SAME_FACE {
                     pairs.push((amount, s, f));
                 }
@@ -302,30 +359,47 @@ impl Tracker {
                 slot_taken[s] = true;
                 face_taken[f] = true;
                 if let Some(track) = &mut self.slots[s] {
-                    track.follow(&found[f], now);
+                    track.follow(detection, &found[f], now);
                 }
             }
         }
         for (face, _) in found.iter().zip(&face_taken).filter(|(_, taken)| !**taken) {
             if let Some(free) = self.slots.iter_mut().find(|s| s.is_none()) {
-                *free = Some(Track { value: *face, speed: [0.0; COORDS], updated: now, hits: 1, seen: 0.0 });
+                *free = Some(Track::new(detection, *face, now));
             }
         }
 
         let step = (dt / FADE) as f32;
-        let mut shown: Slots = [None; MAX_FACES];
-        for (slot, out) in self.slots.iter_mut().zip(&mut shown) {
+        for slot in &mut self.slots {
             let Some(track) = slot else { continue };
             let fresh = now - track.updated <= HOLD;
             let target = if fresh && track.hits >= CONFIRM { 1.0 } else { 0.0 };
             track.seen = if target > 0.5 { (track.seen + step).min(1.0) } else { (track.seen - step).max(0.0) };
             if !fresh && track.seen <= 0.0 {
                 *slot = None;
-            } else {
-                *out = Some(Shown { coords: track.value, seen: track.seen });
             }
         }
-        shown
+
+        self.unreported.push_back((detection, time));
+        (self.unreported.len() >= WEIGHTS.len()).then(|| self.report()).flatten()
+    }
+
+    fn report(&mut self) -> Option<Report> {
+        let (detection, time) = self.unreported.pop_front()?;
+        let mut slots: Slots = [None; MAX_FACES];
+        for (slot, out) in self.slots.iter().zip(&mut slots) {
+            *out = slot.as_ref().map(|track| Shown { coords: track.at(detection), seen: track.seen });
+        }
+        Some(Report { time, after_cut: false, slots })
+    }
+
+    /// The frames not reported yet, as there won't be any more after them.
+    fn finish(&mut self) -> Vec<Report> {
+        std::iter::from_fn(|| self.report()).collect()
+    }
+
+    fn showing(&self) -> usize {
+        self.slots.iter().flatten().filter(|t| t.seen > 0.0).count()
     }
 }
 
@@ -339,77 +413,73 @@ mod tests {
         c
     }
 
-    const STEP: f64 = 1.0 / 15.0;
+    const STEP: f64 = 1.0 / 24.0;
+
+    /// The tracker fed detections `from..to`, returning its reports in order.
+    fn feed(t: &mut Tracker, from: usize, to: usize, found: impl Fn(usize) -> Vec<[f32; COORDS]>) -> Vec<Report> {
+        (from..to).filter_map(|i| t.update(&found(i), i as f64 * STEP, i as f32 * STEP as f32)).collect()
+    }
 
     #[test]
     fn a_face_shows_after_being_confirmed_and_fades_in() {
         let mut t = Tracker::default();
-        let first = t.update(&[face(0.2, 0.2)], 0.0);
-        assert_eq!(first[0].unwrap().seen, 0.0, "one detection might be a mistake");
-        let second = t.update(&[face(0.2, 0.2)], STEP);
-        assert!(second[0].unwrap().seen > 0.0 && second[0].unwrap().seen < 1.0);
-        let mut last = second;
-        for i in 2..8 {
-            last = t.update(&[face(0.2, 0.2)], i as f64 * STEP);
-        }
-        assert_eq!(last[0].unwrap().seen, 1.0);
+        let reports = feed(&mut t, 0, 16, |_| vec![face(0.2, 0.2)]);
+        assert_eq!(reports[0].time, 0.0, "reports start at the first frame");
+        assert!(reports[0].slots[0].unwrap().seen > 0.0, "known to be real by the time it's reported");
+        assert_eq!(reports.last().unwrap().slots[0].unwrap().seen, 1.0);
     }
 
     #[test]
     fn a_one_off_false_detection_never_shows_and_goes_away() {
         let mut t = Tracker::default();
-        t.update(&[face(0.7, 0.7)], 0.0);
-        for i in 1..12 {
-            let out = t.update(&[], i as f64 * STEP);
-            assert!(out[0].is_none_or(|s| s.seen == 0.0));
-        }
+        let reports = feed(&mut t, 0, 24, |i| if i == 0 { vec![face(0.7, 0.7)] } else { vec![] });
+        assert!(reports.iter().all(|r| r.slots[0].is_none_or(|s| s.seen == 0.0)));
         assert!(t.slots[0].is_none());
     }
 
     #[test]
     fn faces_keep_their_slots_whatever_order_they_come_in() {
         let mut t = Tracker::default();
-        t.update(&[face(0.1, 0.1), face(0.6, 0.6)], 0.0);
-        let out = t.update(&[face(0.6, 0.6), face(0.1, 0.1)], STEP);
-        assert!((out[0].unwrap().coords[0] - 0.1).abs() < 0.01);
-        assert!((out[1].unwrap().coords[0] - 0.6).abs() < 0.01);
+        let reports = feed(&mut t, 0, 6, |i| if i % 2 == 0 { vec![face(0.1, 0.1), face(0.6, 0.6)] } else { vec![face(0.6, 0.6), face(0.1, 0.1)] });
+        let last = &reports.last().unwrap().slots;
+        assert!((last[0].unwrap().coords[0] - 0.1).abs() < 0.01);
+        assert!((last[1].unwrap().coords[0] - 0.6).abs() < 0.01);
     }
 
     #[test]
     fn a_face_missed_briefly_is_held_then_fades() {
         let mut t = Tracker::default();
-        for i in 0..8 {
-            t.update(&[face(0.2, 0.2)], i as f64 * STEP);
-        }
-        let held = t.update(&[], 8.0 * STEP);
-        assert_eq!(held[0].unwrap().seen, 1.0, "just one miss");
-        let back = t.update(&[face(0.2, 0.2)], 9.0 * STEP);
-        assert_eq!(back[0].unwrap().seen, 1.0);
-        let mut i = 10.0;
-        let mut out = t.update(&[], i * STEP);
-        while out[0].is_some() && i < 40.0 {
-            i += 1.0;
-            out = t.update(&[], i * STEP);
-        }
-        assert!(i < 20.0, "should have gone by {i}");
+        feed(&mut t, 0, 12, |_| vec![face(0.2, 0.2)]);
+        let held = feed(&mut t, 12, 13, |_| vec![]);
+        assert_eq!(held[0].slots[0].unwrap().seen, 1.0, "just one miss");
+        let back = feed(&mut t, 13, 14, |_| vec![face(0.2, 0.2)]);
+        assert_eq!(back[0].slots[0].unwrap().seen, 1.0);
+        feed(&mut t, 14, 40, |_| vec![]);
+        assert!(t.slots[0].is_none(), "should have gone");
     }
 
     #[test]
-    fn jitter_is_steadied_but_movement_is_followed() {
+    fn jitter_is_steadied_and_movement_has_no_lag() {
         let mut t = Tracker::default();
-        let mut out = [None; MAX_FACES];
-        for i in 0..60 {
-            let wobble = if i % 2 == 0 { 0.004 } else { -0.004 };
-            out = t.update(&[face(0.3 + wobble, 0.3)], i as f64 * STEP);
+        let reports = feed(&mut t, 0, 60, |i| vec![face(0.3 + if i % 2 == 0 { 0.004 } else { -0.004 }, 0.3)]);
+        let x = reports.last().unwrap().slots[0].unwrap().coords[0];
+        assert!((x - 0.3).abs() < 0.0015, "{x}");
+        // Moving steadily: each report is exactly where the face was at that frame.
+        let mut t = Tracker::default();
+        let at = |i: usize| 0.2 + i as f32 * 0.004;
+        let reports = feed(&mut t, 0, 30, |i| vec![face(at(i), 0.3)]);
+        for (i, report) in reports.iter().enumerate().skip(2) {
+            assert!((report.slots[0].unwrap().coords[0] - at(i)).abs() < 1e-4, "frame {i}");
+            assert!((report.time - i as f32 * STEP as f32).abs() < 1e-4);
         }
-        let x = out[0].unwrap().coords[0];
-        assert!((x - 0.3).abs() < 0.003, "{x}");
-        // Then the face moves a long way, quickly.
-        for i in 60..75 {
-            let x = 0.3 + (i - 60) as f32 * 0.01;
-            out = t.update(&[face(x, 0.3)], i as f64 * STEP);
-        }
-        assert!((out[0].unwrap().coords[0] - 0.44).abs() < 0.03, "{:?}", out[0].unwrap().coords[0]);
+    }
+
+    #[test]
+    fn nothing_is_left_unreported_at_a_cut() {
+        let mut t = Tracker::default();
+        let reports = feed(&mut t, 0, 6, |_| vec![face(0.2, 0.2)]);
+        assert_eq!(reports.len(), 4);
+        assert_eq!(t.finish().len(), 2);
     }
 
     #[test]

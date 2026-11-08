@@ -4,7 +4,8 @@
 //! With an effect on, mpv draws into our own texture instead of the screen; the plugin's
 //! shader then draws from it (and, with `feedback`, from its own previous output) into
 //! another texture, which is copied to the screen. The shader file is checked for changes
-//! twice a second and reloaded, so it can be edited while a video plays.
+//! twice a second and reloaded, so it can be edited while a video plays. During a shuffle's
+//! fade two effects run at once from the same video, and their outputs are mixed.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -35,8 +36,6 @@ struct Objects {
     size: (i32, i32),
     /// What mpv draws.
     video: Target,
-    /// The effect's output, this frame's and last frame's (swapped each frame).
-    out: [Target; 2],
 }
 
 /// What's compiled: the file, when it was last changed, and the setting uniforms (which
@@ -46,6 +45,26 @@ struct Source {
     path: PathBuf,
     modified: Option<SystemTime>,
     uniforms: Vec<String>,
+}
+
+/// One effect being drawn.
+#[derive(Default)]
+struct Slot {
+    /// The effect's program; `None` if it didn't compile.
+    program: Option<glow::Program>,
+    source: Option<Source>,
+    checked: Option<Instant>,
+    started: Option<Instant>,
+    frame: i32,
+    size: (i32, i32),
+    /// The effect's output, this frame's and last frame's (swapped each frame).
+    out: Option<[Target; 2]>,
+    /// Which of `out` is drawn this frame.
+    current: usize,
+    /// Which of `out` was drawn last.
+    drawn: usize,
+    /// The shader's state for the plugin's status line, and which file it's about.
+    status: Option<(PathBuf, (bool, String))>,
 }
 
 /// Lives on the GL thread (inside the player's paint callback); the UI thread only reads
@@ -60,16 +79,9 @@ pub struct Renderer {
     held: HeldFrames,
     faces: FaceGl,
     copy: Option<glow::Program>,
-    /// The effect's program; `None` if it didn't compile.
-    program: Option<glow::Program>,
-    source: Option<Source>,
-    checked: Option<Instant>,
-    started: Option<Instant>,
-    frame: i32,
-    /// Which of `out` is drawn this frame.
-    current: usize,
-    /// The shader's state for the plugin's status line, and which file it's about.
-    status: Option<(PathBuf, (bool, String))>,
+    slots: [Slot; 2],
+    /// Which of `slots` has the chosen effect; the other has the one fading out, if any.
+    front: usize,
     /// No GL 3 (or GLES 3): effects can't run at all.
     unsupported: bool,
 }
@@ -78,6 +90,10 @@ pub struct Renderer {
 #[derive(Clone)]
 pub struct Frame {
     pub effect: ActiveEffect,
+    /// The effect fading out, and how far `effect` has faded in over it (0–1).
+    pub fading: Option<(ActiveEffect, f32)>,
+    /// The size mpv draws at, relative to the screen.
+    pub video_scale: f32,
     /// Where the picture is, without black bars (0–1 from the bottom left).
     pub rect: [f32; 4],
     pub video_time: f32,
@@ -135,7 +151,7 @@ impl Inputs {
     }
 
     /// Call once per frame while an effect is on.
-    pub fn tick(&mut self, mpv: &Mpv, effect: &ActiveEffect) -> (f32, Option<Arc<Features>>) {
+    pub fn tick(&mut self, mpv: &Mpv, wants_audio: bool) -> (f32, Option<Arc<Features>>) {
         let now = Instant::now();
         let dt = self.last.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
         self.last = Some(now);
@@ -150,7 +166,7 @@ impl Inputs {
             None => {}
         }
 
-        if !effect.audio {
+        if !wants_audio {
             self.stop(mpv);
             self.analyser = None;
             return (self.clock as f32, None);
@@ -421,9 +437,10 @@ fn vertex_source(version: &str) -> String {
 fn copy_source(version: &str, embedded: bool) -> String {
     let precision = if embedded { "precision highp float;\n" } else { "" };
     format!(
-        "{version}\n{precision}uniform sampler2D u_tex;\nuniform float u_flip;\nin vec2 v_uv;\nout vec4 flex_color;\n\
+        "{version}\n{precision}uniform sampler2D u_tex;\nuniform sampler2D u_from;\nuniform float u_faded_in;\nuniform float u_flip;\n\
+         in vec2 v_uv;\nout vec4 flex_color;\n\
          void main() {{\n    vec2 uv = vec2(v_uv.x, u_flip > 0.5 ? 1.0 - v_uv.y : v_uv.y);\n\
-         flex_color = vec4(texture(u_tex, uv).rgb, 1.0);\n}}\n"
+         flex_color = vec4(mix(texture(u_from, uv).rgb, texture(u_tex, uv).rgb, u_faded_in), 1.0);\n}}\n"
     )
 }
 
@@ -439,7 +456,7 @@ fn modified(path: &Path) -> Option<SystemTime> {
 impl Renderer {
     /// The status line for this effect, once its shader has been tried.
     pub fn status(&self, effect: &ActiveEffect) -> Option<&(bool, String)> {
-        self.status.as_ref().filter(|(path, _)| *path == effect.shader).map(|(_, s)| s)
+        self.slots.iter().filter_map(|s| s.status.as_ref()).find(|(path, _)| *path == effect.shader).map(|(_, s)| s)
     }
 
     /// Draws the video through `effect` into `target` (`w`×`h` pixels). `render(fbo, w, h)`
@@ -467,7 +484,7 @@ impl Renderer {
             if !version.is_new_shader_interface() {
                 log::warn!("video effects need OpenGL 3 or OpenGL ES 3");
                 self.unsupported = true;
-                self.status = Some((effect.shader.clone(), (false, "Needs OpenGL 3".into())));
+                self.slots[self.front].status = Some((effect.shader.clone(), (false, "Needs OpenGL 3".into())));
                 return false;
             }
             if self.vao.is_none() {
@@ -480,128 +497,147 @@ impl Renderer {
                     }
                 }
             }
-            self.reload(gl, effect, version);
-            let (Some(program), Some(copy), Some(vao)) = (self.program, self.copy, self.vao) else { return false };
+            // As a fade starts, the effect leaving keeps its slot and the new one takes the other.
+            let holds = |slot: &Slot, shader: &Path| slot.source.as_ref().is_some_and(|s| s.path == shader);
+            if !holds(&self.slots[self.front], &effect.shader)
+                && (holds(&self.slots[1 - self.front], &effect.shader) || frame.fading.as_ref().is_some_and(|(from, _)| holds(&self.slots[self.front], &from.shader)))
+            {
+                self.front = 1 - self.front;
+            }
+            let (front, back) = (self.front, 1 - self.front);
+            self.slots[front].reload(gl, effect, version);
+            match &frame.fading {
+                Some((from, _)) => self.slots[back].reload(gl, from, version),
+                None => self.slots[back].free(gl),
+            }
+            if self.slots[front].program.is_none() && self.slots[back].program.is_none() {
+                return false;
+            }
+            let (Some(copy), Some(vao)) = (self.copy, self.vao) else { return false };
 
-            let scale = effect.scale.clamp(0.25, 1.0);
-            let size = (((w as f32 * scale).round() as i32).max(1), ((h as f32 * scale).round() as i32).max(1));
+            let at_scale = |scale: f32| (((w as f32 * scale).round() as i32).max(1), ((h as f32 * scale).round() as i32).max(1));
+            let size = at_scale(frame.video_scale.max(effect.scale).clamp(0.25, 1.0));
             if self.objects.as_ref().is_none_or(|o| o.size != size) {
                 self.free_objects(gl);
-                match create_objects(gl, size) {
-                    Ok(o) => self.objects = Some(o),
+                match create_target(gl, size, &[(glow::RGBA8, glow::UNSIGNED_BYTE)]) {
+                    Ok(video) => self.objects = Some(Objects { size, video }),
                     Err(e) => {
                         log::warn!("video effects: {e}");
-                        self.status = Some((effect.shader.clone(), (false, format!("Can't run: {e}"))));
+                        self.slots[front].status = Some((effect.shader.clone(), (false, format!("Can't run: {e}"))));
                         return false;
                     }
                 }
             }
             let Some(o) = &self.objects else { return false };
+            let scales = [Some(effect), frame.fading.as_ref().map(|(from, _)| from)];
+            for (slot, drawn) in [front, back].into_iter().zip(scales) {
+                let Some(drawn) = drawn else { continue };
+                if let Err(e) = self.slots[slot].prepare(gl, at_scale(drawn.scale.clamp(0.25, 1.0))) {
+                    log::warn!("video effects: {e}");
+                    self.slots[slot].status = Some((drawn.shader.clone(), (false, format!("Can't run: {e}"))));
+                    return false;
+                }
+            }
+            // A feedback effect fading in starts from the one fading out, instead of from black.
+            if frame.fading.is_some() && effect.feedback && self.slots[front].frame == 0 {
+                let [a, b] = &self.slots;
+                let (new, old) = if front == 0 { (a, b) } else { (b, a) };
+                if let (Some(new_out), Some(old_out)) = (&new.out, &old.out) {
+                    gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(old_out[old.drawn].fbo));
+                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(new_out[1 - new.current].fbo));
+                    gl.blit_framebuffer(0, 0, old.size.0, old.size.1, 0, 0, new.size.0, new.size.1, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                }
+            }
 
             render(o.video.fbo.0.get() as i32, size.0, size.1);
-            // With depth, the picture is held back to the frame depth has caught up with.
-            let (video_texture, depth_texture, mask_texture) = match &frame.depth {
-                Some(link) => {
-                    self.depth.update(gl, link, o.video.fbo, size, rect, frame.pts, frame.video_time);
-                    self.held.push(gl, &o.video, size, frame.pts);
-                    let (texture, pts) = self.held.pick(frame.video_time - self.depth.delay).unwrap_or((o.video.texture, frame.pts));
-                    let (depth, masks) = self.depth.map_for(pts);
-                    (texture, depth, masks)
-                }
-                None => {
-                    self.held.free(gl);
-                    self.depth.delay = 0.0;
-                    (o.video.texture, None, None)
-                }
+            match &frame.depth {
+                Some(link) => self.depth.update(gl, link, o.video.fbo, size, rect, frame.pts, frame.video_time),
+                None => self.depth.delay = 0.0,
+            }
+            match &frame.faces {
+                Some(link) => self.faces.update(gl, link, o.video.fbo, size, rect, frame.pts, frame.video_time),
+                None => self.faces.delay = 0.0,
+            }
+            // The picture is held back to the frame depth and faces have caught up with.
+            let (video_texture, pts) = if frame.depth.is_some() || frame.faces.is_some() {
+                self.held.push(gl, &o.video, size, frame.pts);
+                self.held.pick(frame.video_time - self.depth.delay.max(self.faces.delay)).unwrap_or((o.video.texture, frame.pts))
+            } else {
+                self.held.free(gl);
+                (o.video.texture, frame.pts)
             };
-            let faces = match &frame.faces {
-                Some(link) => self.faces.update(gl, link, o.video.fbo, size, rect, frame.video_time),
-                None => FaceUniforms::default(),
-            };
+            let (depth_texture, mask_texture) = if frame.depth.is_some() { self.depth.map_for(pts) } else { (None, None) };
+            let faces = if frame.faces.is_some() { self.faces.uniforms(pts, rect) } else { FaceUniforms::default() };
 
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(vao));
-            let (out, prev) = (&o.out[self.current], &o.out[1 - self.current]);
 
-            // The effect, at the working size.
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(out.fbo));
-            gl.viewport(0, 0, size.0, size.1);
-            gl.use_program(Some(program));
+            // What every effect is given.
+            let audio = frame.audio.as_deref();
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(prev.texture));
-            let at = |name: &str| gl.get_uniform_location(program, name);
-            gl.uniform_1_i32(at("u_video").as_ref(), 0);
-            gl.uniform_1_i32(at("u_prev").as_ref(), 1);
-            gl.uniform_2_f32(at("u_resolution").as_ref(), size.0 as f32, size.1 as f32);
-            let started = *self.started.get_or_insert_with(Instant::now);
-            gl.uniform_1_f32(at("u_time").as_ref(), started.elapsed().as_secs_f32());
-            gl.uniform_1_i32(at("u_frame").as_ref(), self.frame);
-            gl.uniform_4_f32(at("u_video_rect").as_ref(), rect[0], rect[1], rect[2], rect[3]);
-            gl.uniform_1_f32(at("u_video_time").as_ref(), frame.video_time);
-            let a = frame.audio.as_deref();
-            let level = |f: fn(&Features) -> f32| a.map_or(0.0, f);
-            gl.uniform_1_f32(at("u_level").as_ref(), level(|a| a.level));
-            gl.uniform_1_f32(at("u_bass").as_ref(), level(|a| a.bass));
-            gl.uniform_1_f32(at("u_mid").as_ref(), level(|a| a.mid));
-            gl.uniform_1_f32(at("u_treble").as_ref(), level(|a| a.treble));
-            gl.uniform_1_f32(at("u_beat").as_ref(), level(|a| a.beat));
             if let Some(spectrum) = self.spectrum {
                 gl.active_texture(glow::TEXTURE2);
                 gl.bind_texture(glow::TEXTURE_2D, Some(spectrum));
-                if let Some(a) = a {
+                if let Some(a) = audio {
                     let bytes: &[u8] = std::slice::from_raw_parts(a.spectrum.as_ptr().cast(), a.spectrum.len() * 4);
                     gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
                     let (w, h) = (audio::BANDS as i32, audio::HISTORY as i32);
                     gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(bytes)));
                 }
-                gl.uniform_1_i32(at("u_spectrum").as_ref(), 2);
             }
             gl.active_texture(glow::TEXTURE3);
             gl.bind_texture(glow::TEXTURE_2D, depth_texture);
-            gl.uniform_1_i32(at("u_depth").as_ref(), 3);
-            gl.uniform_1_f32(at("u_has_depth").as_ref(), if depth_texture.is_some() && self.depth.serial > 0 { 1.0 } else { 0.0 });
             gl.active_texture(glow::TEXTURE4);
             gl.bind_texture(glow::TEXTURE_2D, mask_texture);
-            gl.uniform_1_i32(at("u_masks").as_ref(), 4);
-            gl.uniform_1_f32(at("u_has_masks").as_ref(), if mask_texture.is_some() && self.depth.has_masks { 1.0 } else { 0.0 });
-            gl.uniform_1_i32(at("u_face_count").as_ref(), faces.count);
-            gl.uniform_4_f32_slice(at("u_faces").as_ref(), &faces.boxes);
-            gl.uniform_2_f32_slice(at("u_face_points").as_ref(), &faces.points);
-            gl.uniform_1_f32_slice(at("u_face_seen").as_ref(), &faces.seen);
-            for (name, value) in &effect.uniforms {
-                gl.uniform_1_f32(at(name).as_ref(), *value);
-            }
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            let given = Given {
+                rect,
+                video_time: frame.video_time,
+                audio,
+                has_depth: depth_texture.is_some() && self.depth.serial > 0,
+                has_masks: mask_texture.is_some() && self.depth.has_masks,
+                faces: &faces,
+            };
 
-            // Onto the screen, scaled up if the effect works smaller.
+            // The effects, each at its working size.
+            self.slots[front].draw(gl, effect, &given);
+            if let Some((from, _)) = &frame.fading {
+                self.slots[back].draw(gl, from, &given);
+            }
+
+            // Onto the screen, scaled up if the effect works smaller. One that didn't compile
+            // fades as the plain video.
+            let shown = |slot: &Slot| slot.program.and(slot.out.as_ref()).map_or(video_texture, |out| out[slot.drawn].texture);
+            let new = shown(&self.slots[front]);
+            let (old, faded_in) = match &frame.fading {
+                Some((_, amount)) => (shown(&self.slots[back]), *amount),
+                None => (new, 1.0),
+            };
             gl.bind_framebuffer(glow::FRAMEBUFFER, target);
             gl.viewport(0, 0, w, h);
             gl.use_program(Some(copy));
             gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.bind_texture(glow::TEXTURE_2D, Some(old));
             gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(out.texture));
+            gl.bind_texture(glow::TEXTURE_2D, Some(new));
             gl.uniform_1_i32(gl.get_uniform_location(copy, "u_tex").as_ref(), 0);
+            gl.uniform_1_i32(gl.get_uniform_location(copy, "u_from").as_ref(), 1);
+            gl.uniform_1_f32(gl.get_uniform_location(copy, "u_faded_in").as_ref(), faded_in);
             // The window's rows run bottom-up like ours; an offscreen target's top-down.
             let flip = if target.is_some() { 1.0 } else { 0.0 };
             gl.uniform_1_f32(gl.get_uniform_location(copy, "u_flip").as_ref(), flip);
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
             gl.bind_texture(glow::TEXTURE_2D, None);
-            for unit in [glow::TEXTURE2, glow::TEXTURE3, glow::TEXTURE4] {
+            for unit in [glow::TEXTURE1, glow::TEXTURE2, glow::TEXTURE3, glow::TEXTURE4] {
                 gl.active_texture(unit);
                 gl.bind_texture(glow::TEXTURE_2D, None);
             }
             gl.active_texture(glow::TEXTURE0);
             gl.bind_vertex_array(None);
             gl.use_program(None);
-            if effect.feedback {
-                self.current = 1 - self.current;
-            }
-            self.frame = self.frame.wrapping_add(1);
             true
         }
     }
@@ -613,8 +649,8 @@ impl Renderer {
     pub unsafe fn release(&mut self, gl: &glow::Context) {
         unsafe {
             self.free_objects(gl);
-            if let Some(p) = self.program.take() {
-                gl.delete_program(p);
+            for slot in &mut self.slots {
+                slot.free(gl);
             }
             if let Some(p) = self.copy.take() {
                 gl.delete_program(p);
@@ -628,15 +664,12 @@ impl Renderer {
             if let Some(vao) = self.vao.take() {
                 gl.delete_vertex_array(vao);
             }
-            self.source = None;
-            self.checked = None;
-            self.started = None;
         }
     }
 
     /// How far behind the picture is being held (seconds), which the sound has to match.
     pub fn held_back(&self) -> f32 {
-        self.depth.delay
+        self.depth.delay.max(self.faces.delay)
     }
 
     pub fn holds_gl(&self) -> bool {
@@ -662,6 +695,28 @@ impl Renderer {
         }
     }
 
+    unsafe fn free_objects(&mut self, gl: &glow::Context) {
+        unsafe { self.held.free(gl) };
+        if let Some(o) = self.objects.take() {
+            unsafe {
+                gl.delete_framebuffer(o.video.fbo);
+                gl.delete_texture(o.video.texture);
+            }
+        }
+    }
+}
+
+/// What every effect drawn this frame is given, besides the textures already bound.
+struct Given<'a> {
+    rect: [f32; 4],
+    video_time: f32,
+    audio: Option<&'a Features>,
+    has_depth: bool,
+    has_masks: bool,
+    faces: &'a FaceUniforms,
+}
+
+impl Slot {
     /// Compiles the effect when it's new or its file changed.
     unsafe fn reload(&mut self, gl: &glow::Context, effect: &ActiveEffect, version: egui_glow::ShaderVersion) {
         unsafe {
@@ -679,7 +734,7 @@ impl Renderer {
                 // A different effect: start afresh.
                 self.started = None;
                 self.frame = 0;
-                self.free_objects(gl);
+                self.free_targets(gl);
             }
             let status = match std::fs::read_to_string(&source.path) {
                 Err(e) => {
@@ -690,11 +745,12 @@ impl Renderer {
                 Ok(body) => {
                     let decl = version.version_declaration();
                     let fragment = fragment_source(decl, version.is_embedded(), &source.uniforms, &body);
+                    let started = Instant::now();
                     match compile(gl, &vertex_source(decl), &fragment) {
                         Ok(program) => {
                             self.delete_program(gl);
                             self.program = Some(program);
-                            log::info!("video effect {}: loaded {}", effect.name, source.path.display());
+                            log::info!("video effect {}: loaded {} in {} ms", effect.name, source.path.display(), started.elapsed().as_millis());
                             (true, "Running".to_owned())
                         }
                         Err(e) => {
@@ -711,22 +767,106 @@ impl Renderer {
         }
     }
 
+    /// Makes sure its output is `size`.
+    unsafe fn prepare(&mut self, gl: &glow::Context, size: (i32, i32)) -> Result<(), String> {
+        if self.out.is_some() && self.size == size {
+            return Ok(());
+        }
+        unsafe {
+            self.free_targets(gl);
+            let rgba8 = (glow::RGBA8, glow::UNSIGNED_BYTE);
+            // Feedback fades over many frames: 8 bits a channel would leave trails stuck at
+            // faint colours, so half floats where the GPU can draw into them.
+            let float = [(glow::RGBA16F, glow::HALF_FLOAT), rgba8];
+            let a = create_target(gl, size, &float);
+            let b = create_target(gl, size, &float);
+            match (a, b) {
+                (Ok(a), Ok(b)) => {
+                    self.out = Some([a, b]);
+                    self.size = size;
+                    Ok(())
+                }
+                (a, b) => {
+                    for t in [a, b].into_iter().flatten() {
+                        gl.delete_framebuffer(t.fbo);
+                        gl.delete_texture(t.texture);
+                    }
+                    Err("framebuffers incomplete".into())
+                }
+            }
+        }
+    }
+
+    /// Runs the effect once. Texture units 0 and 2–4 are already bound.
+    unsafe fn draw(&mut self, gl: &glow::Context, effect: &ActiveEffect, given: &Given) {
+        let (Some(program), Some(targets)) = (self.program, &self.out) else { return };
+        unsafe {
+            let (out, prev) = (&targets[self.current], &targets[1 - self.current]);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(out.fbo));
+            gl.viewport(0, 0, self.size.0, self.size.1);
+            gl.use_program(Some(program));
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(prev.texture));
+            let at = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_1_i32(at("u_video").as_ref(), 0);
+            gl.uniform_1_i32(at("u_prev").as_ref(), 1);
+            gl.uniform_2_f32(at("u_resolution").as_ref(), self.size.0 as f32, self.size.1 as f32);
+            let started = *self.started.get_or_insert_with(Instant::now);
+            gl.uniform_1_f32(at("u_time").as_ref(), started.elapsed().as_secs_f32());
+            gl.uniform_1_i32(at("u_frame").as_ref(), self.frame);
+            let rect = given.rect;
+            gl.uniform_4_f32(at("u_video_rect").as_ref(), rect[0], rect[1], rect[2], rect[3]);
+            gl.uniform_1_f32(at("u_video_time").as_ref(), given.video_time);
+            let level = |f: fn(&Features) -> f32| given.audio.map_or(0.0, f);
+            gl.uniform_1_f32(at("u_level").as_ref(), level(|a| a.level));
+            gl.uniform_1_f32(at("u_bass").as_ref(), level(|a| a.bass));
+            gl.uniform_1_f32(at("u_mid").as_ref(), level(|a| a.mid));
+            gl.uniform_1_f32(at("u_treble").as_ref(), level(|a| a.treble));
+            gl.uniform_1_f32(at("u_beat").as_ref(), level(|a| a.beat));
+            gl.uniform_1_i32(at("u_spectrum").as_ref(), 2);
+            gl.uniform_1_i32(at("u_depth").as_ref(), 3);
+            gl.uniform_1_f32(at("u_has_depth").as_ref(), if given.has_depth { 1.0 } else { 0.0 });
+            gl.uniform_1_i32(at("u_masks").as_ref(), 4);
+            gl.uniform_1_f32(at("u_has_masks").as_ref(), if given.has_masks { 1.0 } else { 0.0 });
+            let faces = given.faces;
+            gl.uniform_1_i32(at("u_face_count").as_ref(), faces.count);
+            gl.uniform_4_f32_slice(at("u_faces").as_ref(), &faces.boxes);
+            gl.uniform_2_f32_slice(at("u_face_points").as_ref(), &faces.points);
+            gl.uniform_1_f32_slice(at("u_face_seen").as_ref(), &faces.seen);
+            for (name, value) in &effect.uniforms {
+                gl.uniform_1_f32(at(name).as_ref(), *value);
+            }
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+        }
+        self.drawn = self.current;
+        if effect.feedback {
+            self.current = 1 - self.current;
+        }
+        self.frame = self.frame.wrapping_add(1);
+    }
+
     unsafe fn delete_program(&mut self, gl: &glow::Context) {
         if let Some(p) = self.program.take() {
             unsafe { gl.delete_program(p) };
         }
     }
 
-    unsafe fn free_objects(&mut self, gl: &glow::Context) {
-        unsafe { self.held.free(gl) };
-        if let Some(o) = self.objects.take() {
-            for t in [o.video].into_iter().chain(o.out) {
-                unsafe {
-                    gl.delete_framebuffer(t.fbo);
-                    gl.delete_texture(t.texture);
-                }
+    unsafe fn free_targets(&mut self, gl: &glow::Context) {
+        for t in self.out.take().into_iter().flatten() {
+            unsafe {
+                gl.delete_framebuffer(t.fbo);
+                gl.delete_texture(t.texture);
             }
         }
+    }
+
+    /// Back to holding nothing.
+    unsafe fn free(&mut self, gl: &glow::Context) {
+        unsafe {
+            self.delete_program(gl);
+            self.free_targets(gl);
+        }
+        *self = Self::default();
     }
 }
 
@@ -1070,19 +1210,60 @@ struct FaceGl {
     objects: Option<(Target, glow::Buffer)>,
     failed: bool,
     pending: Option<(Fence, (f32, f32))>,
+    /// The position of the last frame sent, and of the one being read back.
     last_time: Option<f32>,
-    shown: [Option<crate::faces::Shown>; crate::faces::MAX_FACES],
-    painted: Option<Instant>,
+    pending_time: f32,
+    /// What's come in lately, oldest first.
+    reports: VecDeque<crate::faces::Report>,
+    arrived: u32,
+    /// How late reports arrive after their frame (seconds), on average.
+    late: f32,
+    /// How far the picture is being held back to match (seconds).
+    delay: f32,
+}
+
+/// How many reports are kept to draw from: over a second's worth.
+const FACE_REPORTS: usize = 32;
+
+/// The faces at `time`, between the reports either side of it.
+fn faces_between(reports: &VecDeque<crate::faces::Report>, time: f32) -> crate::faces::Slots {
+    let none = [None; crate::faces::MAX_FACES];
+    let (before, after) = match reports.iter().position(|r| r.time > time) {
+        None => return reports.back().map_or(none, |r| r.slots),
+        Some(0) => return reports[0].slots,
+        Some(i) => (&reports[i - 1], &reports[i]),
+    };
+    if after.after_cut {
+        return before.slots;
+    }
+    let along = (time - before.time) / (after.time - before.time).max(1e-6);
+    let mut out = none;
+    for (out, (a, b)) in out.iter_mut().zip(before.slots.iter().zip(&after.slots)) {
+        *out = match (a, b) {
+            (Some(a), Some(b)) => {
+                let mut mixed = *a;
+                for (v, b) in mixed.coords.iter_mut().zip(b.coords) {
+                    *v += (b - *v) * along;
+                }
+                mixed.seen += (b.seen - a.seen) * along;
+                Some(mixed)
+            }
+            (a, b) => a.or(*b),
+        };
+    }
+    out
 }
 
 impl FaceGl {
-    /// Picks up a frame read back last time and hands it over, reads back this frame if the
-    /// worker's free, and returns the faces as they should be drawn this frame.
-    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::faces::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32) -> FaceUniforms {
+    /// Picks up a frame read back last time and hands it over, collects new reports, and reads
+    /// back this frame if the worker's free. `time` is the frame's position and `clock` the
+    /// smooth playback time.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::faces::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
         use crate::faces::{HEIGHT, WIDTH};
         unsafe {
             if self.failed {
-                return FaceUniforms::default();
+                return;
             }
             if self.objects.is_none() {
                 let made = create_target(gl, (WIDTH as i32, HEIGHT as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|capture| {
@@ -1097,11 +1278,11 @@ impl FaceGl {
                     Err(e) => {
                         log::warn!("faces: {e}");
                         self.failed = true;
-                        return FaceUniforms::default();
+                        return;
                     }
                 }
             }
-            let Some((capture, pbo)) = self.objects.as_ref() else { return FaceUniforms::default() };
+            let Some((capture, pbo)) = self.objects.as_ref() else { return };
             let bytes = WIDTH * HEIGHT * 4;
             if let Some((Fence(fence), filled)) = self.pending {
                 match gl.client_wait_sync(fence, 0, 0) {
@@ -1113,7 +1294,7 @@ impl FaceGl {
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
                             let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
                             if !ptr.is_null() {
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), filled);
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), filled, self.pending_time);
                                 gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
                             }
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -1121,8 +1302,28 @@ impl FaceGl {
                     }
                 }
             }
+            for report in link.take_reports() {
+                // Going backwards: what's kept is from somewhere else.
+                if self.reports.back().is_some_and(|r| report.time < r.time) {
+                    self.reports.clear();
+                }
+                let late = clock - report.time;
+                // Outside this, it's a seek and says nothing about how long faces take.
+                if (0.0..0.5).contains(&late) {
+                    self.arrived += 1;
+                    self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
+                    if self.arrived >= HOLD_AFTER_MAPS {
+                        self.delay = next_delay(self.delay, self.late);
+                    }
+                }
+                self.reports.push_back(report);
+                if self.reports.len() > FACE_REPORTS {
+                    self.reports.pop_front();
+                }
+            }
             if self.pending.is_none() && link.ready_for_frame() && self.last_time != Some(time) {
                 self.last_time = Some(time);
+                self.pending_time = time;
                 // The picture without black bars, its shape kept and the rest left black: a
                 // squashed face is harder to find. In GL's rows, the top of the picture is
                 // at the top of the capture.
@@ -1148,24 +1349,13 @@ impl FaceGl {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
         }
-        let now = Instant::now();
-        let dt = self.painted.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
-        self.painted = Some(now);
-        let target = link.latest().map_or([None; crate::faces::MAX_FACES], |slots| *slots);
-        let follow = 1.0 - (-dt * FACE_GLIDE).exp();
+    }
+
+    /// The faces in the frame at `time`, as the shader wants them.
+    fn uniforms(&self, time: f32, rect: [f32; 4]) -> FaceUniforms {
         let mut out = FaceUniforms::default();
-        for (i, (shown, target)) in self.shown.iter_mut().zip(target).enumerate() {
-            *shown = match (*shown, target) {
-                (Some(mut was), Some(new)) => {
-                    for (a, b) in was.coords.iter_mut().zip(new.coords) {
-                        *a += (b - *a) * follow;
-                    }
-                    was.seen += (new.seen - was.seen) * follow;
-                    Some(was)
-                }
-                (_, new) => new,
-            };
-            let Some(face) = shown else { continue };
+        for (i, face) in faces_between(&self.reports, time).iter().enumerate() {
+            let Some(face) = face else { continue };
             let (width, height) = (rect[2] - rect[0], rect[3] - rect[1]);
             let x = |v: f32| rect[0] + v * width;
             let y = |v: f32| rect[3] - v * height;
@@ -1191,14 +1381,13 @@ impl FaceGl {
                 gl.delete_buffer(pbo);
             }
             self.last_time = None;
-            self.painted = None;
-            self.shown = [None; crate::faces::MAX_FACES];
+            self.reports.clear();
+            self.arrived = 0;
+            self.late = 0.0;
+            self.delay = 0.0;
         }
     }
 }
-
-/// How quickly drawn faces close the gap to the latest report (per second).
-const FACE_GLIDE: f32 = 25.0;
 
 unsafe fn create_depth(gl: &glow::Context) -> Result<DepthObjects, String> {
     use crate::depth::{HEIGHT, WIDTH};
@@ -1265,28 +1454,6 @@ unsafe fn create_spectrum(gl: &glow::Context) -> Result<glow::Texture, String> {
     }
 }
 
-unsafe fn create_objects(gl: &glow::Context, size: (i32, i32)) -> Result<Objects, String> {
-    unsafe {
-        let rgba8 = (glow::RGBA8, glow::UNSIGNED_BYTE);
-        // Feedback fades over many frames: 8 bits a channel would leave trails stuck at
-        // faint colours, so half floats where the GPU can draw into them.
-        let float = [(glow::RGBA16F, glow::HALF_FLOAT), rgba8];
-        let video = create_target(gl, size, &[rgba8])?;
-        let a = create_target(gl, size, &float);
-        let b = create_target(gl, size, &float);
-        match (a, b) {
-            (Ok(a), Ok(b)) => Ok(Objects { size, video, out: [a, b] }),
-            (a, b) => {
-                for t in [Ok(video), a, b].into_iter().flatten() {
-                    gl.delete_framebuffer(t.fbo);
-                    gl.delete_texture(t.texture);
-                }
-                Err("framebuffers incomplete".into())
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1314,6 +1481,23 @@ mod tests {
 #[cfg(test)]
 mod hold_tests {
     use super::*;
+
+    fn report(time: f32, x: f32, after_cut: bool) -> crate::faces::Report {
+        let mut slots = [None; crate::faces::MAX_FACES];
+        slots[0] = Some(crate::faces::Shown { coords: [x; crate::faces::COORDS], seen: 1.0 });
+        crate::faces::Report { time, after_cut, slots }
+    }
+
+    #[test]
+    fn faces_are_drawn_where_they_were_at_that_frame() {
+        let reports = VecDeque::from([report(1.0, 0.2, false), report(2.0, 0.4, false), report(3.0, 0.9, true)]);
+        let x = |t: f32| faces_between(&reports, t)[0].unwrap().coords[0];
+        assert!((x(1.5) - 0.3).abs() < 1e-5, "between two reports");
+        assert_eq!(x(0.5), 0.2, "before them all");
+        assert_eq!(x(4.0), 0.9, "after them all");
+        assert_eq!(x(2.5), 0.4, "not across a cut");
+        assert!(faces_between(&VecDeque::new(), 1.0)[0].is_none());
+    }
 
     #[test]
     fn the_newest_frame_that_is_due_is_shown() {

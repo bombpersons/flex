@@ -5,8 +5,16 @@ dreamy swirls, anything you can write as a GLSL fragment shader. Effects run on 
 can react to the sound, and reload as soon as you save the file, so you can write one
 while watching it.
 
-Choose one in Settings → Picture → Video effects, or hold OK while a video plays to
-switch to the next one (and back to off). Its settings show under it in Settings.
+Hold OK (or right-click) while a video plays to open the effects panel beside the picture.
+Up and Down pick a row, Left and Right change it, and Back closes the panel: switch effect
+and adjust its settings while you watch. They're also in Settings → Picture → Video effects.
+
+Turn on Shuffle in the panel and effects take turns at random, each staying for a random time
+between the shortest and longest you set, then fading into the next. Every effect plays once
+before any comes round again, and the clock stops while the video's paused. "In the shuffle"
+leaves out the effect you're on. Shuffle keeps sound, depth, masks and faces running for
+whatever it might pick next, so that nothing stutters at the changes; leave out the effects
+that use them if the GPU struggles.
 
 Flex comes with these to start from, in [`effects`](effects):
 
@@ -23,11 +31,24 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Rubber Sheet**: stretches the film over a wobbling mesh shaped by depth: waves, ripples,
   facets or wireframe.
 - **Undertow**: the background melts and pours away while whoever's up close stays solid.
+- **Ego Death**: people leave rainbow ghosts of themselves that spiral away.
+- **Sky Eater**: the sky opens into a spiral that endlessly swallows the rest of the film.
+- **Breathing Walls**: walls swell and sink and crawl with colour that follows the room.
+- **Third Eye**: everyone grows a real eye in the middle of their forehead.
+- **Wax Museum**: faces soften like candle wax and run down people's necks.
+- **Hall of Faces**: each face sprouts a turning ring of copies of itself.
+- **Liquid Mercury**: the whole world turns to rippling liquid metal.
+- **Time Smear**: time runs slower the further away something is.
+- **Mind Bloom**: a kaleidoscope that grows more arms with the bass and blooms into its own
+  feedback.
 - **Masks**: shows what Flex can tell apart in the picture: people, walls and sky.
 - **Faces**: shows what Flex can see of the faces in the picture, for checking and for
   making effects.
 - **Spotlight**: faces stay as they are while everything around them melts and dims.
-- **Laser Eyes**: a beam from each eye, sweeping about and flaring on the beat.
+- **Laser Eyes**: a beam from each eye, going the way the face is pointing and flaring on the
+  beat.
+- **Big Heads**: everyone's head swells up on top of a normal-sized body and pulses with the
+  sound.
 - **Soundstage**: sounds light up what's closest and roll back through the scene.
 
 ## Making one
@@ -105,6 +126,7 @@ segment = true                 # where people, walls and sky are; default false
 faces = true                   # where faces are; default false
 scale = 1.0                    # work at this fraction of the screen's size (0.25–1), then
                                # scale up: lower is lighter on the GPU; default 1
+shuffle = false                # leave it out of shuffle unless someone adds it; default true
 
 [[settings]]
 key = "speed"                  # becomes `uniform float s_speed;`
@@ -118,8 +140,8 @@ unit = "×"
 default = 1
 ```
 
-Settings show under the effect in Settings → Picture → Video effects and are kept per
-effect. A `choice` setting takes `options = [{ id = "soft", label = "Soft" }, ...]`, and
+Settings show under the effect in the panel and in Settings → Picture → Video effects, and
+are kept per effect. A `choice` setting takes `options = [{ id = "soft", label = "Soft" }, ...]`, and
 the shader gets the chosen option's position (0, 1, ...).
 
 ### Sound
@@ -161,8 +183,10 @@ behind someone can be called a wall, and their edges are worth treating as soft.
 
 With `faces = true`, Flex finds up to eight faces with
 [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (MIT), a
-small network that runs on the GPU like depth does and comes with Flex. It's cheap, and works
-15 times a second. A face keeps its slot in the arrays while it's on screen. It works best on
+small network that runs on the GPU like depth does and comes with Flex. It's cheap, and looks
+at up to about 30 frames a second. Each frame is drawn with the faces found in it: as with
+depth, the picture and sound are held back a moment, usually 0.15 of a second or so, which
+also lets Flex steady each face using the frames either side. A face keeps its slot in the arrays while it's on screen. It works best on
 live action; very small faces, faces in profile or turned away, and cartoon characters are
 missed some of the time, so effects need to look fine with no faces at all.
 

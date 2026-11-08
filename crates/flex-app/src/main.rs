@@ -7,6 +7,7 @@ mod awake;
 #[cfg(windows)]
 mod autostart;
 mod depth;
+mod effect_panel;
 mod effects;
 mod faces;
 mod images;

@@ -1,7 +1,7 @@
 //! Full-screen video playback with a minimal d-pad OSD.
 //!
 //! OK / Play-Pause: pause/play · Left/Right: seek (hold to go faster) · 0–9: jump to
-//! 0%–90% of the way through · Up: subtitles · Down: audio · Hold OK: next video effect ·
+//! 0%–90% of the way through · Up: subtitles · Down: audio · Hold OK: the effects panel ·
 //! Back: hide the OSD, or stop if it's already hidden · Stop: stop.
 //! F2: playback stats (dropped frames, decoder, refresh rate). F3: the video effects
 //! window (choose an effect, change its settings, Anime4K and SVP, while it plays).
@@ -22,6 +22,7 @@ use flex_core::youtube::sponsorblock::{self, Segment};
 use flex_plugin::{Light, Playback, PlaybackState};
 
 use crate::ambient::Margins;
+use crate::effect_panel::{EffectPanel, Outcome};
 use crate::input::{Action, Press};
 use crate::mpv::{self, GetProcAddress, Mpv, Renderer};
 use crate::picture::Picture;
@@ -52,8 +53,6 @@ const SUB_SEP: char = '\u{1f}';
 enum Track {
     Sub,
     Audio,
-    /// The video effect just switched to (`Player::effect_label`).
-    Effect,
 }
 
 pub struct Player {
@@ -71,7 +70,8 @@ pub struct Player {
     effect_inputs: crate::effects::Inputs,
     /// What mpv's audio-delay is set to, to match the picture being held back for depth.
     audio_held: f32,
-    effect_label: String,
+    /// Hold OK: choosing the effect and changing its settings while the video plays.
+    effect_panel: Option<EffectPanel>,
     /// For the history: when this session started, the furthest position recorded, whether
     /// it reached "watched", and whether the session has been logged.
     session_start: i64,
@@ -153,7 +153,7 @@ impl Player {
             position: None,
             effect_inputs: Default::default(),
             audio_held: 0.0,
-            effect_label: String::new(),
+            effect_panel: None,
             session_start: crate::shared::now_unix(),
             recorded: None,
             became_watched: false,
@@ -322,7 +322,7 @@ impl Player {
 
     /// Turns subtitles off once Up has been held for `SUB_OFF_HOLD_SECS`.
     fn hold_up_for_subs_off(&mut self, ctx: &egui::Context, now: f64) {
-        if !ctx.input(|i| i.key_down(egui::Key::ArrowUp)) {
+        if self.effect_panel.is_some() || !ctx.input(|i| i.key_down(egui::Key::ArrowUp)) {
             self.up_held = None;
             return;
         }
@@ -500,7 +500,6 @@ impl Player {
         let (kind, name) = match track {
             Track::Sub => ("sub", "Subtitles"),
             Track::Audio => ("audio", "Audio"),
-            Track::Effect => return self.effect_label.clone(),
         };
         let prop = |p: &str| self.mpv.get_string(&format!("current-tracks/{kind}/{p}")).filter(|s| !s.is_empty());
         let Some(id) = self.mpv.get_i64(&format!("current-tracks/{kind}/id")) else {
@@ -658,6 +657,7 @@ impl Player {
         // Ambient light: sample the picture (without the black bars) right after it's drawn.
         let sampler = sh.plugins.wants_light().then(|| sh.ambient.sampler.clone());
         // The video effect: drawn every frame, so it moves while paused too.
+        sh.effects.step(ctx.input(|i| i.unstable_dt).min(0.25), self.loaded && !self.paused());
         let effect = sh.effects.active();
         if let Some(effect) = &effect {
             let status = sh.effect_renderer.lock().unwrap_or_else(|e| e.into_inner()).status(effect).cloned();
@@ -674,17 +674,19 @@ impl Player {
         }
         let frame = match &effect {
             Some(effect) => {
-                let (video_time, audio) = self.effect_inputs.tick(&self.mpv, effect);
+                let needs = sh.effects.needs();
+                let (video_time, audio) = self.effect_inputs.tick(&self.mpv, needs.audio);
                 let pts = self.mpv.get_f64("time-pos").map_or(video_time, |p| p as f32);
-                let depth = (effect.depth || effect.segment).then(|| {
-                    sh.depth.wanted(effect.segment);
+                let depth = needs.depth.then(|| {
+                    sh.depth.wanted(needs.segment);
                     sh.depth.clone()
                 });
-                let faces = effect.faces.then(|| {
+                let faces = needs.faces.then(|| {
                     sh.faces.wanted();
                     sh.faces.clone()
                 });
-                Some(crate::effects::Frame { effect: effect.clone(), rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces })
+                let fading = sh.effects.fading();
+                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces })
             }
             None => {
                 self.effect_inputs.stop(&self.mpv);
@@ -772,7 +774,10 @@ impl Player {
             // must be asked every refresh while playing, not only when it signals an update.
             ctx.request_repaint();
         }
-        if paused || now < self.osd_until || self.drag.is_some() {
+        if let Some(panel) = &mut self.effect_panel {
+            self.osd_panel = None;
+            panel.ui(ui, sh, safe);
+        } else if paused || now < self.osd_until || self.drag.is_some() {
             self.draw_osd(ui, safe, now, paused);
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         } else {
@@ -886,17 +891,24 @@ impl Player {
 impl Screen for Player {
     fn handle(&mut self, sh: &mut Shared, press: Press) -> Nav {
         let now = sh.ctx.input(|i| i.time);
+        if let Some(panel) = &mut self.effect_panel {
+            match panel.handle(sh, press) {
+                Outcome::Stay => return Nav::None,
+                Outcome::Close => {
+                    self.effect_panel = None;
+                    return Nav::None;
+                }
+                Outcome::NotForMe => {}
+            }
+        }
         match press.action {
-            // Holding OK: the next video effect.
+            // Holding OK: the effects panel.
             Action::Menu if !press.repeat => {
-                let (effects, db) = sh.effects_mut();
-                effects.cycle(db);
-                self.effect_label = match sh.effects.chosen() {
-                    Some(e) => format!("Effect: {}", e.manifest.name),
-                    None if sh.effects.list().is_empty() => "No video effects (see Settings → Picture)".to_owned(),
-                    None => "Effect: off".to_owned(),
-                };
-                self.message = Some((Track::Effect, now + MESSAGE_SECS));
+                if sh.effects.list().is_empty() {
+                    sh.toast("No video effects (see Settings → Picture)");
+                } else {
+                    self.effect_panel = Some(EffectPanel::default());
+                }
                 Nav::None
             }
             Action::Next if !press.repeat => match sh.next_after(&self.req) {
@@ -951,10 +963,15 @@ impl Screen for Player {
     }
 
     fn on_controls(&self, pos: egui::Pos2) -> bool {
-        self.osd_panel.is_some_and(|panel| panel.contains(pos)) || self.skip_button.is_some_and(|b| b.contains(pos))
+        self.osd_panel.is_some_and(|panel| panel.contains(pos))
+            || self.skip_button.is_some_and(|b| b.contains(pos))
+            || self.effect_panel.as_ref().is_some_and(|panel| panel.contains(pos))
     }
 
     fn on_leave(&mut self, sh: &mut Shared) {
+        if let Some(panel) = &mut self.effect_panel {
+            panel.save(sh);
+        }
         self.save_progress(sh);
         self.log_session(sh);
     }

@@ -1,13 +1,13 @@
 //! Video effects: shaders Flex runs over the video (the drawing is in the app). Each is
 //! a `<id>.frag` in an `effects` folder, with an optional `<id>.toml` for its name,
 //! options and settings. One effect is chosen at a time (or none); its settings are kept
-//! per effect.
+//! per effect. Shuffle swaps the chosen effect at random, fading from one to the next.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use flex_plugin::Settings;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Db;
 use crate::plugins::{SettingKind, SettingSpec};
@@ -41,6 +41,9 @@ pub struct Manifest {
     /// Size to work at, relative to the screen (0.25–1): lower is lighter on the GPU.
     #[serde(default = "full")]
     pub scale: f32,
+    /// Whether shuffle picks this effect unless told otherwise: false for test views.
+    #[serde(default = "yes")]
+    pub shuffle: bool,
     #[serde(default)]
     pub settings: Vec<SettingSpec>,
 }
@@ -49,9 +52,13 @@ fn full() -> f32 {
     1.0
 }
 
+fn yes() -> bool {
+    true
+}
+
 impl Default for Manifest {
     fn default() -> Self {
-        Self { name: String::new(), description: String::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, scale: 1.0, settings: Vec::new() }
+        Self { name: String::new(), description: String::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, scale: 1.0, shuffle: true, settings: Vec::new() }
     }
 }
 
@@ -140,7 +147,46 @@ pub struct ActiveEffect {
     pub uniforms: Vec<(String, f32)>,
 }
 
+/// What drawing the video needs, across every effect that's on or about to be.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Needs {
+    pub audio: bool,
+    /// Depth, which masks are made on top of.
+    pub depth: bool,
+    pub segment: bool,
+    pub faces: bool,
+    /// The largest size any of them works at (0.25–1).
+    pub scale: f32,
+}
+
+/// Effects taking turns at random.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Shuffle {
+    pub on: bool,
+    /// How long each effect stays, in seconds, not counting the fade: somewhere between these.
+    pub shortest: f32,
+    pub longest: f32,
+    /// How long one effect takes to fade into the next, in seconds.
+    pub fade: f32,
+}
+
+impl Default for Shuffle {
+    fn default() -> Self {
+        Self { on: false, shortest: 20.0, longest: 60.0, fade: 4.0 }
+    }
+}
+
+/// An effect on its way out.
+struct Fading {
+    from: String,
+    elapsed: f32,
+}
+
 const CHOSEN_KEY: &str = "video_effect";
+const SHUFFLE_KEY: &str = "video_effect_shuffle";
+/// Kept with an effect's settings: whether shuffle may pick it.
+const IN_SHUFFLE_SETTING: &str = "_in_shuffle";
 
 fn settings_key(id: &str) -> String {
     format!("video_effect.{id}")
@@ -155,13 +201,22 @@ pub struct Effects {
     settings: HashMap<String, Settings>,
     /// The chosen effect's shader state, from the app: (ok, text).
     pub status: Option<(bool, String)>,
+    shuffle: Shuffle,
+    /// Seconds of playing until shuffle moves on.
+    until_next: f32,
+    fading: Option<Fading>,
+    /// What shuffle hasn't played yet this time round.
+    turns: Vec<String>,
+    random: u64,
 }
 
 impl Effects {
     pub fn new(dirs: &[PathBuf], db: &Db) -> Self {
         let chosen = db.setting(CHOSEN_KEY).ok().flatten().filter(|s| !s.is_empty());
-        let mut effects = Self { chosen, ..Self::default() };
+        let shuffle = db.setting(SHUFFLE_KEY).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let mut effects = Self { chosen, shuffle, ..Self::default() };
         effects.refresh(dirs, db);
+        effects.wait();
         effects
     }
 
@@ -188,12 +243,157 @@ impl Effects {
         self.effects.iter().find(|e| e.id == id)
     }
 
+    /// Someone chose an effect: it shows at once, and with shuffle on gets a full turn.
+    /// Choosing none turns shuffle off.
     pub fn choose(&mut self, id: Option<&str>, db: &Db) {
         self.chosen = id.map(str::to_owned);
         self.status = None;
-        if let Err(e) = db.set_setting(CHOSEN_KEY, id.unwrap_or("")) {
+        self.fading = None;
+        if id.is_none() && self.shuffle.on {
+            self.shuffle.on = false;
+            self.save_shuffle(db);
+        }
+        self.wait();
+        self.save_chosen(db);
+    }
+
+    fn save_chosen(&self, db: &Db) {
+        if let Err(e) = db.set_setting(CHOSEN_KEY, self.chosen.as_deref().unwrap_or("")) {
             log::warn!("saving the video effect: {e:#}");
         }
+    }
+
+    pub fn shuffle(&self) -> Shuffle {
+        self.shuffle
+    }
+
+    pub fn set_shuffle(&mut self, shuffle: Shuffle, db: &Db) {
+        let (started, stopped) = (shuffle.on && !self.shuffle.on, !shuffle.on && self.shuffle.on);
+        self.shuffle = shuffle;
+        self.save_shuffle(db);
+        if started {
+            if self.chosen().is_none() {
+                self.chosen = self.next_turn();
+                self.status = None;
+            }
+            self.wait();
+        }
+        if stopped {
+            // Stay on whichever came up.
+            self.save_chosen(db);
+        }
+    }
+
+    fn save_shuffle(&self, db: &Db) {
+        let saved = serde_json::to_string(&self.shuffle).map_err(anyhow::Error::from).and_then(|json| db.set_setting(SHUFFLE_KEY, &json));
+        if let Err(e) = saved {
+            log::warn!("saving the video effect shuffle: {e:#}");
+        }
+    }
+
+    pub fn in_shuffle(&self, id: &str) -> bool {
+        let default = self.effects.iter().find(|e| e.id == id).is_some_and(|e| e.manifest.shuffle);
+        self.value(id, IN_SHUFFLE_SETTING).and_then(serde_json::Value::as_bool).unwrap_or(default)
+    }
+
+    pub fn set_in_shuffle(&mut self, id: &str, included: bool, db: &Db) {
+        self.set_setting(id, IN_SHUFFLE_SETTING, serde_json::json!(included), db);
+    }
+
+    /// Call once per frame, with the seconds since the last. The fade keeps going while
+    /// paused, but only playing counts towards the next change.
+    pub fn step(&mut self, dt: f32, playing: bool) {
+        if let Some(fading) = &mut self.fading {
+            fading.elapsed += dt;
+            if fading.elapsed < self.shuffle.fade {
+                return;
+            }
+            self.fading = None;
+        }
+        if !self.shuffle.on || !playing {
+            return;
+        }
+        self.until_next -= dt;
+        // Don't sit on one that doesn't compile, or whose file has gone.
+        let broken = matches!(self.status, Some((false, _))) || self.chosen().is_none();
+        if self.until_next > 0.0 && !broken {
+            return;
+        }
+        self.wait();
+        let Some(next) = self.next_turn() else { return };
+        let from = self.chosen.replace(next);
+        self.status = None;
+        if !broken && self.shuffle.fade > 0.0 {
+            self.fading = from.map(|from| Fading { from, elapsed: 0.0 });
+        }
+    }
+
+    /// The effect fading out, and how far `active` has faded in over it (0–1), during a fade.
+    pub fn fading(&self) -> Option<(ActiveEffect, f32)> {
+        let fading = self.fading.as_ref()?;
+        let from = self.effects.iter().find(|e| e.id == fading.from)?;
+        let t = (fading.elapsed / self.shuffle.fade.max(0.01)).clamp(0.0, 1.0);
+        Some((self.to_draw(from), t * t * (3.0 - 2.0 * t)))
+    }
+
+    /// Everything the chosen effect needs and, with shuffle on, everything any effect it
+    /// might pick needs. That keeps the sound filter and the depth model running between
+    /// effects, so sound doesn't drop out and the picture's hold doesn't change at each one.
+    pub fn needs(&self) -> Needs {
+        let fading = self.fading.as_ref().map(|f| f.from.as_str());
+        let counted = self.effects.iter().filter(|e| {
+            let id = Some(e.id.as_str());
+            id == self.chosen.as_deref() || id == fading || (self.shuffle.on && self.in_shuffle(&e.id))
+        });
+        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, scale: 0.25 };
+        for e in counted {
+            let m = &e.manifest;
+            needs.audio |= m.audio;
+            needs.depth |= m.depth || m.segment;
+            needs.segment |= m.segment;
+            needs.faces |= m.faces;
+            needs.scale = needs.scale.max(usable_scale(m.scale));
+        }
+        needs
+    }
+
+    fn roll(&mut self) -> f32 {
+        if self.random == 0 {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
+            self.random = now | 1;
+        }
+        // xorshift: the order only has to look random.
+        self.random ^= self.random << 13;
+        self.random ^= self.random >> 7;
+        self.random ^= self.random << 17;
+        (self.random >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    /// Starts counting down to the next change.
+    fn wait(&mut self) {
+        let (a, b) = (self.shuffle.shortest, self.shuffle.longest);
+        let (shortest, longest) = (a.min(b).max(0.0), a.max(b));
+        self.until_next = shortest + self.roll() * (longest - shortest);
+    }
+
+    /// The next effect, going through them all in a random order before any comes round
+    /// again. `None` if there's no other to go to.
+    fn next_turn(&mut self) -> Option<String> {
+        let pool: Vec<String> = self.effects.iter().filter(|e| self.in_shuffle(&e.id)).map(|e| e.id.clone()).collect();
+        self.turns.retain(|id| pool.contains(id));
+        for _ in 0..2 {
+            while let Some(id) = self.turns.pop() {
+                if Some(&id) != self.chosen.as_ref() {
+                    return Some(id);
+                }
+            }
+            self.turns = pool.clone();
+            for i in (1..self.turns.len()).rev() {
+                let j = (self.roll() * (i + 1) as f32) as usize;
+                self.turns.swap(i, j.min(i));
+            }
+        }
+        None
     }
 
     /// Off → each effect in turn → off.
@@ -232,7 +432,10 @@ impl Effects {
 
     /// The chosen effect, ready to draw.
     pub fn active(&self) -> Option<ActiveEffect> {
-        let e = self.chosen()?;
+        self.chosen().map(|e| self.to_draw(e))
+    }
+
+    fn to_draw(&self, e: &Effect) -> ActiveEffect {
         let uniforms = e
             .settings()
             .filter(|s| !s.key.is_empty() && s.key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
@@ -249,8 +452,7 @@ impl Effects {
                 (format!("s_{}", s.key), v)
             })
             .collect();
-        let scale = e.manifest.scale;
-        Some(ActiveEffect {
+        ActiveEffect {
             id: e.id.clone(),
             name: e.manifest.name.clone(),
             shader: e.shader.clone(),
@@ -259,10 +461,14 @@ impl Effects {
             depth: e.manifest.depth,
             segment: e.manifest.segment,
             faces: e.manifest.faces,
-            scale: if scale.is_finite() { scale.clamp(0.25, 1.0) } else { 1.0 },
+            scale: usable_scale(e.manifest.scale),
             uniforms,
-        })
+        }
     }
+}
+
+fn usable_scale(scale: f32) -> f32 {
+    if scale.is_finite() { scale.clamp(0.25, 1.0) } else { 1.0 }
 }
 
 #[cfg(test)]
@@ -322,6 +528,67 @@ mod tests {
         assert!(effects.chosen().is_none(), "after the last comes off");
         effects.cycle(&db);
         assert_eq!(effects.chosen().map(|e| e.id.as_str()), Some("dream"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shuffle_takes_turns_and_fades() {
+        let root = std::env::temp_dir().join(format!("flex-effects-shuffle-{}", std::process::id()));
+        write(&root, "a.frag", "");
+        write(&root, "a.toml", "audio = true\nscale = 0.5\n");
+        write(&root, "b.frag", "");
+        write(&root, "b.toml", "depth = true\n");
+        write(&root, "c.frag", "");
+        write(&root, "test.frag", "");
+        write(&root, "test.toml", "faces = true\nshuffle = false\n");
+        let db = Db::open_in_memory().unwrap();
+        let dirs = [root.clone()];
+        let mut effects = Effects::new(&dirs, &db);
+        assert!(!effects.needs().audio, "nothing's on");
+
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0 }, &db);
+        let first = effects.chosen().expect("shuffle starts one").id.clone();
+        let needs = effects.needs();
+        assert_eq!((needs.audio, needs.depth, needs.faces, needs.scale), (true, true, false, 1.0), "all that it might pick");
+
+        // Stays put while paused, and until its time's up.
+        effects.step(100.0, false);
+        effects.step(9.0, true);
+        assert_eq!(effects.chosen().unwrap().id, first);
+        assert!(effects.fading().is_none());
+
+        effects.step(2.0, true);
+        let second = effects.chosen().unwrap().id.clone();
+        assert_ne!(second, first);
+        let (from, amount) = effects.fading().unwrap();
+        assert_eq!((from.id.as_str(), amount), (first.as_str(), 0.0));
+        effects.step(1.0, false);
+        assert_eq!(effects.fading().unwrap().1, 0.5, "the fade carries on while paused");
+        effects.step(1.0, true);
+        assert!(effects.fading().is_none());
+
+        // Each once before any comes round again, and never the test view.
+        let mut seen = vec![first, second];
+        effects.step(10.5, true);
+        effects.step(2.0, true);
+        seen.push(effects.chosen().unwrap().id.clone());
+        seen.sort();
+        assert_eq!(seen, ["a", "b", "c"]);
+
+        // One that won't compile is left at once, without a fade.
+        effects.status = Some((false, "Shader error".into()));
+        let broken = effects.chosen().unwrap().id.clone();
+        effects.step(0.1, true);
+        assert_ne!(effects.chosen().unwrap().id, broken);
+        assert!(effects.fading().is_none());
+
+        // Choosing one stops any fade; choosing none stops shuffle; both are kept.
+        effects.set_in_shuffle("c", false, &db);
+        effects.choose(Some("a"), &db);
+        assert!(Effects::new(&dirs, &db).shuffle().on);
+        assert!(!Effects::new(&dirs, &db).in_shuffle("c"));
+        effects.choose(None, &db);
+        assert!(!effects.shuffle().on);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
