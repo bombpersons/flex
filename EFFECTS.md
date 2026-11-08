@@ -32,7 +32,7 @@ Flex comes with these to start from, in [`effects`](effects):
   patches blossom and details sprout texture.
 - **Depth**: uses a neural network's guess at how far away everything is, for rainbow
   contours rippling through the scene, or fog.
-- **Distance**: an effect that grows with distance, or closeness: fog, prisms, heat haze,
+- **Distance**: an effect that grows with distance, or closeness: fog (in any two colours), prisms, heat haze,
   blocks, colour or a rush of speed.
 - **Relight**: new coloured lights in the film's world, casting shadows, using a surface
   worked out from depth. Also clay and an oil slick.
@@ -219,7 +219,7 @@ With `faces = true`, Flex finds up to eight faces with
 [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (MIT), a
 small network that runs on the GPU like depth does and comes with Flex. It's cheap, and looks
 at up to about 30 frames a second. Each frame is drawn with the faces found in it: as with
-depth, the picture and sound are held back a moment, usually 0.15 of a second or so, which
+depth, the picture and sound are held back a moment, usually under a fifth of a second, which
 also lets Flex steady each face using the frames either side. A face keeps its slot in the arrays while it's on screen. It works best on
 live action; very small faces, faces in profile or turned away, and cartoon characters are
 missed some of the time, so effects need to look fine with no faces at all.

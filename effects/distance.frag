@@ -12,6 +12,15 @@ vec3 hue(vec3 c, float a) {
     return c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
 }
 
+// A fog colour setting: the first choice is the drifting rainbow, the rest are fixed.
+vec3 fog_colour(float choice, vec3 moving) {
+    const vec3 named[11] = vec3[11](
+        vec3(0.92, 0.94, 0.97), vec3(0.5, 0.52, 0.56), vec3(0.02, 0.02, 0.04), vec3(0.85, 0.1, 0.08), vec3(0.95, 0.5, 0.08),
+        vec3(0.95, 0.85, 0.2), vec3(0.15, 0.75, 0.2), vec3(0.08, 0.7, 0.7), vec3(0.1, 0.3, 0.9), vec3(0.5, 0.15, 0.85), vec3(0.95, 0.3, 0.65)
+    );
+    return choice < 0.5 ? moving : named[int(choice + 0.5) - 1];
+}
+
 float noise(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
@@ -45,7 +54,8 @@ vec4 effect(vec2 uv) {
     if (s_style < 0.5) {
         // Far layers of cloud move more slowly and look smaller, so the fog has some depth.
         float n = clouds(p * (2.0 + 5.0 * m) + vec2(0.12, 0.03) * t);
-        vec3 fog = rainbow(0.04 * t + 0.25 * p.x + 0.3 * m) * 0.45 + 0.45;
+        vec3 moving = rainbow(0.04 * t + 0.25 * p.x + 0.3 * m) * 0.45 + 0.45;
+        vec3 fog = mix(fog_colour(s_fog_start, moving), fog_colour(s_fog_end, moving), m);
         float thick = 1.0 - exp(-1.6 * m * m * amount * (0.3 + 1.4 * n));
         return vec4(mix(texture(u_video, uv).rgb, fog, thick), 1.0);
     }

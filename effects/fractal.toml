@@ -1,6 +1,7 @@
 name = "Fractal Zoom"
-description = "An endless fall into the picture, diving through the faces in it, each window holding another."
+description = "An endless fall into the picture, each window holding another, with the people standing in front of it."
 faces = true
+segment = true
 audio = true
 
 [[settings]]
@@ -34,3 +35,24 @@ max = 100
 step = 10
 unit = "%"
 default = 30
+
+[[settings]]
+key = "people"
+label = "People in front"
+type = "number"
+detail = "How solidly people stand in front of the window inside the picture"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 100
+
+[[settings]]
+key = "centre"
+label = "Dive towards"
+type = "choice"
+default = "middle"
+options = [
+    { id = "middle", label = "The middle" },
+    { id = "face", label = "The first face" },
+]

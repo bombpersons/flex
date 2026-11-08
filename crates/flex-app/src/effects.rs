@@ -554,23 +554,29 @@ impl Renderer {
             }
 
             render(o.video.fbo.0.get() as i32, size.0, size.1);
+            if frame.depth.is_some() || frame.faces.is_some() {
+                self.held.push(gl, &o.video, size, frame.pts);
+            } else {
+                self.held.free(gl);
+            }
+            // The networks look at the kept copy of a frame, however many paints later they get
+            // to it, so what they find is about exactly the picture that will be drawn.
+            let (source, source_time) = self.held.newest().unwrap_or((o.video.fbo, frame.pts));
             match &frame.depth {
-                Some(link) => self.depth.update(gl, link, o.video.fbo, size, rect, frame.pts, frame.video_time),
+                Some(link) => self.depth.update(gl, link, source, size, rect, source_time, frame.video_time),
                 None => self.depth.delay = 0.0,
             }
             match &frame.faces {
-                Some(link) => self.faces.update(gl, link, o.video.fbo, size, rect, frame.pts, frame.video_time),
+                Some(link) => self.faces.update(gl, link, source, size, rect, source_time, frame.video_time),
                 None => self.faces.delay = 0.0,
             }
             if frame.find_cuts {
-                self.cuts.update(gl, o.video.fbo, size, rect, frame.pts);
+                self.cuts.update(gl, source, size, rect, source_time);
             }
             // The picture is held back to the frame depth and faces have caught up with.
             let (video_texture, pts) = if frame.depth.is_some() || frame.faces.is_some() {
-                self.held.push(gl, &o.video, size, frame.pts);
                 self.held.pick(frame.video_time - self.depth.delay.max(self.faces.delay)).unwrap_or((o.video.texture, frame.pts))
             } else {
-                self.held.free(gl);
                 (o.video.texture, frame.pts)
             };
             let (depth_texture, mask_texture) = if frame.depth.is_some() { self.depth.map_for(pts) } else { (None, None) };
@@ -1051,6 +1057,11 @@ impl HeldFrames {
         }
     }
 
+    /// The newest frame kept, to read from, and its position.
+    fn newest(&self) -> Option<(glow::Framebuffer, f32)> {
+        self.frames.front().map(|&(slot, time)| (self.slots[slot].fbo, time))
+    }
+
     /// The frame to show at `at`, and its position.
     fn pick(&self, at: f32) -> Option<(glow::Texture, f32)> {
         let times: Vec<f32> = self.frames.iter().map(|f| f.1).collect();
@@ -1379,6 +1390,10 @@ impl CutGl {
     }
 }
 
+/// Extra hold for faces, as `late` is an average and a frame shown before its report has to
+/// make do with the last frame's.
+const FACE_SPARE: f32 = 0.025;
+
 /// How many reports are kept to draw from: over a second's worth.
 const FACE_REPORTS: usize = 32;
 
@@ -1470,7 +1485,7 @@ impl FaceGl {
                     self.arrived += 1;
                     self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
                     if self.arrived >= HOLD_AFTER_MAPS {
-                        self.delay = next_delay(self.delay, self.late);
+                        self.delay = next_delay(self.delay, self.late + FACE_SPARE);
                     }
                 }
                 self.reports.push_back(report);
