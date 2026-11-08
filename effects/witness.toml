@@ -1,0 +1,24 @@
+name = "Witness Protection"
+description = "Faces get a black bar over the eyes, or get pixelated or blurred."
+faces = true
+
+[[settings]]
+key = "style"
+label = "Style"
+type = "choice"
+default = "bar"
+options = [
+    { id = "bar", label = "Black bar" },
+    { id = "pixels", label = "Pixelated" },
+    { id = "blur", label = "Blurred" },
+]
+
+[[settings]]
+key = "size"
+label = "Size"
+type = "number"
+min = 60
+max = 200
+step = 10
+unit = "%"
+default = 100

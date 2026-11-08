@@ -1,18 +1,20 @@
 name = "Aquarium"
-description = "The room floods from the bottom up, with rippling light and bubbles, and far things vanish into the blue."
+description = "The room really floods: a water surface in perspective that wraps around people and furniture, with reflections, wakes, caustics, fish, and bubbles from people's mouths."
 depth = true
+segment = true
+faces = true
 audio = true
 
 [[settings]]
 key = "level"
 label = "Water level"
 type = "number"
-detail = "How high it comes"
-min = 20
-max = 120
+detail = "Past about 70, the camera is underwater too"
+min = 0
+max = 100
 step = 5
 unit = "%"
-default = 85
+default = 30
 
 [[settings]]
 key = "rise"
@@ -22,18 +24,39 @@ min = 0
 max = 60
 step = 5
 unit = " s"
-default = 15
+default = 12
+
+[[settings]]
+key = "horizon"
+label = "Horizon"
+type = "number"
+detail = "How far up the picture the camera is looking"
+min = 20
+max = 90
+step = 5
+unit = "%"
+default = 60
+
+[[settings]]
+key = "waves"
+label = "Waves"
+type = "number"
+min = 0
+max = 200
+step = 10
+unit = "%"
+default = 100
 
 [[settings]]
 key = "murk"
 label = "Murk"
 type = "number"
-detail = "How much the distance fades"
+detail = "How quickly things fade to blue underwater"
 min = 0
 max = 100
 step = 10
 unit = "%"
-default = 55
+default = 45
 
 [[settings]]
 key = "light"
@@ -44,3 +67,54 @@ max = 100
 step = 10
 unit = "%"
 default = 60
+
+[[settings]]
+key = "mirror"
+label = "Reflections"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 70
+
+[[settings]]
+key = "wake"
+label = "Wakes"
+type = "number"
+detail = "Ripples spreading from people in the water"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 60
+
+[[settings]]
+key = "bubbles"
+label = "Bubbles"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 50
+
+[[settings]]
+key = "fish"
+label = "Fish"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 30
+
+[[settings]]
+key = "react"
+label = "Reaction to sound"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 50

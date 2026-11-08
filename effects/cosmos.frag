@@ -1,4 +1,5 @@
-// Silhouette Cosmos: inside people's outlines there's a nebula and three layers of stars.
+// Silhouette Cosmos: a nebula and three layers of stars, either inside people's outlines or
+// everywhere except inside them.
 
 float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -37,6 +38,7 @@ vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     float mask = person_at(uv);
     float inside = smoothstep(0.35, 0.65, mask);
+    if (s_where > 0.5) inside = 1.0 - inside;
     vec2 p = uv * vec2(u_resolution.x / u_resolution.y, 1.0);
     float t = u_time * s_speed / 100.0;
     if (inside > 0.0) {

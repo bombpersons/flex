@@ -62,11 +62,13 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Mouth Eyes**: eyes and mouth swap places.
 - **Cyclops**: everyone's eyes merge into one big one.
 - **Pinocchio**: noses grow for as long as a shot lasts and snap back at the cut.
-- **Silhouette Cosmos**: people become person-shaped windows into a drifting galaxy.
+- **Silhouette Cosmos**: people become person-shaped windows into a drifting galaxy, or stand
+  in front of one.
 - **Invisible Man**: people vanish and the room behind them is filled in from what's been seen.
 - **Clone Army**: rows of the same people stretch away behind them.
 - **Wallpaper Crawl**: walls writhe, and eyes open in them and watch the people.
-- **Aquarium**: the room floods, with rippling light, bubbles and blue distance.
+- **Aquarium**: the room really floods: a water surface that wraps around people and furniture,
+  with reflections, wakes, fish, and bubbles from people's mouths.
 - **Snow Globe**: snow falls behind whatever's near and settles on things; a beat shakes it off.
 - **Thermal Vision**: heat colours, with people and faces hottest.
 - **Night of the Living**: grey-green people with hollow eyes, under a flickering light.
@@ -80,6 +82,52 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Colour Time Split**: red, green and blue run at different moments.
 - **Inkblot**: the picture folds into a mirrored Rorschach blot that keeps changing.
 - **Strobe Sculpture**: people leave rising, glowing statues of themselves on the beat.
+- **Aura**: a coloured energy field streams off each person, pulsing with the bass.
+- **Living Static**: people are made of TV noise, with their faces flickering through.
+- **Melting People**: people sag and drip, running off in streams that pool at the bottom.
+- **Smoke People**: people come apart at the edges and blow away as smoke.
+- **Pixel People**: people turn to chunky pixels, which change size on the beat.
+- **Ink Drawing People**: people become a living pen sketch in a full-colour world.
+- **Comic Book People**: people are printed in halftone dots with thick outlines.
+- **Fire People**: people burn from the feet up, with flames that follow them.
+- **Tiny People**: people shrink where they are, leaving the room huge.
+- **Time-Lagged Body**: the tops of people run behind their bottoms, so they ripple as they move.
+- **Colour Thief**: the world is grey and only people have colour, or the other way round.
+- **Glitch Bodies**: people tear into sliding strips on each beat.
+- **Swarm**: people dissolve into buzzing specks that scatter with the bass.
+- **Tiny Heads**: everyone's head shrinks to a pea on a full-sized body.
+- **Googly Eyes**: plastic eyes whose pupils really roll and bounce as heads move.
+- **Face Swap Roulette**: everyone's faces swap places, and swap again every few seconds.
+- **Everyone Is Them**: the biggest face in the shot gets pasted onto everybody else.
+- **Long Face**: faces stretch like toffee, chins sagging with the bass.
+- **Clown Car**: greasepaint, a big red smile and a red nose that swells on the beat.
+- **Deal With It**: pixel sunglasses drop out of the sky onto every face.
+- **Blush Meter**: faces go redder the louder it gets, until steam comes out of their ears.
+- **Witness Protection**: a black bar over the eyes, or faces pixelated or blurred.
+- **Moustache Everyone**: a curly handlebar moustache under every nose.
+- **Love Beams**: hearts stream out of people's eyes the way they're facing.
+- **Kaleidoface**: a kaleidoscope of someone's face, centred on their nose as they move.
+- **Anime Eyes**: huge shining eyes that sparkle on the beat.
+- **Hypno Eyes**: eyes turn into spinning spirals.
+- **Perfect Symmetry**: each face is one half mirrored, which is more unsettling than you'd think.
+- **Spinning Features**: eyes and mouths turn round and round where they are.
+- **Puppet Jaw**: jaws drop open and flap with the sound, like a cut-out puppet.
+- **Giraffe Necks**: heads rise on long stretchy necks that sway to the music.
+- **Focus Pull**: a shallow film lens drifting between near and far, or held on a face.
+- **Tiny World**: a thin slice in focus and toy-bright colours make everything a model railway.
+- **Lidar Sweep**: a dark scene revealed by sweeps of laser light travelling away from the camera.
+- **Point Cloud**: the scene as millions of floating dots, with the camera drifting around them.
+- **Topographic Map**: the scene as a contour map, with hills where things are close.
+- **Torchlight**: a dark room with a torch beam sweeping around it.
+- **Magic Eye**: the film as a working stereogram: relax your eyes and it stands out in 3D.
+- **Paper Theatre**: flat cardboard layers sway on strings and cast shadows on each other.
+- **Thunderstorm**: rain falls behind whatever's close, lit by lightning.
+- **Warp Speed**: the distance streaks into hyperspace while whoever's close stays still.
+- **Beyond the Veil**: past a shimmering line in the distance, the world turns into something else.
+- **Voxel World**: the scene rebuilt from blocks, standing taller the closer they are.
+- **Neon Grid**: the world goes dark and everything's edges light up in neon.
+- **God Rays**: shafts of coloured light pour through the room, and whatever's close blocks them.
+- **Film Mountains**: the picture as a landscape: close things are peaks, far things are valleys.
 - **Soundstage**: sounds light up what's closest and roll back through the scene.
 
 ## Making one

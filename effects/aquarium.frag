@@ -1,5 +1,7 @@
-// Aquarium: below a wavy waterline the picture bends, picks up caustics and fades to blue with
-// distance, and bubbles rise behind whatever's nearest.
+// Aquarium: a flat sheet of water in the room, worked out from depth. A point is underwater if
+// it's further away than where its line of sight meets the water, so the waterline runs along
+// the table and around people on its own. What's seen is then refracted, reflected about where it
+// meets the water, lit by caustics and fogged by how much water is in front of it.
 
 float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -23,9 +25,21 @@ float fbm(vec2 p) {
     return sum;
 }
 
+// The waves on the surface, at a point on it.
+float swell(vec2 at, float t) {
+    float h = sin(at.x * 5.0 + t * 1.1) * 0.5 + sin(at.y * 7.0 - t * 1.4 + at.x * 2.0) * 0.35;
+    h += sin((at.x + at.y) * 15.0 + t * 2.3) * 0.12 + (noise(at * 9.0 + t * 0.6) - 0.5) * 0.5;
+    return h;
+}
+
+vec2 slope(vec2 at, float t) {
+    float e = 0.02;
+    return vec2(swell(at + vec2(e, 0.0), t) - swell(at - vec2(e, 0.0), t), swell(at + vec2(0.0, e), t) - swell(at - vec2(0.0, e), t)) / (2.0 * e);
+}
+
 // The usual web of light on the bottom of a pool, from a few rounds of folding space.
 float caustics(vec2 p, float t) {
-    vec2 q = mod(p * 14.0, 6.2831853) - 250.0;
+    vec2 q = mod(p * 8.0, 6.2831853) - 250.0;
     vec2 i = q;
     float sum = 1.0;
     for (int n = 0; n < 4; n++) {
@@ -34,49 +48,145 @@ float caustics(vec2 p, float t) {
         sum += 1.0 / length(vec2(q.x / (sin(i.x + at) / 0.005), q.y / (cos(i.y + at) / 0.005)));
     }
     sum = 1.17 - pow(sum / 4.0, 1.4);
-    return pow(abs(sum), 8.0);
+    return min(pow(abs(sum), 8.0), 1.5);
+}
+
+float ring_bubble(vec2 p, vec2 centre, float size) {
+    float d = length(p - centre) / size;
+    return (1.0 - smoothstep(0.85, 1.0, d)) * (0.2 + 0.8 * smoothstep(0.55, 0.95, d)) + 0.7 * (1.0 - smoothstep(0.0, 0.25, length(p - centre - vec2(-0.3, 0.3) * size) / size));
 }
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(c, 1.0);
-    vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
-    vec2 p = uv * aspect;
+    float aspect = u_resolution.x / u_resolution.y;
+    vec2 low = u_video_rect.xy, size = u_video_rect.zw - low;
+    vec2 pic = (uv - low) / size;
+    vec2 p = uv * vec2(aspect, 1.0);
     float t = u_time;
+    float react = s_react / 100.0;
+
+    float sky = smoothstep(0.4, 0.7, sky_at(uv));
+    float near = mix(depth_at(uv), 0.0, sky);
+    float far = 1.0 / (0.1 + near * 1.2);
+    float person = person_at(uv);
+
     float filled = s_rise < 0.5 ? 1.0 : smoothstep(0.0, 1.0, t / s_rise);
-    float bottom = u_video_rect.y, top = u_video_rect.w;
-    float level = mix(bottom, top, s_level / 100.0 * filled);
-    level += (sin(p.x * 11.0 + t * 1.4) * 0.007 + sin(p.x * 23.0 - t * 2.1) * 0.003) * (1.0 + 2.0 * u_bass);
-    float under = (1.0 - smoothstep(-0.003, 0.003, uv.y - level));
-    if (under <= 0.0) return vec4(c, 1.0);
+    float above_water = mix(0.6, -0.25, s_level / 100.0 * filled) - 0.012 * u_bass * react;
+    float below = (s_horizon / 100.0 - pic.y);
+    float waves = s_waves / 100.0 * (1.0 + 1.2 * u_bass * react);
 
-    vec2 bend = vec2(sin(p.y * 28.0 + t * 1.7) + sin(p.y * 13.0 - t), cos(p.x * 24.0 - t * 1.4)) * 0.0028;
-    vec2 from = clamp(uv + bend, u_video_rect.xy, u_video_rect.zw);
-    float near = depth_at(from);
+    // How far along the line of sight the water starts, if it does.
+    float hit = 1e4;
+    bool from_above = above_water > 0.0;
+    if (from_above && below > 0.002) hit = above_water / below;
+    if (!from_above && below < -0.002) hit = -above_water / -below;
+    vec2 on_surface = vec2((pic.x - 0.5) * aspect, 1.0) * min(hit, 12.0);
+    if (hit < 1e3) {
+        float lift = swell(on_surface, t) * 0.012 * waves;
+        hit = from_above ? max(above_water + lift, 0.001) / below : max(-above_water + lift, 0.001) / -below;
+        on_surface = vec2((pic.x - 0.5) * aspect, 1.0) * min(hit, 12.0);
+    }
+    bool sees_surface = hit < far;
+    bool under = from_above ? sees_surface : true;
+    if (!under) return vec4(c, 1.0);
+
+    float through = from_above ? far - hit : (sees_surface ? hit : far);
+    vec2 tilt = hit < 1e3 ? slope(on_surface, t) * waves : vec2(0.0);
+
+    // Rings spreading out from people where they stand in the water.
+    float crowd = 0.0;
+    for (int i = 0; i < 8; i++) {
+        float a = float(i) * 0.7853982;
+        crowd += person_at(uv + vec2(cos(a) / aspect, sin(a) * 0.4) * 0.06);
+    }
+    crowd *= 0.125 * s_wake / 100.0;
+    float wake = sin(crowd * 30.0 - t * 5.0 - u_beat * react * 4.0) * crowd * (1.0 - smoothstep(0.4, 0.7, person));
+    tilt += vec2(0.0, wake * 3.0);
+
+    vec2 bend = (tilt * 0.0045 + vec2(sin(p.y * 40.0 + t * 1.6), cos(p.x * 34.0 - t * 1.3)) * 0.0012) * min(through + 0.3, 2.5) / vec2(aspect, 1.0);
+    vec2 from = clamp(uv + bend, low, u_video_rect.zw);
     vec3 w = texture(u_video, from).rgb;
-    float deep = clamp((level - uv.y) / (top - bottom), 0.0, 1.0);
-    float far = (1.0 - near) * s_murk / 100.0;
-    w *= vec3(0.55, 0.85, 1.0);
-    w += vec3(0.75, 0.95, 1.0) * min(caustics(p + near * 0.25, t), 1.5) * (1.0 - deep * 0.5) * s_light / 100.0 * (0.25 + 0.5 * near);
-    vec3 blue = mix(vec3(0.05, 0.42, 0.56), vec3(0.01, 0.1, 0.3), deep);
-    w = mix(w, blue, clamp(far * 1.2 + deep * 0.15, 0.0, 0.92));
+    float near_at = depth_at(from);
 
-    // Rays down from the surface.
-    float rays = fbm(vec2(p.x * 7.0 + (level - uv.y) * 2.0, t * 0.15));
-    w += vec3(0.3, 0.45, 0.5) * smoothstep(0.5, 0.8, rays) * (1.0 - deep) * s_light / 100.0 * 0.5;
+    // Light playing over whatever's underwater. Walls take it upright, everything else lying down.
+    float wall = smoothstep(0.35, 0.7, wall_at(uv));
+    vec2 lay_flat = vec2((pic.x - 0.5) * aspect, 1.0) * far;
+    vec2 upright = vec2((pic.x - 0.5) * aspect * far, pic.y * 3.0);
+    float light = caustics(mix(lay_flat, upright, wall) + near_at * 0.1, t);
+    float shallow = exp(-through * 0.9);
+    w *= vec3(0.62, 0.86, 1.0);
+    w += vec3(0.75, 0.97, 1.0) * light * shallow * s_light / 100.0 * (0.35 + 0.5 * dot(w, vec3(0.5)));
 
+    float fog = 1.0 - exp(-through * 1.5 * s_murk / 50.0);
+    vec3 deep = mix(vec3(0.05, 0.42, 0.55), vec3(0.01, 0.1, 0.28), clamp(through * 0.3, 0.0, 1.0));
+
+    float own = smoothstep(0.4, 0.7, person);
+    for (int i = 0; i < 2; i++) {
+        float layer = float(i);
+        float scale = 0.11 + 0.1 * layer;
+        vec2 q = vec2(p.x + t * (0.05 + 0.03 * layer) * (mod(layer, 2.0) < 0.5 ? 1.0 : -1.0), p.y + sin(t * 0.3 + layer) * 0.02) / scale;
+        vec2 cell = floor(q);
+        float wanted = s_fish / 100.0 * 0.55;
+        float layer_near = 0.2 + 0.35 * layer;
+        if (hash(cell + layer * 7.0) < wanted && near_at < layer_near) {
+            vec2 f = fract(q) - vec2(0.5, 0.5 + 0.25 * (hash(cell + 3.0) - 0.5));
+            f.x *= mod(layer, 2.0) < 0.5 ? 1.0 : -1.0;
+            float wag = sin(t * 7.0 + hash(cell) * 30.0) * 0.05;
+            float body = 1.0 - smoothstep(0.85, 1.0, length(vec2(f.x, f.y + wag * (f.x + 0.3)) / vec2(0.26, 0.11)));
+            vec2 tail_at = f + vec2(0.33, wag * 2.0);
+            float tail = (1.0 - smoothstep(0.08, 0.12, tail_at.x * 0.6 + abs(tail_at.y))) * smoothstep(-0.12, -0.08, tail_at.x);
+            float fish = max(body, tail);
+            vec3 skin = mix(vec3(1.0, 0.55, 0.1), vec3(0.3, 0.75, 0.95), hash(cell + 11.0)) * (0.7 + 0.5 * smoothstep(-0.1, 0.1, f.y));
+            w = mix(w, skin, fish * (1.0 - own));
+        }
+    }
+    w = mix(w, deep, clamp(fog, 0.0, 0.94));
+
+    if (sees_surface && from_above) {
+        // The reflection, flipped about where this point's own distance meets the water.
+        float line = s_horizon / 100.0 - above_water / far;
+        vec2 mirrored = vec2(pic.x, 2.0 * line - pic.y) + tilt * 0.012 * vec2(0.5, 1.0);
+        vec3 seen = texture(u_video, low + clamp(mirrored, vec2(0.001), vec2(0.999)) * size).rgb;
+        float glance = mix(0.12, 0.85, smoothstep(0.25, 3.0, hit));
+        w = mix(w, seen * vec3(0.8, 0.92, 1.0), glance * s_mirror / 100.0);
+        // White water where the surface meets something.
+        float touching = 1.0 - smoothstep(0.0, 0.05 + 0.04 * noise(on_surface * 40.0 + t), far - hit);
+        w += vec3(0.9, 0.97, 1.0) * touching * 0.55;
+        w += vec3(0.85, 0.95, 1.0) * abs(wake) * 0.45;
+    }
+    if (sees_surface && !from_above) {
+        // The underside of the surface, bright and broken up.
+        float sheen = 0.4 + 0.6 * smoothstep(-0.8, 1.2, swell(on_surface, t));
+        w = mix(w, mix(vec3(0.2, 0.6, 0.75), vec3(0.85, 0.97, 1.0), sheen), exp(-hit * 0.45));
+    }
+
+    float amount = s_bubbles / 100.0;
     for (int i = 0; i < 3; i++) {
         float f = float(i);
-        float size = 0.03 + f * 0.018;
-        vec2 q = vec2(p.x, p.y - t * (0.12 + 0.05 * f)) / size + f * 13.0;
+        float size_of = 0.03 + f * 0.018;
+        vec2 q = vec2(p.x, p.y - t * (0.12 + 0.05 * f)) / size_of + f * 13.0;
         vec2 cell = floor(q);
-        float keep = step(0.85, hash(cell));
-        vec2 centre = vec2(0.5 + 0.28 * sin(t * 1.5 + 6.0 * hash(cell + 3.0)), 0.5);
-        float d = length(fract(q) - centre) / (0.15 + 0.2 * hash(cell + 1.0));
-        float layer_near = 0.25 + 0.3 * f;
-        float bubble = keep * (1.0 - smoothstep(0.85, 1.0, d)) * (0.25 + 0.75 * smoothstep(0.6, 1.0, d)) * step(near, layer_near);
-        w += vec3(0.85, 0.95, 1.0) * bubble * 0.5;
+        if (hash(cell) < 0.1 * amount && near_at < 0.25 + 0.3 * f) {
+            vec2 centre = (vec2(0.5 + 0.28 * sin(t * 1.5 + 6.0 * hash(cell + 3.0)), 0.5) + cell - f * 13.0) * size_of;
+            w += vec3(0.85, 0.95, 1.0) * ring_bubble(vec2(p.x, p.y - t * (0.12 + 0.05 * f)), centre, size_of * (0.15 + 0.2 * hash(cell + 1.0))) * 0.5;
+        }
     }
-    w += vec3(0.8, 0.95, 1.0) * (1.0 - smoothstep(0.0, 0.012, abs(uv.y - level))) * 0.6;
-    return vec4(mix(c, w, under), 1.0);
+    // People breathing out, if their mouths are under.
+    for (int i = 0; i < u_face_count; i++) {
+        if (u_face_seen[i] <= 0.0 || amount <= 0.0) continue;
+        vec2 mouth = 0.5 * (face_point(i, 3) + face_point(i, 4));
+        float mouth_below = s_horizon / 100.0 - (mouth.y - low.y) / size.y;
+        float mouth_far = 1.0 / (0.1 + depth_at(mouth) * 1.2);
+        if (from_above && (mouth_below <= 0.002 || above_water / mouth_below >= mouth_far)) continue;
+        vec2 at = mouth * vec2(aspect, 1.0);
+        float across = u_faces[i].z - u_faces[i].x;
+        for (int b = 0; b < 7; b++) {
+            float n = float(b);
+            float life = fract(t * 0.35 + n / 7.0 + float(i) * 0.3);
+            vec2 centre = at + vec2(sin(life * 9.0 + n * 2.0) * 0.015, life * 0.5);
+            w += vec3(0.9, 0.97, 1.0) * ring_bubble(p, centre, across * (0.04 + 0.05 * fract(n * 0.37))) * u_face_seen[i] * 0.7 * (1.0 - life);
+        }
+    }
+    return vec4(w, 1.0);
 }

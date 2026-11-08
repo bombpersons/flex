@@ -1,0 +1,67 @@
+// Clown Car: everything's drawn in each face's own coordinates, so it turns and tilts with them.
+
+struct Face {
+    vec2 right, left, eyes, nose, mouth, up, across;
+    float spread, height;
+};
+
+// A face's points with the screen's shape taken out, and its own up and across.
+Face face_frame(int i, vec2 aspect) {
+    Face f;
+    f.right = face_point(i, 0) * aspect;
+    f.left = face_point(i, 1) * aspect;
+    f.eyes = 0.5 * (f.right + f.left);
+    f.nose = face_point(i, 2) * aspect;
+    f.mouth = 0.5 * (face_point(i, 3) + face_point(i, 4)) * aspect;
+    f.height = max(length(f.eyes - f.mouth), 0.004);
+    f.up = (f.eyes - f.mouth) / f.height;
+    f.across = vec2(f.up.y, -f.up.x);
+    f.spread = max(length(f.left - f.right), f.height * 0.55);
+    return f;
+}
+
+// How much of a soft oval `p` is in.
+float oval(vec2 p, vec2 centre, Face f, vec2 half_size) {
+    vec2 rel = p - centre;
+    return 1.0 - smoothstep(0.7, 1.0, length(vec2(dot(rel, f.across), dot(rel, f.up)) / half_size));
+}
+
+vec4 effect(vec2 uv) {
+    vec3 c = texture(u_video, uv).rgb;
+    vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
+    vec2 p = uv * aspect;
+    for (int i = 0; i < u_face_count; i++) {
+        float seen = u_face_seen[i];
+        if (seen <= 0.0) continue;
+        Face f = face_frame(i, aspect);
+        vec2 mid = 0.5 * (f.eyes + f.mouth);
+        float luma = dot(c, vec3(0.3, 0.59, 0.11));
+        float paint = oval(p, mid, f, vec2(f.spread * 1.2, f.height * 1.45)) * seen * s_paint / 100.0;
+        c = mix(c, vec3(0.98, 0.97, 0.95) * (0.55 + 0.75 * luma), paint);
+
+        for (int e = 0; e < 2; e++) {
+            vec2 eye = e == 0 ? f.right : f.left;
+            vec2 rel = p - eye;
+            vec2 l = abs(vec2(dot(rel, f.across) / (f.spread * 0.3), dot(rel, f.up) / (f.spread * 0.62)));
+            float diamond = (1.0 - smoothstep(0.92, 1.0, l.x + l.y)) * seen;
+            c = mix(c, vec3(0.1, 0.25, 0.85), diamond);
+            c = mix(c, texture(u_video, uv).rgb, oval(p, eye, f, vec2(f.spread * 0.26, f.spread * 0.16)) * seen);
+        }
+
+        vec2 rel = p - f.mouth;
+        float wide = f.spread * 0.95;
+        float x = dot(rel, f.across) / wide;
+        float y = dot(rel, f.up) / wide;
+        float curve = 0.42 * x * x - 0.05;
+        float lip = (1.0 - smoothstep(0.12, 0.17, abs(y - curve) - 0.06 * (1.0 - x * x))) * (1.0 - smoothstep(0.95, 1.05, abs(x)));
+        c = mix(c, vec3(0.85, 0.05, 0.08), lip * seen);
+
+        float size = f.spread * 0.2 * s_nose / 100.0 * (1.0 + 0.5 * u_beat * s_react / 100.0);
+        vec2 n = (p - f.nose) / size;
+        float d = length(n);
+        vec3 ball = vec3(0.9, 0.05, 0.05) * (0.55 + 0.6 * clamp(dot(normalize(vec3(n, max(1.0 - d * d, 0.0) + 0.001)), normalize(vec3(-0.4, 0.6, 0.7))), 0.0, 1.0));
+        ball += vec3(0.8) * (1.0 - smoothstep(0.0, 0.25, length(n - vec2(-0.3, 0.4))));
+        c = mix(c, ball, (1.0 - smoothstep(0.95, 1.03, d)) * seen);
+    }
+    return vec4(c, 1.0);
+}

@@ -1,0 +1,21 @@
+// Time-Lagged Body: each point of a person is a running average of the past, which reaches further
+// back the higher up it is. Alpha remembers where people were lately, so the laggy part can hang
+// about after they've moved on.
+
+vec4 effect(vec2 uv) {
+    vec3 video = texture(u_video, uv).rgb;
+    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(video, 0.0);
+    float height = (uv.y - u_video_rect.y) / max(u_video_rect.w - u_video_rect.y, 1e-3);
+    float t = u_video_time;
+    float wave = sin(height * 16.0 - t * 3.0) * s_ripple / 100.0 * 0.012 * (0.3 + height) * (1.0 + u_bass * s_react / 50.0);
+    vec2 from = uv + vec2(wave, 0.0);
+    float person = smoothstep(0.4, 0.7, person_at(from));
+    vec3 now = texture(u_video, clamp(from, u_video_rect.xy, u_video_rect.zw)).rgb;
+    if (u_frame < 2) return vec4(video, person);
+    vec4 before = texture(u_prev, uv);
+    float lately = max(person, before.a * 0.96);
+    float rate = mix(0.7, 0.025, pow(clamp(height + 0.1, 0.0, 1.0), 1.4) * s_lag / 100.0);
+    float split = s_colour / 100.0;
+    vec3 lagged = vec3(mix(before.r, now.r, rate), mix(before.g, now.g, mix(rate, min(rate * 2.5, 1.0), split)), mix(before.b, now.b, mix(rate, min(rate * 5.0, 1.0), split)));
+    return vec4(mix(video, lagged, smoothstep(0.02, 0.4, lately)), lately);
+}
