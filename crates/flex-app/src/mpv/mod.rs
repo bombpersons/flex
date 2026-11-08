@@ -371,6 +371,37 @@ mod tests {
         assert_eq!((skips[1].start, skips[1].end), (500.0, 590.0));
     }
 
+    /// The number keys' seek: "absolute-percent" lands at that share of the duration
+    /// (needs ffmpeg to make a test video): `cargo test -p flex seeks_by_percent -- --ignored`.
+    #[test]
+    #[ignore]
+    fn seeks_by_percent() {
+        let ffmpeg = "ffmpeg";
+        let video = std::env::temp_dir().join(format!("flex-seek-{}.mkv", std::process::id()));
+        let made = std::process::Command::new(ffmpeg)
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=duration=100:rate=10:size=160x90"])
+            .arg(&video)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let mpv = Mpv::headless(&[("vo", "null"), ("ao", "null"), ("pause", "yes"), ("hr-seek", "yes")]).unwrap();
+        mpv.command(&["loadfile", &video.to_string_lossy()]).unwrap();
+        assert!(matches!(mpv.wait_event(10.0), Some(Event::FileLoaded)));
+        for (n, expected) in [(7, 70.0), (0, 0.0), (9, 90.0)] {
+            mpv.command(&["seek", &(n * 10).to_string(), "absolute-percent"]).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let _ = mpv.poll_events();
+                if mpv.get_f64("time-pos").is_some_and(|p| (p - expected).abs() < 0.5) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "{n}: at {:?}, wanted {expected}", mpv.get_f64("time-pos"));
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let _ = std::fs::remove_file(&video);
+    }
+
     /// Plays a real YouTube video in a windowless mpv (needs yt-dlp and network):
     /// `cargo test -p flex plays_youtube -- --ignored --nocapture`.
     #[test]

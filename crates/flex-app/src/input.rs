@@ -35,6 +35,9 @@ pub enum Action {
     ZoomIn,
     /// Holding OK, or right-click: options for the selected item (mark watched, ...).
     Menu,
+    /// A number key, 0–9 (the top row, the number pad or a remote's): in the player,
+    /// jumps to that tenth of the video.
+    Number(u8),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -66,6 +69,16 @@ fn map_key(key: Key) -> Option<Action> {
         Key::PageUp => Action::PageUp,
         // Remotes usually send BrowserBack for their Back button.
         Key::Escape | Key::Backspace | Key::BrowserBack => Action::Back,
+        Key::Num0 => Action::Number(0),
+        Key::Num1 => Action::Number(1),
+        Key::Num2 => Action::Number(2),
+        Key::Num3 => Action::Number(3),
+        Key::Num4 => Action::Number(4),
+        Key::Num5 => Action::Number(5),
+        Key::Num6 => Action::Number(6),
+        Key::Num7 => Action::Number(7),
+        Key::Num8 => Action::Number(8),
+        Key::Num9 => Action::Number(9),
         _ => return None,
     })
 }
