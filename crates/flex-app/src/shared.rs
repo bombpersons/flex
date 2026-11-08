@@ -337,6 +337,8 @@ pub struct Shared {
     pub plugins: flex_core::plugins::Host,
     /// Screen colours for plugins subscribed to `light`.
     pub ambient: crate::ambient::Ambient,
+    /// A plugin's video effect (GL side, used in the player's paint callback).
+    pub effects: std::sync::Arc<std::sync::Mutex<crate::effects::Effects>>,
     /// The last playback state sent to plugins.
     playback_sent: Option<Playback>,
     /// The latest playback seen (with its library file), for where a stop happened.
@@ -390,6 +392,7 @@ impl Shared {
             remote: Vec::new(),
             plugins,
             ambient,
+            effects: Default::default(),
             playback_sent: None,
             playback_last: None,
             awake: Default::default(),

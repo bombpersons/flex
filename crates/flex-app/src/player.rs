@@ -25,6 +25,7 @@ use crate::mpv::{self, GetProcAddress, Mpv, Renderer};
 use crate::picture::Picture;
 use crate::shared::TrackMemory;
 use flex_core::language;
+use flex_core::plugins::ActiveEffect;
 use crate::screens::{Nav, Screen, up_next::UpNext, youtube::RelatedVideos};
 use crate::shared::{PlayRequest, Shared, SkipMode};
 use crate::theme;
@@ -430,10 +431,14 @@ impl Player {
     }
 
     /// `light`: what the ambient light shows, with a swatch, when it's on.
-    fn draw_stats(&self, ui: &egui::Ui, safe: Rect, light: Option<&Light>) {
+    fn draw_stats(&self, ui: &egui::Ui, safe: Rect, light: Option<&Light>, effect: Option<&ActiveEffect>) {
         let painter = ui.painter();
         let mono = TextStyle::Monospace.resolve(ui.style());
         let mut lines = self.stats_lines();
+        if let Some(e) = effect {
+            let feedback = if e.feedback { " · feedback" } else { "" };
+            lines.push(format!("Effect: {} at {:.0}%{feedback}", e.name, e.scale * 100.0));
+        }
         if let Some(light) = light {
             let [r, g, b] = light.zones[0];
             lines.push(format!("Ambient light: #{r:02x}{g:02x}{b:02x} at {:.0}%", light.brightness * 100.0));
@@ -611,8 +616,22 @@ impl Player {
         let renderer = self.renderer.clone();
         // Ambient light: sample the picture (without the black bars) right after it's drawn.
         let sampler = sh.plugins.wants_light().then(|| sh.ambient.sampler.clone());
+        // A plugin's video effect: drawn every frame, so it moves while paused too.
+        let effect = sh.plugins.effect();
+        if let Some(effect) = &effect {
+            let status = sh.effects.lock().unwrap_or_else(|e| e.into_inner()).status(effect).cloned();
+            let p = &sh.plugins.plugins()[effect.plugin];
+            // A plugin with its own program sets its own status, unless the shader fails.
+            let ours = p.installed.manifest.command.is_empty() || status.as_ref().is_some_and(|s| !s.0);
+            if status.is_some() && ours && p.status != status {
+                sh.plugins.set_status(effect.plugin, status);
+            }
+            ctx.request_repaint();
+        }
+        let effects = sh.effects.clone();
+        let painted_effect = effect.clone();
         let margin = |k: &str| self.mpv.get_i64(&format!("osd-dimensions/{k}")).unwrap_or(0) as i32;
-        let margins = if sampler.is_some() {
+        let margins = if sampler.is_some() || effect.is_some() {
             Margins { left: margin("ml"), right: margin("mr"), top: margin("mt"), bottom: margin("mb") }
         } else {
             Margins::default()
@@ -621,10 +640,35 @@ impl Player {
             let target = painter.intermediate_fbo();
             let fbo = target.map_or(0, |f| f.0.get() as i32);
             let [w, h] = info.screen_size_px;
-            renderer.render(fbo, w as i32, h as i32, target.is_none());
+            let (w, h) = (w as i32, h as i32);
+            let mut effects = effects.lock().unwrap_or_else(|e| e.into_inner());
+            let drawn = match &painted_effect {
+                Some(effect) => {
+                    // Where the picture is, from the bottom left, without black bars.
+                    let (wf, hf) = (w.max(1) as f32, h.max(1) as f32);
+                    let rect = [
+                        margins.left as f32 / wf,
+                        margins.bottom as f32 / hf,
+                        1.0 - margins.right as f32 / wf,
+                        1.0 - margins.top as f32 / hf,
+                    ];
+                    let draw = |fbo, w, h| renderer.render(fbo, w, h, true);
+                    unsafe { effects.paint(painter.gl(), effect, target, (w, h), rect, draw) }
+                }
+                None => {
+                    if effects.holds_gl() {
+                        unsafe { effects.release(painter.gl()) };
+                    }
+                    false
+                }
+            };
+            drop(effects);
+            if !drawn {
+                renderer.render(fbo, w, h, target.is_none());
+            }
             if let Some(sampler) = &sampler {
                 let mut sampler = sampler.lock().unwrap_or_else(|e| e.into_inner());
-                unsafe { sampler.capture(painter.gl(), target, w as i32, h as i32, margins, target.is_none()) };
+                unsafe { sampler.capture(painter.gl(), target, w, h, margins, target.is_none()) };
             }
             // mpv doesn't restore GL state; egui resets the rest after callbacks.
             unsafe { painter.gl().bind_framebuffer(glow::FRAMEBUFFER, target) };
@@ -652,7 +696,7 @@ impl Player {
             self.skip_button = Some(rect);
         }
         if self.show_stats {
-            self.draw_stats(ui, safe, sh.ambient.current.as_ref());
+            self.draw_stats(ui, safe, sh.ambient.current.as_ref(), effect.as_ref());
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
         if ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {

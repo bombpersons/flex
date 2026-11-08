@@ -25,7 +25,9 @@ pub struct Manifest {
     #[serde(default)]
     pub version: String,
     /// The program: in the plugin's folder (".exe" is added on Windows), else a bare name
-    /// like "python3" is looked up on the PATH.
+    /// like "python3" is looked up on the PATH. Empty for a plugin that's only a video
+    /// effect: nothing is started.
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -37,6 +39,8 @@ pub struct Manifest {
     pub subscribe: Vec<String>,
     #[serde(default)]
     pub light: LightSpec,
+    /// A video effect: a shader Flex runs over every frame (see `[effect]` in PLUGINS.md).
+    pub effect: Option<EffectSpec>,
     #[serde(default)]
     pub settings: Vec<SettingSpec>,
 }
@@ -55,6 +59,70 @@ fn one() -> usize {
 impl Default for LightSpec {
     fn default() -> Self {
         Self { zones: 1 }
+    }
+}
+
+/// `[effect]`: a fragment shader drawn over the video.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct EffectSpec {
+    /// The shader file, in the plugin's folder.
+    pub shader: String,
+    /// Give the shader its own previous output (`u_prev`), for trails and feedback.
+    #[serde(default)]
+    pub feedback: bool,
+    /// Size to work at, relative to the screen (0.25–1): lower is lighter on the GPU.
+    #[serde(default = "full")]
+    pub scale: f32,
+}
+
+fn full() -> f32 {
+    1.0
+}
+
+/// The video effect to draw, worked out from the switched-on effect plugin.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveEffect {
+    /// Index into `Host::plugins`.
+    pub plugin: usize,
+    pub name: String,
+    pub shader: PathBuf,
+    pub feedback: bool,
+    pub scale: f32,
+    /// Settings as shader uniforms: `s_<key>` = number, bool (0/1) or choice (its index).
+    pub uniforms: Vec<(String, f32)>,
+}
+
+impl ActiveEffect {
+    fn new(plugin: usize, p: &Plugin) -> Option<Self> {
+        let spec = p.installed.manifest.effect.as_ref()?;
+        let uniforms = p
+            .installed
+            .manifest
+            .settings
+            .iter()
+            .filter(|s| !s.key.is_empty() && s.key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .filter_map(|s| {
+                let value = p.settings.get(&s.key);
+                let v = match s.kind {
+                    SettingKind::Number => value.and_then(serde_json::Value::as_f64).unwrap_or(s.min.unwrap_or(0.0)) as f32,
+                    SettingKind::Bool => f32::from(u8::from(value.and_then(serde_json::Value::as_bool).unwrap_or(false))),
+                    SettingKind::Choice => {
+                        let id = value.and_then(serde_json::Value::as_str).unwrap_or("");
+                        p.options(s).iter().position(|o| o.id == id).unwrap_or(0) as f32
+                    }
+                    SettingKind::Text | SettingKind::Button => return None,
+                };
+                Some((format!("s_{}", s.key), v))
+            })
+            .collect();
+        Some(Self {
+            plugin,
+            name: p.installed.manifest.name.clone(),
+            shader: p.installed.dir.join(&spec.shader),
+            feedback: spec.feedback,
+            scale: if spec.scale.is_finite() { spec.scale.clamp(0.25, 1.0) } else { 1.0 },
+            uniforms,
+        })
     }
 }
 
@@ -365,6 +433,18 @@ impl Host {
         &self.plugins
     }
 
+    /// The video effect to draw: the switched-on plugin with an `[effect]`, if any.
+    pub fn effect(&self) -> Option<ActiveEffect> {
+        self.plugins.iter().enumerate().filter(|(_, p)| p.enabled).find_map(|(i, p)| ActiveEffect::new(i, p))
+    }
+
+    /// Sets a plugin's status line from Flex's side (e.g. a video effect's shader errors).
+    pub fn set_status(&mut self, i: usize, status: Option<(bool, String)>) {
+        if let Some(p) = self.plugins.get_mut(i) {
+            p.status = status;
+        }
+    }
+
     /// Whether any running plugin wants screen colours.
     pub fn wants_light(&self) -> bool {
         self.plugins.iter().any(|p| p.running() && p.subscribes("light"))
@@ -398,6 +478,14 @@ impl Host {
     }
 
     pub fn set_enabled(&mut self, i: usize, on: bool, db: &Db) {
+        // One video effect at a time: switching one on switches the others off.
+        if on && self.plugins.get(i).is_some_and(|p| p.installed.manifest.effect.is_some()) {
+            let others: Vec<usize> =
+                (0..self.plugins.len()).filter(|&j| j != i && self.plugins[j].enabled && self.plugins[j].installed.manifest.effect.is_some()).collect();
+            for j in others {
+                self.set_enabled(j, false, db);
+            }
+        }
         let Some(p) = self.plugins.get_mut(i) else { return };
         if let Err(e) = db.set_setting(&enabled_key(&p.installed.id), if on { "true" } else { "false" }) {
             log::warn!("saving plugin setting: {e:#}");
@@ -495,6 +583,9 @@ impl Host {
         let (tx, waker) = (self.tx.clone(), Arc::clone(&self.waker));
         let p = &mut self.plugins[i];
         p.restart_at = None;
+        if p.installed.manifest.command.is_empty() {
+            return; // only a video effect: nothing to run
+        }
         p.generation += 1;
         match spawn(i, p.generation, &p.installed, &p.settings, tx, waker) {
             Ok(process) => {
@@ -679,6 +770,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].manifest.name, "Installed");
+    }
+
+    #[test]
+    fn effects_need_no_program_and_only_one_runs() {
+        let root = std::env::temp_dir().join(format!("flex-plugin-effects-{}", std::process::id()));
+        for (id, extra) in [("a-melt", "feedback = true\nscale = 0.1"), ("b-wobble", "")] {
+            let dir = root.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let manifest = format!(
+                "name = \"{id}\"\n[effect]\nshader = \"effect.frag\"\n{extra}\n\
+                 [[settings]]\nkey = \"speed\"\nlabel = \"Speed\"\ntype = \"number\"\ndefault = 1.5\n\
+                 [[settings]]\nkey = \"mirror\"\nlabel = \"Mirror\"\ntype = \"bool\"\ndefault = true\n\
+                 [[settings]]\nkey = \"mode\"\nlabel = \"Mode\"\ntype = \"choice\"\ndefault = \"b\"\n\
+                 options = [{{ id = \"a\", label = \"A\" }}, {{ id = \"b\", label = \"B\" }}]\n\
+                 [[settings]]\nkey = \"bad key\"\nlabel = \"Bad\"\ntype = \"number\"\n"
+            );
+            std::fs::write(dir.join("plugin.toml"), manifest).unwrap();
+        }
+        let db = Db::open_in_memory().unwrap();
+        let mut host = Host::new(std::slice::from_ref(&root), &db, || {});
+        assert_eq!(host.effect(), None, "off until switched on");
+        host.set_enabled(0, true, &db);
+        host.poll(&db);
+        assert!(!host.plugins()[0].running(), "no program to start");
+        assert_eq!(host.plugins()[0].status, None);
+        let effect = host.effect().unwrap();
+        assert_eq!((effect.plugin, effect.feedback, effect.scale), (0, true, 0.25));
+        assert_eq!(effect.shader, root.join("a-melt").join("effect.frag"));
+        let uniforms = [("s_speed".to_owned(), 1.5), ("s_mirror".to_owned(), 1.0), ("s_mode".to_owned(), 1.0)];
+        assert_eq!(effect.uniforms, uniforms);
+
+        host.set_enabled(1, true, &db);
+        assert!(!host.plugins()[0].enabled, "one effect at a time");
+        assert_eq!(host.effect().map(|e| (e.plugin, e.feedback, e.scale)), Some((1, false, 1.0)));
+        drop(host);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
