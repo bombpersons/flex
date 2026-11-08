@@ -20,7 +20,7 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Relight**: new coloured lights in the film's world, casting shadows, using a surface
   worked out from depth. Also clay and an oil slick.
 - **Diorama**: moves the camera inside the shot: floating, a dolly-zoom, or red and cyan 3D.
-- **Rubber Sheet**: stretches the film over a wobbling mesh shaped by depth: jelly, ripples,
+- **Rubber Sheet**: stretches the film over a wobbling mesh shaped by depth: waves, ripples,
   facets or wireframe.
 - **Undertow**: the background melts and pours away while whoever's up close stays solid.
 - **Soundstage**: sounds light up what's closest and roll back through the scene.

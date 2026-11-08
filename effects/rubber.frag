@@ -3,7 +3,7 @@
 // across a mesh's faces. Each pixel walks along its view ray until it goes under that surface,
 // then shows the part of the film pinned there. Where depth jumps, the sheet stretches.
 //
-// s_style: 0 jelly, 1 ripples, 2 facets, 3 wireframe.
+// s_style: 0 waves, 1 ripples, 2 facets, 3 wireframe.
 
 const int STEPS = 40;
 
@@ -21,35 +21,74 @@ float hash(vec2 v, float k) {
     return fract(sin(dot(v, vec2(127.1 + k, 311.7 - k))) * 43758.5453);
 }
 
-// A vertex's height (.x) and sideways movement (.yz).
-vec3 vertex(vec2 v, vec2 grid, float t, float amount) {
-    vec2 at = u_video_rect.xy + (v / grid) * (u_video_rect.zw - u_video_rect.xy);
-    float wave;
-    vec2 side;
-    if (s_style > 1.5 && s_style < 2.5) {
-        float phase = 6.2831853 * hash(v, 0.0);
-        wave = 0.6 * sin(t * (1.5 + 2.0 * hash(v, 3.0)) + phase);
-        side = vec2(cos(t * 1.7 + phase), sin(t * 1.3 + 2.0 * phase));
-    } else if (s_style > 0.5 && s_style < 1.5) {
-        vec2 p = (v / grid - 0.5) * vec2(grid.x / grid.y, 1.0);
-        float r = length(p);
-        wave = sin(r * 26.0 - t * 4.0);
-        side = p / max(r, 0.001) * cos(r * 26.0 - t * 4.0);
-    } else {
-        vec2 p = v / grid.x;
-        wave = (sin(p.x * 17.0 + t * 2.0) + sin(p.y * 23.0 - t * 1.4) + sin((p.x + p.y) * 11.0 + t)) / 3.0;
-        side = vec2(cos(p.y * 19.0 + t * 1.6), sin(p.x * 15.0 - t * 1.2));
-    }
-    return vec3(depth_at(at) + wave * 0.35 * amount, side * 0.018 * amount);
+vec2 vertex_at(vec2 v, vec2 grid) {
+    return u_video_rect.xy + (v / grid) * (u_video_rect.zw - u_video_rect.xy);
 }
 
-vec3 surface(vec2 q, vec2 grid, float t, float amount) {
+// How high a vertex is: the depth under it, plus a wave in the styles that have one.
+float height(vec2 v, vec2 grid, float t, float amount) {
+    float wave = 0.0;
+    if (s_style > 1.5 && s_style < 2.5) {
+        wave = 0.6 * sin(t * (1.5 + 2.0 * hash(v, 3.0)) + 6.2831853 * hash(v, 0.0));
+    } else if (s_style > 0.5 && s_style < 1.5) {
+        wave = sin(length((v / grid - 0.5) * vec2(grid.x / grid.y, 1.0)) * 26.0 - t * 4.0);
+    }
+    return depth_at(vertex_at(v, grid)) + wave * 0.35 * amount;
+}
+
+// Depth averaged over a patch, so the waves bend around people instead of tearing them
+// away from what's behind them.
+float soft_depth(vec2 at) {
+    float sum = 0.0;
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            sum += depth_at(at + vec2(float(x), float(y)) * 0.08);
+        }
+    }
+    return sum / 9.0;
+}
+
+// How far a vertex moves sideways.
+vec2 sway(vec2 v, vec2 grid, float t, float amount) {
+    if (s_style > 1.5 && s_style < 2.5) {
+        float phase = 6.2831853 * hash(v, 0.0);
+        return vec2(cos(t * 1.7 + phase), sin(t * 1.3 + 2.0 * phase)) * 0.018 * amount;
+    }
+    if (s_style > 0.5 && s_style < 1.5) {
+        vec2 p = (v / grid - 0.5) * vec2(grid.x / grid.y, 1.0);
+        float r = length(p);
+        return p / max(r, 0.001) * cos(r * 26.0 - t * 4.0) * 0.018 * amount;
+    }
+    // Sine waves rolling through the world, so neighbouring vertices move together and the
+    // scene ripples rather than cracks. The world position comes from depth.
+    vec2 p = v / grid - 0.5;
+    // Depth is a little different every frame, so it only nudges the waves or they'd shiver.
+    float dist = 1.6 - 0.8 * soft_depth(vertex_at(v, grid));
+    vec3 w = vec3(p.x * (grid.x / grid.y) * dist, p.y * dist, dist);
+    return vec2(
+        0.6 * sin(1.3 * t + 2.1 * w.x + 1.7 * w.z) + 0.4 * sin(0.9 * t - 1.4 * w.y + 2.6 * w.x),
+        0.6 * sin(1.1 * t + 1.9 * w.z - 1.5 * w.y) + 0.4 * sin(1.7 * t + 2.3 * w.y + 1.2 * w.x)
+    ) * 0.0625 * amount;
+}
+
+float height_at(vec2 q, vec2 grid, float t, float amount) {
     vec2 g = to_picture(q) * grid;
     vec2 v = floor(g);
     vec2 f = g - v;
     return mix(
-        mix(vertex(v, grid, t, amount), vertex(v + vec2(1.0, 0.0), grid, t, amount), f.x),
-        mix(vertex(v + vec2(0.0, 1.0), grid, t, amount), vertex(v + vec2(1.0, 1.0), grid, t, amount), f.x),
+        mix(height(v, grid, t, amount), height(v + vec2(1.0, 0.0), grid, t, amount), f.x),
+        mix(height(v + vec2(0.0, 1.0), grid, t, amount), height(v + vec2(1.0, 1.0), grid, t, amount), f.x),
+        f.y
+    );
+}
+
+vec2 sway_at(vec2 q, vec2 grid, float t, float amount) {
+    vec2 g = to_picture(q) * grid;
+    vec2 v = floor(g);
+    vec2 f = g - v;
+    return mix(
+        mix(sway(v, grid, t, amount), sway(v + vec2(1.0, 0.0), grid, t, amount), f.x),
+        mix(sway(v + vec2(0.0, 1.0), grid, t, amount), sway(v + vec2(1.0, 1.0), grid, t, amount), f.x),
         f.y
     );
 }
@@ -87,7 +126,7 @@ vec4 effect(vec2 uv) {
     for (int i = 0; i <= STEPS; i++) {
         z = top - span * float(i) / float(STEPS);
         vec2 c = fit(uv + (tilt + (uv - centre) * lean) * (z - 0.5));
-        if (surface(c, grid, t, amount).x >= z) {
+        if (height_at(c, grid, t, amount) >= z) {
             hit = true;
             break;
         }
@@ -100,7 +139,7 @@ vec4 effect(vec2 uv) {
     for (int j = 0; j < 5; j++) {
         float middle = 0.5 * (z + above);
         vec2 c = fit(uv + (tilt + (uv - centre) * lean) * (middle - 0.5));
-        if (surface(c, grid, t, amount).x >= middle) {
+        if (height_at(c, grid, t, amount) >= middle) {
             z = middle;
         } else {
             above = middle;
@@ -108,16 +147,18 @@ vec4 effect(vec2 uv) {
     }
     q = fit(uv + (tilt + (uv - centre) * lean) * (z - 0.5));
 
-    vec3 s = surface(q, grid, t, amount);
-    vec3 video = texture(u_video, fit(q + s.yz)).rgb;
+    vec2 moved = fit(q + sway_at(q, grid, t, amount));
+    vec3 video = texture(u_video, moved).rgb;
 
     // Light from the upper left, so the wobble reads on flat walls too.
     vec2 e = (u_video_rect.zw - u_video_rect.xy) / grid;
-    float slope = surface(q + vec2(e.x, 0.0), grid, t, amount).x - s.x + surface(q + vec2(0.0, e.y), grid, t, amount).x - s.x;
-    vec3 c = video * (1.0 + clamp(slope * 2.5, -0.3, 0.35));
+    float here = height_at(q, grid, t, amount);
+    float slope = height_at(q + vec2(e.x, 0.0), grid, t, amount) - here + height_at(q + vec2(0.0, e.y), grid, t, amount) - here;
+    // Waves stay unlit: they only move sideways, so all the light could show is depth's hard edges.
+    vec3 c = s_style < 0.5 ? video : video * (1.0 + clamp(slope * 2.5, -0.3, 0.35));
 
     if (s_style > 2.5) {
-        vec2 g = to_picture(q) * grid;
+        vec2 g = to_picture(moved) * grid;
         vec2 w = fwidth(g) * 1.2;
         vec2 near_line = min(fract(g), 1.0 - fract(g));
         float line = 1.0 - min(smoothstep(0.0, w.x, near_line.x), smoothstep(0.0, w.y, near_line.y));
