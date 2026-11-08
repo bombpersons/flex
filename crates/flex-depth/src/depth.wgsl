@@ -29,8 +29,11 @@ const ACCUMULATE: u32 = 2u;
 const RELU: u32 = 4u;
 /// Apply ReLU to the convolution's input as it's read (pre-activation residual units).
 const RELU_IN: u32 = 8u;
-/// The matrix multiply's B is in `mem` (else in `w`).
+/// The copy's source is in `mem` (else in `w`).
 const B_MEM: u32 = 16u;
+/// The matrix multiply's B is in `mem` (else in `w`). Fixed per pipeline: as a flag, it was a
+/// branch on every read of B, which cost a quarter of the multiply.
+override B_IN_MEM: bool = false;
 
 // erf by Abramowitz and Stegun 7.1.26 (absolute error under 1.5e-7): WGSL has no erf.
 fn erf(x: f32) -> f32 {
@@ -52,7 +55,7 @@ fn bias(at: u32) -> f32 {
 // ---- Matrix multiply ----------------------------------------------------------------------
 // C[z][i][j] (=, or += with ACCUMULATE) act(sum_t A[z][i][t] * B[z][t][j] + bias[j]) for
 // i < m, j < n, t < k, z < batch. A[z][i][t] = mem[a_off + z*a_bs + i*a_rs + t*a_cs]; B is
-// in `w` (or `mem` with B_MEM) likewise; C[z][i][j] = mem[c_off + z*c_bs + i*c_rs + j*c_cs].
+// in `w` (or `mem` with B_IN_MEM) likewise; C[z][i][j] = mem[c_off + z*c_bs + i*c_rs + j*c_cs].
 // bias_off = NONE for no bias. A 32x32 tile of C per workgroup of 8x8 threads, 4x4 per
 // thread, k in steps of 16 with the next step prefetched. Loads are branch-free: addresses
 // are clamped into the matrix, and what lies outside is zeroed.
@@ -70,7 +73,7 @@ fn load_a(a_off: u32, kl: u32, row: u32, t: u32) -> vec4<f32> {
 }
 
 fn b_at(i: u32) -> f32 {
-    if ((p.flags & B_MEM) != 0u) { return mem[i]; }
+    if (B_IN_MEM) { return mem[i]; }
     return w[i];
 }
 
@@ -193,24 +196,29 @@ fn layer_norm(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id
 }
 
 // Attention softmax in place over scores [batch (heads)][m][n] at a_off, each score scaled by
-// f0 first. One workgroup per row.
+// f0 first. One workgroup per row, of at most 64 * 32 scores (MAX_TOKENS in lib.rs). Each
+// score is read and written once, and kept by its thread in between: memory traffic is what
+// limits this kernel.
 @compute @workgroup_size(64)
 fn softmax(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid3: vec3<u32>) {
     let head = wg.y;
     let row = wg.x;
     let lid = lid3.x;
     let x = p.a_off + (head * p.m + row) * p.n;
+    var scores: array<f32, 32>;
+    var count = 0u;
     var mx = -3.0e38;
     for (var j = lid; j < p.n; j += 64u) {
         let s = mem[x + j] * p.f0;
-        mem[x + j] = s;
+        scores[count] = s;
+        count += 1u;
         mx = max(mx, s);
     }
     mx = reduce(mx, lid, true);
     var sum = 0.0;
-    for (var j = lid; j < p.n; j += 64u) { let e = exp(mem[x + j] - mx); mem[x + j] = e; sum += e; }
+    for (var i = 0u; i < count; i++) { let e = exp(scores[i] - mx); scores[i] = e; sum += e; }
     let inv = 1.0 / reduce(sum, lid, false);
-    for (var j = lid; j < p.n; j += 64u) { mem[x + j] *= inv; }
+    for (var i = 0u; i < count; i++) { mem[x + lid + i * 64u] = scores[i] * inv; }
 }
 
 // ---- Images (channels first: [channels][height][width]) -------------------------------------

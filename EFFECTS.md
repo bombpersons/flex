@@ -129,11 +129,12 @@ running on the GPU as compute shaders, built on the kernels from Maisy's
 [neurofield](https://github.com/bombpersons/neurofield). The first time an effect asks for
 it Flex downloads the model (99 MB) into its data folder.
 
-Depth is relative rather than in real distances, and is worked out about 20 times a
-second at 518 × 294, so it arrives a frame or two after the picture and is softer than it.
-It's smoothed over time so it doesn't flicker. It uses a fair bit of the GPU, so leave it
-off unless the effect uses it; the model is unloaded a little while after the last
-effect that wanted it. F2 and F3 show how long it's taking.
+Depth is relative rather than in real distances, and is worked out up to 20 times a second
+at 518 × 294, dropping to as little as 294 × 168 if the GPU can't keep up, so it arrives a
+frame or two after the picture and is softer than it. It's smoothed over time so it doesn't
+flicker, except where something moved. It uses a fair bit of the GPU, so leave it off
+unless the effect uses it; the model is unloaded a little while after the last effect that
+wanted it. F2 and F3 show how long it's taking and at what size.
 
 ## Testing
 

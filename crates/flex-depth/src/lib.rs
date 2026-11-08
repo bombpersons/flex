@@ -36,6 +36,8 @@ const FUSION: usize = 64;
 const HEAD: usize = 32;
 /// The position embedding's grid (518 / 14).
 const POS_GRID: usize = 37;
+/// What the softmax kernel has room for.
+const MAX_TOKENS: usize = 64 * 32;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 const LN_EPS: f32 = 1e-6;
@@ -87,6 +89,8 @@ struct Params {
 #[derive(Clone, Copy, Debug)]
 enum Kernel {
     Matmul,
+    /// With B in `mem` instead of the weights.
+    MatmulMem,
     LayerNorm,
     Softmax,
     Conv3x3,
@@ -95,7 +99,17 @@ enum Kernel {
     Copy,
 }
 
-const KERNELS: [&str; 7] = ["matmul", "layer_norm", "softmax", "conv3x3", "conv_transpose", "resize", "copy"];
+/// Each `Kernel`'s entry point, and whether its `B_IN_MEM` is set.
+const KERNELS: [(&str, bool); 8] = [
+    ("matmul", false),
+    ("matmul", true),
+    ("layer_norm", false),
+    ("softmax", false),
+    ("conv3x3", false),
+    ("conv_transpose", false),
+    ("resize", false),
+    ("copy", false),
+];
 
 // ---- Weights --------------------------------------------------------------------------------
 
@@ -391,10 +405,9 @@ impl Ops {
             c_rs: rows as u32,
             c_cs: 1,
             bias_off: NONE,
-            flags: B_MEM,
             ..Default::default()
         };
-        self.push(Kernel::Matmul, scores, [groups(rows, 32), groups(rows, 32), HEADS as u32]);
+        self.push(Kernel::MatmulMem, scores, [groups(rows, 32), groups(rows, 32), HEADS as u32]);
         let soft = Params { m: rows as u32, n: rows as u32, batch: HEADS as u32, a_off: s.scores, f0: 1.0 / (dh as f32).sqrt(), ..Default::default() };
         self.push(Kernel::Softmax, soft, [rows as u32, HEADS as u32, 1]);
         let mix = Params {
@@ -415,10 +428,9 @@ impl Ops {
             c_rs: D as u32,
             c_cs: 1,
             bias_off: NONE,
-            flags: B_MEM,
             ..Default::default()
         };
-        self.push(Kernel::Matmul, mix, [groups(dh, 32), groups(rows, 32), HEADS as u32]);
+        self.push(Kernel::MatmulMem, mix, [groups(dh, 32), groups(rows, 32), HEADS as u32]);
     }
 
     /// 3x3 convolution (padding 1) of [cin][h][w] at `a` to [cout][h'][w'] at `c`.
@@ -490,6 +502,9 @@ impl Depth {
         let wt = Weights { t: read_safetensors(bytes)? };
         let n = gw * gh;
         let tokens = n + 1;
+        if tokens > MAX_TOKENS {
+            bail!("{gw} x {gh} patches is too many: room for {MAX_TOKENS} tokens");
+        }
         let mut up = Upload::default();
 
         // Patch embedding, and the position embedding stretched to this grid, with the
@@ -752,19 +767,20 @@ impl Depth {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("depth.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("depth.wgsl").into()),
-        });
+        let source = wgpu::ShaderModuleDescriptor { label: Some("depth.wgsl"), source: wgpu::ShaderSource::Wgsl(include_str!("depth.wgsl").into()) };
+        // SAFETY: these are our own shaders, and every offset and size they use comes from the
+        // plan above, which fits `mem` and the weights by construction. The checks wgpu would
+        // add go on every array access, and cost 15% of the whole network.
+        let module = unsafe { device.create_shader_module_trusted(source, wgpu::ShaderRuntimeChecks::unchecked()) };
         let pipelines = KERNELS
             .iter()
-            .map(|entry| {
+            .map(|(entry, b_in_mem)| {
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
                     layout: Some(&pipeline_layout),
                     module: &module,
                     entry_point: Some(entry),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions { constants: &[("B_IN_MEM", f64::from(u8::from(*b_in_mem)))], ..Default::default() },
                     cache: None,
                 })
             })
