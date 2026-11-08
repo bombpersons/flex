@@ -7,6 +7,15 @@
 
 const int STEPS = 40;
 
+// How much of the picture's edge to keep out of view regardless, as a fraction of its size.
+const float EDGE = 0.012;
+
+// The furthest the wobble and the view's circling can move a point on screen.
+float reach() {
+    float push = s_style < 0.5 ? 0.0625 : 0.018;
+    return push * s_wobble / 100.0 * (1.0 + 2.0 * s_react / 100.0) + 0.1 * s_sway / 100.0;
+}
+
 vec2 cells() {
     vec2 size = u_video_rect.zw - u_video_rect.xy;
     float across = floor(s_cells);
@@ -110,6 +119,11 @@ vec4 effect(vec2 uv) {
     float amount = s_wobble / 100.0 * (1.0 + (u_beat + u_bass) * s_react / 100.0);
     vec2 grid = cells();
     vec2 centre = 0.5 * (u_video_rect.xy + u_video_rect.zw);
+
+    // Zoomed in just past as far as the wobble can reach, so the picture's edge is never pulled
+    // into view: it's often dark, from the film's frame or a sliver of black bar.
+    vec2 size = u_video_rect.zw - u_video_rect.xy;
+    uv = centre + (uv - centre) * (1.0 - 2.0 * (reach() / size + EDGE));
 
     // The view circles, so there's always some angle on the mesh, and leans in a little.
     float angle = 0.45 * t;
