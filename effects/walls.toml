@@ -1,0 +1,26 @@
+name = "Breathing Walls"
+description = "Walls breathe in and out and crawl with paisley that follows the shape of the room."
+segment = true
+depth = true
+audio = true
+
+[[settings]]
+key = "breath"
+label = "Breathing"
+type = "number"
+min = 0
+max = 100
+step = 5
+unit = "%"
+default = 60
+
+[[settings]]
+key = "crawl"
+label = "Crawl"
+type = "number"
+detail = "How strongly the pattern shows"
+min = 0
+max = 100
+step = 5
+unit = "%"
+default = 70
