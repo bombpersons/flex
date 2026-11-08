@@ -25,7 +25,6 @@ use crate::mpv::{self, GetProcAddress, Mpv, Renderer};
 use crate::picture::Picture;
 use crate::shared::TrackMemory;
 use flex_core::language;
-use flex_core::plugins::ActiveEffect;
 use crate::screens::{Nav, Screen, up_next::UpNext, youtube::RelatedVideos};
 use crate::shared::{PlayRequest, Shared, SkipMode};
 use crate::theme;
@@ -64,6 +63,8 @@ pub struct Player {
     /// Last known duration and position; mpv forgets both once the file ends (or fails).
     duration: Option<f64>,
     position: Option<f64>,
+    /// The playback clock and sound for a plugin's video effect.
+    effect_inputs: crate::effects::Inputs,
     /// For the history: when this session started, the furthest position recorded, whether
     /// it reached "watched", and whether the session has been logged.
     session_start: i64,
@@ -141,6 +142,7 @@ impl Player {
             last_save: now,
             duration: None,
             position: None,
+            effect_inputs: Default::default(),
             session_start: crate::shared::now_unix(),
             recorded: None,
             became_watched: false,
@@ -431,13 +433,26 @@ impl Player {
     }
 
     /// `light`: what the ambient light shows, with a swatch, when it's on.
-    fn draw_stats(&self, ui: &egui::Ui, safe: Rect, light: Option<&Light>, effect: Option<&ActiveEffect>) {
+    fn draw_stats(&self, ui: &egui::Ui, safe: Rect, light: Option<&Light>, frame: Option<&crate::effects::Frame>) {
         let painter = ui.painter();
         let mono = TextStyle::Monospace.resolve(ui.style());
         let mut lines = self.stats_lines();
-        if let Some(e) = effect {
+        if let Some(frame) = frame {
+            let e = &frame.effect;
             let feedback = if e.feedback { " · feedback" } else { "" };
-            lines.push(format!("Effect: {} at {:.0}%{feedback}", e.name, e.scale * 100.0));
+            lines.push(format!("Effect: {} at {:.0}%{feedback} · time {:.2}", e.name, e.scale * 100.0, frame.video_time));
+            match &frame.audio {
+                Some(a) => lines.push(format!(
+                    "Effect sound: level {:.2} · bass {:.2} · mid {:.2} · treble {:.2}{}",
+                    a.level,
+                    a.bass,
+                    a.mid,
+                    a.treble,
+                    if a.beat > 0.5 { " · BEAT" } else { "" }
+                )),
+                None if e.audio => lines.push("Effect sound: none (not a local file, or no ffmpeg)".into()),
+                None => {}
+            }
         }
         if let Some(light) = light {
             let [r, g, b] = light.zones[0];
@@ -629,7 +644,17 @@ impl Player {
             ctx.request_repaint();
         }
         let effects = sh.effects.clone();
-        let painted_effect = effect.clone();
+        let frame = match &effect {
+            Some(effect) => {
+                let (video_time, audio) = self.effect_inputs.tick(&self.mpv, &self.req.path, effect);
+                Some(crate::effects::Frame { effect: effect.clone(), rect: [0.0, 0.0, 1.0, 1.0], video_time, audio })
+            }
+            None => {
+                self.effect_inputs = Default::default();
+                None
+            }
+        };
+        let painted = frame.clone();
         let margin = |k: &str| self.mpv.get_i64(&format!("osd-dimensions/{k}")).unwrap_or(0) as i32;
         let margins = if sampler.is_some() || effect.is_some() {
             Margins { left: margin("ml"), right: margin("mr"), top: margin("mt"), bottom: margin("mb") }
@@ -642,18 +667,19 @@ impl Player {
             let [w, h] = info.screen_size_px;
             let (w, h) = (w as i32, h as i32);
             let mut effects = effects.lock().unwrap_or_else(|e| e.into_inner());
-            let drawn = match &painted_effect {
-                Some(effect) => {
+            let drawn = match &painted {
+                Some(frame) => {
                     // Where the picture is, from the bottom left, without black bars.
                     let (wf, hf) = (w.max(1) as f32, h.max(1) as f32);
-                    let rect = [
+                    let mut frame = frame.clone();
+                    frame.rect = [
                         margins.left as f32 / wf,
                         margins.bottom as f32 / hf,
                         1.0 - margins.right as f32 / wf,
                         1.0 - margins.top as f32 / hf,
                     ];
                     let draw = |fbo, w, h| renderer.render(fbo, w, h, true);
-                    unsafe { effects.paint(painter.gl(), effect, target, (w, h), rect, draw) }
+                    unsafe { effects.paint(painter.gl(), &frame, target, (w, h), draw) }
                 }
                 None => {
                     if effects.holds_gl() {
@@ -696,7 +722,7 @@ impl Player {
             self.skip_button = Some(rect);
         }
         if self.show_stats {
-            self.draw_stats(ui, safe, sh.ambient.current.as_ref(), effect.as_ref());
+            self.draw_stats(ui, safe, sh.ambient.current.as_ref(), frame.as_ref());
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
         if ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {

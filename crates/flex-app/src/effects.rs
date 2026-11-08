@@ -7,11 +7,15 @@
 //! twice a second and reloaded, so it can be edited while a video plays.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui_glow;
 use eframe::glow::{self, HasContext};
+use flex_core::audio::{self, Analyser, Features, Tap};
 use flex_core::plugins::ActiveEffect;
+
+use crate::mpv::Mpv;
 
 /// How often the shader file is checked for changes.
 const RECHECK: Duration = Duration::from_millis(500);
@@ -44,6 +48,8 @@ struct Source {
 pub struct Effects {
     objects: Option<Objects>,
     vao: Option<glow::VertexArray>,
+    /// `u_spectrum`: BANDS × HISTORY.
+    spectrum: Option<glow::Texture>,
     copy: Option<glow::Program>,
     /// The effect's program; `None` if it didn't compile.
     program: Option<glow::Program>,
@@ -59,6 +65,73 @@ pub struct Effects {
     unsupported: bool,
 }
 
+/// What an effect is drawn with this frame, worked out on the UI thread.
+#[derive(Clone)]
+pub struct Frame {
+    pub effect: ActiveEffect,
+    /// Where the picture is, without black bars (0–1 from the bottom left).
+    pub rect: [f32; 4],
+    pub video_time: f32,
+    /// The sound, when the effect asked for it and there is some.
+    pub audio: Option<Arc<Features>>,
+}
+
+/// The player's side: a smooth playback clock, and the sound for effects that want it.
+#[derive(Default)]
+pub struct Inputs {
+    /// Video time, moving smoothly between mpv's position updates (which only change
+    /// once per video frame).
+    clock: f64,
+    last: Option<Instant>,
+    tap: Option<Tap>,
+    analyser: Option<Analyser>,
+    window: Vec<f32>,
+    no_ffmpeg: bool,
+}
+
+impl Inputs {
+    /// Call once per frame while an effect is on; `path` is the playing file.
+    pub fn tick(&mut self, mpv: &Mpv, path: &Path, effect: &ActiveEffect) -> (f32, Option<Arc<Features>>) {
+        let now = Instant::now();
+        let dt = self.last.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
+        self.last = Some(now);
+        let paused = mpv.get_flag("pause").unwrap_or(false) || mpv.get_flag("paused-for-cache").unwrap_or(false);
+        match mpv.get_f64("time-pos") {
+            Some(pos) if paused || (pos - self.clock).abs() > 0.25 => self.clock = pos,
+            Some(pos) => {
+                // Run at playback speed, gently pulled towards mpv's position.
+                self.clock += dt * mpv.get_f64("speed").unwrap_or(1.0);
+                self.clock += (pos - self.clock) * (dt * 4.0).min(1.0);
+            }
+            None => {}
+        }
+
+        if !effect.audio || !path.is_file() {
+            self.tap = None;
+            self.analyser = None;
+            return (self.clock as f32, None);
+        }
+        let stream = match mpv.get_flag("current-tracks/audio/external") {
+            Some(true) => None, // a separate audio file: fall back to the video's own
+            _ => mpv.get_i64("current-tracks/audio/ff-index"),
+        };
+        if self.tap.as_ref().is_none_or(|t| t.path() != path || t.stream() != stream) && !self.no_ffmpeg {
+            match flex_core::find_tool("ffmpeg") {
+                Some(ffmpeg) => self.tap = Some(Tap::new(&ffmpeg, path, stream)),
+                None => {
+                    log::warn!("video effects: no ffmpeg, so no sound for effects");
+                    self.no_ffmpeg = true;
+                }
+            }
+        }
+        self.window.resize(audio::WINDOW, 0.0);
+        let have = self.tap.as_mut().is_some_and(|tap| tap.window(self.clock, &mut self.window));
+        let analyser = self.analyser.get_or_insert_with(Analyser::new);
+        let features = analyser.update(have.then_some(self.window.as_slice()), self.clock, dt as f32);
+        (self.clock as f32, Some(Arc::new(features.clone())))
+    }
+}
+
 /// Uniforms every effect gets.
 const HEADER: &str = "\
 uniform sampler2D u_video;
@@ -67,6 +140,13 @@ uniform vec2 u_resolution;
 uniform float u_time;
 uniform int u_frame;
 uniform vec4 u_video_rect;
+uniform float u_video_time;
+uniform float u_level;
+uniform float u_bass;
+uniform float u_mid;
+uniform float u_treble;
+uniform float u_beat;
+uniform sampler2D u_spectrum;
 ";
 
 /// The effect's fragment shader: Flex's header, the plugin's file (which defines
@@ -124,12 +204,12 @@ impl Effects {
     pub unsafe fn paint(
         &mut self,
         gl: &glow::Context,
-        effect: &ActiveEffect,
+        frame: &Frame,
         target: Option<glow::Framebuffer>,
         (w, h): (i32, i32),
-        rect: [f32; 4],
         render: impl FnOnce(i32, i32, i32),
     ) -> bool {
+        let (effect, rect) = (&frame.effect, frame.rect);
         unsafe {
             if self.unsupported || w <= 0 || h <= 0 {
                 return false;
@@ -192,6 +272,25 @@ impl Effects {
             gl.uniform_1_f32(at("u_time").as_ref(), started.elapsed().as_secs_f32());
             gl.uniform_1_i32(at("u_frame").as_ref(), self.frame);
             gl.uniform_4_f32(at("u_video_rect").as_ref(), rect[0], rect[1], rect[2], rect[3]);
+            gl.uniform_1_f32(at("u_video_time").as_ref(), frame.video_time);
+            let a = frame.audio.as_deref();
+            let level = |f: fn(&Features) -> f32| a.map_or(0.0, f);
+            gl.uniform_1_f32(at("u_level").as_ref(), level(|a| a.level));
+            gl.uniform_1_f32(at("u_bass").as_ref(), level(|a| a.bass));
+            gl.uniform_1_f32(at("u_mid").as_ref(), level(|a| a.mid));
+            gl.uniform_1_f32(at("u_treble").as_ref(), level(|a| a.treble));
+            gl.uniform_1_f32(at("u_beat").as_ref(), level(|a| a.beat));
+            if let Some(spectrum) = self.spectrum {
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D, Some(spectrum));
+                if let Some(a) = a {
+                    let bytes: &[u8] = std::slice::from_raw_parts(a.spectrum.as_ptr().cast(), a.spectrum.len() * 4);
+                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                    let (w, h) = (audio::BANDS as i32, audio::HISTORY as i32);
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(bytes)));
+                }
+                gl.uniform_1_i32(at("u_spectrum").as_ref(), 2);
+            }
             for (name, value) in &effect.uniforms {
                 gl.uniform_1_f32(at(name).as_ref(), *value);
             }
@@ -212,6 +311,9 @@ impl Effects {
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
             gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
             gl.bind_vertex_array(None);
             gl.use_program(None);
             if effect.feedback {
@@ -235,6 +337,9 @@ impl Effects {
             if let Some(p) = self.copy.take() {
                 gl.delete_program(p);
             }
+            if let Some(t) = self.spectrum.take() {
+                gl.delete_texture(t);
+            }
             if let Some(vao) = self.vao.take() {
                 gl.delete_vertex_array(vao);
             }
@@ -256,6 +361,7 @@ impl Effects {
                 Ok(vao) => {
                     self.vao = Some(vao);
                     self.copy = Some(copy);
+                    self.spectrum = create_spectrum(gl).map_err(|e| log::warn!("video effects: no spectrum texture: {e}")).ok();
                     Ok(())
                 }
                 Err(e) => {
@@ -397,6 +503,28 @@ unsafe fn create_target(gl: &glow::Context, (w, h): (i32, i32), formats: &[(u32,
             gl.delete_texture(texture);
         }
         Err("framebuffers incomplete".into())
+    }
+}
+
+/// The spectrum: one float per band and history row, starting silent.
+unsafe fn create_spectrum(gl: &glow::Context) -> Result<glow::Texture, String> {
+    unsafe {
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        let zeros = vec![0u8; audio::BANDS * audio::HISTORY * 4];
+        let data = glow::PixelUnpackData::Slice(Some(&zeros));
+        // Half floats: filterable everywhere (plain floats aren't on GLES).
+        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R16F as i32, audio::BANDS as i32, audio::HISTORY as i32, 0, glow::RED, glow::FLOAT, data);
+        for (param, value) in [
+            (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+            (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
+        }
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        Ok(texture)
     }
 }
 

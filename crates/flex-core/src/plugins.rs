@@ -73,6 +73,10 @@ pub struct EffectSpec {
     /// Size to work at, relative to the screen (0.25–1): lower is lighter on the GPU.
     #[serde(default = "full")]
     pub scale: f32,
+    /// Give the shader the sound (levels, beats, a spectrum). Costs reading the file's
+    /// audio a second time, so it's off unless asked for.
+    #[serde(default)]
+    pub audio: bool,
 }
 
 fn full() -> f32 {
@@ -88,6 +92,7 @@ pub struct ActiveEffect {
     pub shader: PathBuf,
     pub feedback: bool,
     pub scale: f32,
+    pub audio: bool,
     /// Settings as shader uniforms: `s_<key>` = number, bool (0/1) or choice (its index).
     pub uniforms: Vec<(String, f32)>,
 }
@@ -120,6 +125,7 @@ impl ActiveEffect {
             name: p.installed.manifest.name.clone(),
             shader: p.installed.dir.join(&spec.shader),
             feedback: spec.feedback,
+            audio: spec.audio,
             scale: if spec.scale.is_finite() { spec.scale.clamp(0.25, 1.0) } else { 1.0 },
             uniforms,
         })

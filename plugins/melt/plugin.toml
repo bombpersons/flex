@@ -5,6 +5,7 @@ version = "0.23.1"
 [effect]
 shader = "melt.frag"
 feedback = true
+audio = true
 
 [[settings]]
 key = "speed"
@@ -46,6 +47,17 @@ max = 100
 step = 10
 unit = "%"
 default = 50
+
+[[settings]]
+key = "react"
+label = "Reacting to sound"
+type = "number"
+detail = "Beats kick the picture and the colours; 0 for none"
+min = 0
+max = 100
+step = 20
+unit = "%"
+default = 60
 
 [[settings]]
 key = "spill"
