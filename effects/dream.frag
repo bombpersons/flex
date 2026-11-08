@@ -5,7 +5,7 @@
 //   - sharpens it, so small details get amplified frame after frame (detail)
 //   - turns its colours along the swirls (colours)
 // and blends a little of the real video back in, so the dream keeps following it.
-// It keeps dreaming while paused. See melt.frag or PLUGINS.md for the uniforms.
+// It keeps dreaming while paused. See melt.frag or EFFECTS.md for the uniforms.
 
 float lum(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
@@ -28,7 +28,8 @@ vec4 effect(vec2 uv) {
     // Pixel steps scale with the picture so it looks alike at any resolution.
     vec2 px = vec2(1.0) / u_resolution * (u_resolution.y / 540.0);
     float react = s_react / 100.0;
-    float surge = 1.0 + 2.0 * u_beat * react + 0.5 * u_bass * react;
+    // Sound nudges the swirling along; kept gentle, since big jumps flash.
+    float surge = 1.0 + 0.3 * u_beat * react + 0.2 * u_bass * react;
 
     // Brightness slope of the last frame, a few pixels across (blurrier = bigger swirls).
     float r = 3.0;
@@ -47,14 +48,13 @@ vec4 effect(vec2 uv) {
     vec3 p = prev_at(src);
     vec3 blur = 0.25 * (prev_at(src + vec2(2.0, 0.0) * px) + prev_at(src - vec2(2.0, 0.0) * px)
                       + prev_at(src + vec2(0.0, 2.0) * px) + prev_at(src - vec2(0.0, 2.0) * px));
-    p += (p - blur) * s_detail / 100.0 * 0.5 * surge;
+    p += (p - blur) * s_detail / 100.0 * 0.5;
 
     // Colour turns where the swirls are strongest, and saturates a touch.
     float swirl = clamp(length(grad) * 8.0, 0.0, 1.0);
-    p = hue_shift(p, swirl * s_colours / 100.0 * 0.15 * surge);
+    p = hue_shift(p, swirl * s_colours / 100.0 * 0.15);
     p = mix(vec3(lum(p)), p, 1.0 + 0.03 * s_colours / 100.0);
 
-    // A beat lets more of the dream through, a quiet moment more of the video.
-    float keep = clamp(s_dream / 100.0 + 0.04 * u_beat * react, 0.0, 0.97);
+    float keep = clamp(s_dream / 100.0, 0.0, 0.97);
     return vec4(clamp(mix(video, p, keep), 0.0, 1.0), 1.0);
 }

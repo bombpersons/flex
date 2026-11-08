@@ -1,7 +1,8 @@
 //! Full-screen video playback with a minimal d-pad OSD.
 //!
 //! OK / Play-Pause: pause/play · Left/Right: seek (hold to go faster) · Up: subtitles ·
-//! Down: audio · Back: hide the OSD, or stop if it's already hidden · Stop: stop.
+//! Down: audio · Hold OK: next video effect · Back: hide the OSD, or stop if it's already
+//! hidden · Stop: stop.
 //! F2: playback stats (dropped frames, decoder, refresh rate).
 //! Mouse: moving it shows the OSD; click or drag the seek bar to seek.
 //!
@@ -50,6 +51,8 @@ const SUB_SEP: char = '\u{1f}';
 enum Track {
     Sub,
     Audio,
+    /// The video effect just switched to (`Player::effect_label`).
+    Effect,
 }
 
 pub struct Player {
@@ -63,8 +66,9 @@ pub struct Player {
     /// Last known duration and position; mpv forgets both once the file ends (or fails).
     duration: Option<f64>,
     position: Option<f64>,
-    /// The playback clock and sound for a plugin's video effect.
+    /// The playback clock and sound for the video effect.
     effect_inputs: crate::effects::Inputs,
+    effect_label: String,
     /// For the history: when this session started, the furthest position recorded, whether
     /// it reached "watched", and whether the session has been logged.
     session_start: i64,
@@ -143,6 +147,7 @@ impl Player {
             duration: None,
             position: None,
             effect_inputs: Default::default(),
+            effect_label: String::new(),
             session_start: crate::shared::now_unix(),
             recorded: None,
             became_watched: false,
@@ -478,6 +483,7 @@ impl Player {
         let (kind, name) = match track {
             Track::Sub => ("sub", "Subtitles"),
             Track::Audio => ("audio", "Audio"),
+            Track::Effect => return self.effect_label.clone(),
         };
         let prop = |p: &str| self.mpv.get_string(&format!("current-tracks/{kind}/{p}")).filter(|s| !s.is_empty());
         let Some(id) = self.mpv.get_i64(&format!("current-tracks/{kind}/id")) else {
@@ -631,19 +637,16 @@ impl Player {
         let renderer = self.renderer.clone();
         // Ambient light: sample the picture (without the black bars) right after it's drawn.
         let sampler = sh.plugins.wants_light().then(|| sh.ambient.sampler.clone());
-        // A plugin's video effect: drawn every frame, so it moves while paused too.
-        let effect = sh.plugins.effect();
+        // The video effect: drawn every frame, so it moves while paused too.
+        let effect = sh.effects.active();
         if let Some(effect) = &effect {
-            let status = sh.effects.lock().unwrap_or_else(|e| e.into_inner()).status(effect).cloned();
-            let p = &sh.plugins.plugins()[effect.plugin];
-            // A plugin with its own program sets its own status, unless the shader fails.
-            let ours = p.installed.manifest.command.is_empty() || status.as_ref().is_some_and(|s| !s.0);
-            if status.is_some() && ours && p.status != status {
-                sh.plugins.set_status(effect.plugin, status);
+            let status = sh.effect_renderer.lock().unwrap_or_else(|e| e.into_inner()).status(effect).cloned();
+            if status.is_some() && sh.effects.status != status {
+                sh.effects.status = status;
             }
             ctx.request_repaint();
         }
-        let effects = sh.effects.clone();
+        let effects = sh.effect_renderer.clone();
         let frame = match &effect {
             Some(effect) => {
                 let (video_time, audio) = self.effect_inputs.tick(&self.mpv, &self.req.path, effect);
@@ -841,6 +844,18 @@ impl Screen for Player {
     fn handle(&mut self, sh: &mut Shared, press: Press) -> Nav {
         let now = sh.ctx.input(|i| i.time);
         match press.action {
+            // Holding OK: the next video effect.
+            Action::Menu if !press.repeat => {
+                let (effects, db) = sh.effects_mut();
+                effects.cycle(db);
+                self.effect_label = match sh.effects.chosen() {
+                    Some(e) => format!("Effect: {}", e.manifest.name),
+                    None if sh.effects.list().is_empty() => "No video effects (see Settings → Picture)".to_owned(),
+                    None => "Effect: off".to_owned(),
+                };
+                self.message = Some((Track::Effect, now + MESSAGE_SECS));
+                Nav::None
+            }
             Action::Next if !press.repeat => match sh.next_after(&self.req) {
                 Some(req) => Nav::Play { req, replace: true },
                 None => {

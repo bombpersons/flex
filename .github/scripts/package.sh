@@ -84,20 +84,17 @@ JASSUB_VERSION=$(sed -n 's/^JASSUB \([0-9.]*\).*/\1/p' "$ROOT/crates/flex-web/we
 
 cp "$EXE" "$DIR/flex.exe"
 # Plugins: plugins/<id>/plugin.toml plus its program. They're off until switched on in
-# Settings → Plugins. A plugin with no program (a video effect) is its folder as it is.
+# Settings → Plugins.
 for MANIFEST in "$ROOT"/plugins/*/plugin.toml; do
     ID=$(basename "$(dirname "$MANIFEST")")
     COMMAND=$(sed -n 's/^command *= *"\(.*\)"/\1/p' "$MANIFEST")
-    if [[ -z $COMMAND ]]; then
-        mkdir -p "$DIR/plugins/$ID"
-        cp "$(dirname "$MANIFEST")"/* "$DIR/plugins/$ID/"
-        continue
-    fi
     PROGRAM="$(dirname "$EXE")/$COMMAND.exe"
     [[ -f $PROGRAM ]] || fail "plugin $ID: no $PROGRAM (build with --workspace)"
     mkdir -p "$DIR/plugins/$ID"
     cp "$MANIFEST" "$PROGRAM" "$DIR/plugins/$ID/"
 done
+# Video effects: shaders and their settings, offered in Settings → Picture.
+cp -R "$ROOT/effects" "$DIR/effects"
 cp "$LICENSE_FILE" "$DIR/LICENSE.txt"
 (cd "$ROOT" && cargo about generate --fail about.hbs) >"$DIR/licenses/rust-crates.txt"
 

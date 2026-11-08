@@ -1,5 +1,5 @@
-//! Video effects from plugins (`[effect]` in plugin.toml): a fragment shader run over every
-//! frame of the video, entirely on the GPU. Does nothing unless an effect plugin is on.
+//! Video effects (`flex_core::effects`): a fragment shader run over every frame of the
+//! video, entirely on the GPU. Does nothing unless an effect is chosen.
 //!
 //! With an effect on, mpv draws into our own texture instead of the screen; the plugin's
 //! shader then draws from it (and, with `feedback`, from its own previous output) into
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use eframe::egui_glow;
 use eframe::glow::{self, HasContext};
 use flex_core::audio::{self, Analyser, Features, Tap};
-use flex_core::plugins::ActiveEffect;
+use flex_core::effects::ActiveEffect;
 
 use crate::mpv::Mpv;
 
@@ -45,7 +45,7 @@ struct Source {
 /// Lives on the GL thread (inside the player's paint callback); the UI thread only reads
 /// the status.
 #[derive(Default)]
-pub struct Effects {
+pub struct Renderer {
     objects: Option<Objects>,
     vao: Option<glow::VertexArray>,
     /// `u_spectrum`: BANDS × HISTORY.
@@ -187,8 +187,8 @@ fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-impl Effects {
-    /// The status line for this effect's plugin, once its shader has been tried.
+impl Renderer {
+    /// The status line for this effect, once its shader has been tried.
     pub fn status(&self, effect: &ActiveEffect) -> Option<&(bool, String)> {
         self.status.as_ref().filter(|(path, _)| *path == effect.shader).map(|(_, s)| s)
     }

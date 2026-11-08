@@ -23,20 +23,17 @@ mkdir -p "$DIR/licenses"
 
 cp "$BIN/flex" "$DIR/flex"
 # Plugins: plugins/<id>/plugin.toml plus its program. They're off until switched on in
-# Settings → Plugins. A plugin with no program (a video effect) is its folder as it is.
+# Settings → Plugins.
 for MANIFEST in "$ROOT"/plugins/*/plugin.toml; do
     ID=$(basename "$(dirname "$MANIFEST")")
     COMMAND=$(sed -n 's/^command *= *"\(.*\)"/\1/p' "$MANIFEST")
-    if [[ -z $COMMAND ]]; then
-        mkdir -p "$DIR/plugins/$ID"
-        cp "$(dirname "$MANIFEST")"/* "$DIR/plugins/$ID/"
-        continue
-    fi
     [[ -f $BIN/$COMMAND ]] || fail "plugin $ID: no $BIN/$COMMAND (build with --workspace)"
     mkdir -p "$DIR/plugins/$ID"
     cp "$MANIFEST" "$BIN/$COMMAND" "$DIR/plugins/$ID/"
 done
 
+# Video effects: shaders and their settings, offered in Settings → Picture.
+cp -R "$ROOT/effects" "$DIR/effects"
 LICENSE_FILE=$(ls "$ROOT"/LICENSE* 2>/dev/null | head -1 || true)
 [[ -n $LICENSE_FILE ]] && cp "$LICENSE_FILE" "$DIR/LICENSE.txt"
 (cd "$ROOT" && cargo about generate --fail about.hbs) >"$DIR/licenses/rust-crates.txt"

@@ -68,9 +68,6 @@ do.
 
 Every plugin gets `hello`, `settings`, `action` and `shutdown`, whatever it subscribes to.
 
-A plugin can also be a **video effect** (`[effect]`, below), which needs no program at
-all.
-
 ### Settings
 
 Each `[[settings]]` entry becomes a row on the plugin's page in Settings → Plugins. Flex
@@ -90,85 +87,6 @@ Every type also takes `detail` (a line of help under the setting). A `text` sett
 value before anyone changes it. Choice options look like
 `options = [{ id = "", label = "The first one found" }]`, and a plugin can replace them
 while it runs (with `choices`, below), which is how "Find strips" fills in the list.
-
-## Video effects
-
-A plugin with an `[effect]` section is a shader that Flex runs over every frame of the
-video, on the GPU. It can't slow playback down by being slow to answer, and it works
-the same at any resolution. Only one effect runs at a time: switching one on switches
-the others off. [`plugins/melt`](plugins/melt) is an example.
-
-```toml
-name = "Melt"
-# no command: Flex runs the shader itself
-
-[effect]
-shader = "melt.frag"   # in this folder
-feedback = true        # give the shader its own last frame (for trails); default false
-scale = 1.0            # work at this fraction of the screen's size (0.25–1), then
-                       # scale up: lower is lighter on the GPU; default 1
-audio = true           # react to the sound (below); default false
-
-[[settings]]
-key = "speed"          # becomes `uniform float s_speed;`
-label = "Speed"
-type = "number"
-min = 0
-max = 2
-step = 0.25
-default = 1
-```
-
-The shader file is GLSL (version 1.40 / 3.30, or ES 3.00 where that's all there is) and
-defines one function, which gives the colour at `uv`:
-
-```glsl
-vec4 effect(vec2 uv) {
-    vec3 c = texture(u_video, uv).rgb;
-    return vec4(c.gbr * s_speed, 1.0);
-}
-```
-
-Flex declares these for you, so don't declare them yourself:
-
-| Uniform | What |
-|---|---|
-| `sampler2D u_video` | the video frame as mpv drew it (with subtitles, and Anime4K or SVP if they're on) |
-| `sampler2D u_prev` | the effect's own previous output (black unless `feedback = true`) |
-| `vec2 u_resolution` | the size being drawn, in pixels |
-| `float u_time` | seconds since the effect started; it keeps going while paused |
-| `float u_video_time` | the playback position in seconds: stops when paused, jumps when you seek |
-| `int u_frame` | frames drawn since the effect started |
-| `vec4 u_video_rect` | where the picture is without its black bars: `x0, y0, x1, y1` |
-| `float s_<key>` | each `number`, `bool` (0 or 1) or `choice` (the option's index) setting |
-| `float u_level`, `u_bass`, `u_mid`, `u_treble` | how loud the sound is overall, below 150 Hz, 150 Hz–2 kHz and above 2 kHz (0–1, with `audio = true`) |
-| `float u_beat` | 1 on a beat (a jump in the bass), fading to 0 in about half a second |
-| `sampler2D u_spectrum` | the sound's spectrum: x is frequency (30 Hz to 11 kHz, log-spaced, 64 bands), y is age (0 is now, 1 is about two seconds ago); values 0–1 in `.r` |
-
-Use `u_video_time` for anything that should freeze when the video's paused, and `u_time`
-for things that should keep drifting.
-
-### Sound
-
-With `audio = true`, Flex reads the playing file's sound a second time (libmpv can't
-share what it plays) with ffmpeg, just ahead of the playback position, so the levels
-follow the picture exactly, stop when paused and catch up after a seek. Levels are
-against the loudest sound of the last few seconds, so quiet scenes still move things
-and explosions don't max everything out for long. It needs ffmpeg (next to Flex, or on
-the `PATH`), and only works for files: YouTube and discs get silence (all zeros). Over a
-network share it doubles what's read from the file, so leave it off unless the effect
-uses it. F2 shows the levels.
-
-`uv` and `u_video_rect` run from 0 to 1, starting at the bottom left. Effects cover the
-whole screen, black bars included, so they can draw into them.
-
-While a video plays, Flex checks the shader file twice a second and reloads it when it
-changes, so you can edit it and watch. If it doesn't compile, Flex plays the video
-without the effect, the plugin's page in Settings → Plugins shows the first error, and
-the whole compiler output goes to Flex's log. F2 shows which effect is on.
-
-An effect plugin can still have a `command`, for a program that talks to Flex as usual
-alongside it.
 
 ## Messages from Flex
 
@@ -336,7 +254,6 @@ folder. Plugins run with the plugin's folder as their working directory.
 
 - Put your plugin in the data folder, switch it on, and watch Flex's log (Settings →
   "Open logs folder"): starts, exits, stderr and `log` messages all go there.
-- Press F2 while a video plays to see the colour Flex is sending, and which video effect
-  is on.
+- Press F2 while a video plays to see the colour Flex is sending.
 - To test against a separate copy of Flex's data, run Flex with
   `FLEX_DATA_DIR=/some/folder`. Plugins are then read from `/some/folder/plugins`.

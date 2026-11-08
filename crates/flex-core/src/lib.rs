@@ -5,6 +5,7 @@ pub mod audio;
 pub mod catalog;
 pub mod db;
 pub mod disc;
+pub mod effects;
 pub mod language;
 pub mod library;
 pub mod metadata;

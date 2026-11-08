@@ -1,9 +1,5 @@
 name = "Dream"
 description = "A DeepDream-like effect: the picture swirls, blossoms and sprouts detail as it feeds back on itself"
-version = "0.23.1"
-
-[effect]
-shader = "dream.frag"
 feedback = true
 audio = true
 
@@ -66,7 +62,7 @@ default = 50
 key = "react"
 label = "Reacting to sound"
 type = "number"
-detail = "Beats make the dream surge; 0 for none"
+detail = "Beats and bass speed up the swirling a little; 0 for none"
 min = 0
 max = 100
 step = 20

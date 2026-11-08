@@ -2,15 +2,15 @@
 // kaleidoscope, shifts its colours, and leaves trails that spiral outwards and change
 // colour as they fade. Beats in the sound kick the picture outwards and jolt the colours.
 //
-// Flex declares these for you (see PLUGINS.md):
+// Flex declares these for you (see EFFECTS.md):
 //   u_video       the video frame          u_prev        this effect's last output
 //   u_resolution  size in pixels           u_time        seconds since it started
 //   u_frame       frame number             u_video_rect  the picture without black bars
 //                                                        (x0, y0, x1, y1), 0-1 from bottom left
 //   u_video_time  the playback position (stops when paused)
-//   u_level, u_bass, u_mid, u_treble, u_beat             the sound, 0-1 (audio = true)
+//   u_level, u_bass, u_mid, u_treble, u_beat             the sound, 0-1 (audio = true in melt.toml)
 //   u_spectrum    x: frequency, y: age (0 = now)
-//   s_speed, s_segments, s_trails, s_colours, s_react, s_spill   the settings in plugin.toml
+//   s_speed, s_segments, s_trails, s_colours, s_react, s_spill   the settings in melt.toml
 //
 // Edit this file while a video plays: Flex reloads it as soon as it's saved.
 
