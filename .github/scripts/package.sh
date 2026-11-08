@@ -80,6 +80,7 @@ done
 # --- Flex -----------------------------------------------------------------------------
 
 cp "$ROOT/crates/flex-web/web/vendor/jassub/LICENSE.txt" "$DIR/licenses/jassub-LICENSE.txt"
+cp "$ROOT/crates/flex-depth/src/yunet.LICENSE" "$DIR/licenses/yunet-LICENSE.txt"
 JASSUB_VERSION=$(sed -n 's/^JASSUB \([0-9.]*\).*/\1/p' "$ROOT/crates/flex-web/web/vendor/jassub/README.txt")
 
 cp "$EXE" "$DIR/flex.exe"
@@ -136,6 +137,10 @@ libmpv (libmpv-2.dll), mpv commit $MPV_COMMIT
   Source: https://github.com/mpv-player/mpv/tree/$MPV_COMMIT
     (build scripts and the versions of its dependencies:
     https://github.com/$MPV_BUILDS)
+
+YuNet (built into flex.exe; finds faces for video effects)
+  License: MIT (licenses/yunet-LICENSE.txt).
+  Source: https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
 
 JASSUB $JASSUB_VERSION (built into flex.exe; draws subtitles in the web UI's player)
   JASSUB itself: MIT (licenses/jassub-LICENSE.txt). Its WebAssembly contains libass

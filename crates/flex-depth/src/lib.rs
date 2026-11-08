@@ -11,6 +11,8 @@
 //!
 //! Output is relative inverse depth ("disparity"): bigger is nearer, in no fixed units.
 
+pub mod face;
+
 use std::collections::HashMap;
 use std::path::Path;
 

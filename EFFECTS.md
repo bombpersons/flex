@@ -23,6 +23,10 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Rubber Sheet**: stretches the film over a wobbling mesh shaped by depth: waves, ripples,
   facets or wireframe.
 - **Undertow**: the background melts and pours away while whoever's up close stays solid.
+- **Faces**: shows what Flex can see of the faces in the picture, for checking and for
+  making effects.
+- **Spotlight**: faces stay as they are while everything around them melts and dims.
+- **Laser Eyes**: a beam from each eye, sweeping about and flaring on the beat.
 - **Soundstage**: sounds light up what's closest and roll back through the scene.
 
 ## Making one
@@ -75,6 +79,10 @@ don't declare them yourself:
 | `sampler2D u_spectrum` | the sound's spectrum: x is frequency (30 Hz to 11 kHz, log-spaced, 64 bands), y is age (0 is now, 1 is about two seconds ago); values 0–1 in `.r` |
 | `float depth_at(vec2 uv)` | a function: how near that point of the screen is, from 0 (far) to 1 (near) (with `depth = true`; 0 until the first depth map arrives) |
 | `sampler2D u_depth`, `float u_has_depth` | the depth map itself, covering the picture rather than the screen, and 1 once there is one |
+| `int u_face_count`, `vec4 u_faces[MAX_FACES]` | how far through the arrays to look, and each face's box on screen: x0, y0, x1, y1 (with `faces = true`) |
+| `float u_face_seen[MAX_FACES]` | 0 to 1, fading as a face comes and goes; multiply by it so faces don't pop. It's 0 for empty slots |
+| `vec2 face_point(int face, int point)` | where on the screen a face's point is: 0 right eye, 1 left eye, 2 nose, 3 right corner of the mouth, 4 left (the person's own right and left) |
+| `float face_at(vec2 uv)` | a function: how much of any face is at that point of the screen, from 0 to 1, soft at the edges |
 
 `uv` and `u_video_rect` run from 0 to 1, starting at the bottom left. Effects cover the
 whole screen, black bars included, so they can draw into them.
@@ -91,6 +99,7 @@ description = "Makes it wobble"
 feedback = true                # give the shader its own last frame (u_prev); default false
 audio = true                   # the sound uniforms; default false
 depth = true                   # how far away things are; default false
+faces = true                   # where faces are; default false
 scale = 1.0                    # work at this fraction of the screen's size (0.25–1), then
                                # scale up: lower is lighter on the GPU; default 1
 
@@ -134,6 +143,15 @@ frame or two after the picture and is softer than it. It's smoothed over time so
 flicker, except where something moved. It uses a fair bit of the GPU, so leave it off
 unless the effect uses it; the model is unloaded a little while after the last effect that
 wanted it. F2 and F3 show how long it's taking and at what size.
+
+### Faces
+
+With `faces = true`, Flex finds up to eight faces with
+[YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (MIT), a
+small network that runs on the GPU like depth does and comes with Flex. It's cheap, and works
+15 times a second. A face keeps its slot in the arrays while it's on screen. It works best on
+live action; very small faces, faces in profile or turned away, and cartoon characters are
+missed some of the time, so effects need to look fine with no faces at all.
 
 ## Testing
 

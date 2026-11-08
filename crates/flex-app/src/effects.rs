@@ -57,6 +57,7 @@ pub struct Renderer {
     /// `u_spectrum`: BANDS × HISTORY.
     spectrum: Option<glow::Texture>,
     depth: DepthGl,
+    faces: FaceGl,
     copy: Option<glow::Program>,
     /// The effect's program; `None` if it didn't compile.
     program: Option<glow::Program>,
@@ -83,6 +84,8 @@ pub struct Frame {
     pub audio: Option<Arc<Features>>,
     /// The depth worker, when the effect asked for depth.
     pub depth: Option<crate::depth::Link>,
+    /// The face worker, when the effect asked for faces.
+    pub faces: Option<crate::faces::Link>,
 }
 
 /// The player's side: a smooth playback clock, and the sound for effects that want it.
@@ -242,6 +245,9 @@ pub fn window(ctx: &egui::Context, open: &mut bool, sh: &mut Shared, frame: Opti
                 ui.separator();
                 ui.label(format!("Depth: {}", depth.status().describe()));
             }
+            if let Some(faces) = frame.and_then(|f| f.faces.as_ref()) {
+                ui.label(format!("Faces: {}", faces.status().describe()));
+            }
             if let Some(a) = frame.and_then(|f| f.audio.as_deref()) {
                 ui.separator();
                 ui.label("Sound");
@@ -351,6 +357,26 @@ float depth_at(vec2 uv) {
     vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
     return texture(u_depth, p).r * u_has_depth;
 }
+const int MAX_FACES = 8;
+uniform int u_face_count;
+// Each face: x0, y0, x1, y1 on screen. Its five points: right eye, left eye, nose, right and
+// left corners of the mouth. u_face_seen fades from 0 to 1 and back as faces come and go.
+uniform vec4 u_faces[MAX_FACES];
+uniform vec2 u_face_points[MAX_FACES * 5];
+uniform float u_face_seen[MAX_FACES];
+vec2 face_point(int face, int point) {
+    return u_face_points[face * 5 + point];
+}
+// How much of a face is at a point on screen, from 0 to 1, soft at the edges.
+float face_at(vec2 uv) {
+    float amount = 0.0;
+    for (int i = 0; i < u_face_count; i++) {
+        vec2 centre = 0.5 * (u_faces[i].xy + u_faces[i].zw);
+        vec2 radius = max(0.5 * (u_faces[i].zw - u_faces[i].xy), vec2(1e-5));
+        amount = max(amount, u_face_seen[i] * (1.0 - smoothstep(0.8, 1.15, length((uv - centre) / radius))));
+    }
+    return amount;
+}
 ";
 
 /// The effect's fragment shader: Flex's header, the plugin's file (which defines
@@ -458,6 +484,10 @@ impl Renderer {
                 Some(link) => self.depth.update(gl, link, o.video.fbo, size, rect, frame.video_time),
                 None => None,
             };
+            let faces = match &frame.faces {
+                Some(link) => self.faces.update(gl, link, o.video.fbo, size, rect, frame.video_time),
+                None => FaceUniforms::default(),
+            };
 
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
@@ -503,6 +533,10 @@ impl Renderer {
             gl.bind_texture(glow::TEXTURE_2D, depth_texture);
             gl.uniform_1_i32(at("u_depth").as_ref(), 3);
             gl.uniform_1_f32(at("u_has_depth").as_ref(), if depth_texture.is_some() && self.depth.serial > 0 { 1.0 } else { 0.0 });
+            gl.uniform_1_i32(at("u_face_count").as_ref(), faces.count);
+            gl.uniform_4_f32_slice(at("u_faces").as_ref(), &faces.boxes);
+            gl.uniform_2_f32_slice(at("u_face_points").as_ref(), &faces.points);
+            gl.uniform_1_f32_slice(at("u_face_seen").as_ref(), &faces.seen);
             for (name, value) in &effect.uniforms {
                 gl.uniform_1_f32(at(name).as_ref(), *value);
             }
@@ -555,6 +589,7 @@ impl Renderer {
                 gl.delete_texture(t);
             }
             self.depth.release(gl);
+            self.faces.release(gl);
             if let Some(vao) = self.vao.take() {
                 gl.delete_vertex_array(vao);
             }
@@ -728,6 +763,21 @@ struct Fence(glow::Fence);
 
 unsafe impl Send for Fence {}
 
+/// Faces as the shader's uniforms.
+#[derive(Clone, Copy)]
+struct FaceUniforms {
+    count: i32,
+    boxes: [f32; crate::faces::MAX_FACES * 4],
+    points: [f32; crate::faces::MAX_FACES * 10],
+    seen: [f32; crate::faces::MAX_FACES],
+}
+
+impl Default for FaceUniforms {
+    fn default() -> Self {
+        Self { count: 0, boxes: [0.0; crate::faces::MAX_FACES * 4], points: [0.0; crate::faces::MAX_FACES * 10], seen: [0.0; crate::faces::MAX_FACES] }
+    }
+}
+
 struct DepthObjects {
     /// The picture shrunk to the model's size, and a buffer to read it back through.
     capture: Target,
@@ -836,6 +886,143 @@ impl DepthGl {
         }
     }
 }
+
+/// Small frames read back for the face worker, and what it finds, eased from one report to
+/// the next so faces glide at the screen's rate.
+#[derive(Default)]
+struct FaceGl {
+    objects: Option<(Target, glow::Buffer)>,
+    failed: bool,
+    pending: Option<(Fence, (f32, f32))>,
+    last_time: Option<f32>,
+    shown: [Option<crate::faces::Shown>; crate::faces::MAX_FACES],
+    painted: Option<Instant>,
+}
+
+impl FaceGl {
+    /// Picks up a frame read back last time and hands it over, reads back this frame if the
+    /// worker's free, and returns the faces as they should be drawn this frame.
+    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::faces::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32) -> FaceUniforms {
+        use crate::faces::{HEIGHT, WIDTH};
+        unsafe {
+            if self.failed {
+                return FaceUniforms::default();
+            }
+            if self.objects.is_none() {
+                let made = create_target(gl, (WIDTH as i32, HEIGHT as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|capture| {
+                    let pbo = gl.create_buffer()?;
+                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
+                    gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (WIDTH * HEIGHT * 4) as i32, glow::STREAM_READ);
+                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                    Ok((capture, pbo))
+                });
+                match made {
+                    Ok(o) => self.objects = Some(o),
+                    Err(e) => {
+                        log::warn!("faces: {e}");
+                        self.failed = true;
+                        return FaceUniforms::default();
+                    }
+                }
+            }
+            let Some((capture, pbo)) = self.objects.as_ref() else { return FaceUniforms::default() };
+            let bytes = WIDTH * HEIGHT * 4;
+            if let Some((Fence(fence), filled)) = self.pending {
+                match gl.client_wait_sync(fence, 0, 0) {
+                    glow::TIMEOUT_EXPIRED => {}
+                    status => {
+                        gl.delete_sync(fence);
+                        self.pending = None;
+                        if status != glow::WAIT_FAILED {
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
+                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
+                            if !ptr.is_null() {
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), filled);
+                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                            }
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                        }
+                    }
+                }
+            }
+            if self.pending.is_none() && link.ready_for_frame() && self.last_time != Some(time) {
+                self.last_time = Some(time);
+                // The picture without black bars, its shape kept and the rest left black: a
+                // squashed face is harder to find. In GL's rows, the top of the picture is
+                // at the top of the capture.
+                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
+                let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
+                let scale = (WIDTH as f32 / (x1 - x0) as f32).min(HEIGHT as f32 / (y1 - y0) as f32);
+                let (w, h) = ((((x1 - x0) as f32 * scale) as i32).clamp(1, WIDTH as i32), (((y1 - y0) as f32 * scale) as i32).clamp(1, HEIGHT as i32));
+                gl.disable(glow::SCISSOR_TEST);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(capture.fbo));
+                gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(capture.fbo));
+                gl.blit_framebuffer(x0, y0, x1, y1, 0, HEIGHT as i32 - h, w, HEIGHT as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(capture.fbo));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+                gl.read_pixels(0, 0, WIDTH as i32, HEIGHT as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+                    self.pending = Some((Fence(fence), (w as f32 / WIDTH as f32, h as f32 / HEIGHT as f32)));
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+        }
+        let now = Instant::now();
+        let dt = self.painted.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+        self.painted = Some(now);
+        let target = link.latest().map_or([None; crate::faces::MAX_FACES], |slots| *slots);
+        let follow = 1.0 - (-dt * FACE_GLIDE).exp();
+        let mut out = FaceUniforms::default();
+        for (i, (shown, target)) in self.shown.iter_mut().zip(target).enumerate() {
+            *shown = match (*shown, target) {
+                (Some(mut was), Some(new)) => {
+                    for (a, b) in was.coords.iter_mut().zip(new.coords) {
+                        *a += (b - *a) * follow;
+                    }
+                    was.seen += (new.seen - was.seen) * follow;
+                    Some(was)
+                }
+                (_, new) => new,
+            };
+            let Some(face) = shown else { continue };
+            let (width, height) = (rect[2] - rect[0], rect[3] - rect[1]);
+            let x = |v: f32| rect[0] + v * width;
+            let y = |v: f32| rect[3] - v * height;
+            out.boxes[i * 4..i * 4 + 4].copy_from_slice(&[x(face.coords[0]), y(face.coords[3]), x(face.coords[2]), y(face.coords[1])]);
+            for p in 0..5 {
+                out.points[(i * 5 + p) * 2] = x(face.coords[4 + p * 2]);
+                out.points[(i * 5 + p) * 2 + 1] = y(face.coords[5 + p * 2]);
+            }
+            out.seen[i] = face.seen;
+            out.count = i as i32 + 1;
+        }
+        out
+    }
+
+    unsafe fn release(&mut self, gl: &glow::Context) {
+        unsafe {
+            if let Some((Fence(fence), _)) = self.pending.take() {
+                gl.delete_sync(fence);
+            }
+            if let Some((capture, pbo)) = self.objects.take() {
+                gl.delete_framebuffer(capture.fbo);
+                gl.delete_texture(capture.texture);
+                gl.delete_buffer(pbo);
+            }
+            self.last_time = None;
+            self.painted = None;
+            self.shown = [None; crate::faces::MAX_FACES];
+        }
+    }
+}
+
+/// How quickly drawn faces close the gap to the latest report (per second).
+const FACE_GLIDE: f32 = 25.0;
 
 unsafe fn create_depth(gl: &glow::Context) -> Result<DepthObjects, String> {
     use crate::depth::{HEIGHT, WIDTH};

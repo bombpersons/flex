@@ -8,6 +8,7 @@ mod awake;
 mod autostart;
 mod depth;
 mod effects;
+mod faces;
 mod images;
 mod input;
 mod instance;
