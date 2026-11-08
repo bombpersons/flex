@@ -8,13 +8,22 @@ while watching it.
 Choose one in Settings → Picture → Video effects, or hold OK while a video plays to
 switch to the next one (and back to off). Its settings show under it in Settings.
 
-Flex comes with two to start from, in [`effects`](effects):
+Flex comes with these to start from, in [`effects`](effects):
 
 - **Melt**: a turning kaleidoscope with glowing trails that change colour; beats kick it.
 - **Dream**: a DeepDream-like feedback loop where edges curl into tendrils, bright
   patches blossom and details sprout texture.
 - **Depth**: uses a neural network's guess at how far away everything is, for rainbow
   contours rippling through the scene, or fog.
+- **Distance**: an effect that grows with distance, or closeness: fog, prisms, heat haze,
+  blocks, colour or a rush of speed.
+- **Relight**: new coloured lights in the film's world, casting shadows, using a surface
+  worked out from depth. Also clay and an oil slick.
+- **Diorama**: moves the camera inside the shot: floating, a dolly-zoom, or red and cyan 3D.
+- **Rubber Sheet**: stretches the film over a wobbling mesh shaped by depth: jelly, ripples,
+  facets or wireframe.
+- **Undertow**: the background melts and pours away while whoever's up close stays solid.
+- **Soundstage**: sounds light up what's closest and roll back through the scene.
 
 ## Making one
 

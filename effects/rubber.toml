@@ -1,0 +1,69 @@
+name = "Rubber Sheet"
+description = "Stretches the film over a mesh shaped by how far away everything is, then makes its vertices wobble"
+audio = true
+depth = true
+scale = 0.75
+
+[[settings]]
+key = "style"
+label = "Style"
+type = "choice"
+default = "jelly"
+options = [
+    { id = "jelly", label = "Jelly" },
+    { id = "ripple", label = "Ripples" },
+    { id = "facets", label = "Facets" },
+    { id = "wire", label = "Wireframe" },
+]
+
+[[settings]]
+key = "cells"
+label = "Mesh size"
+type = "number"
+detail = "Squares across the picture: fewer for chunkier"
+min = 10
+max = 160
+step = 10
+default = 60
+
+[[settings]]
+key = "wobble"
+label = "Wobble"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 40
+
+[[settings]]
+key = "sway"
+label = "Camera sway"
+type = "number"
+detail = "How far the view circles the mesh"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 50
+
+[[settings]]
+key = "speed"
+label = "Speed"
+type = "number"
+min = 0
+max = 2
+step = 0.25
+unit = "×"
+default = 1
+
+[[settings]]
+key = "react"
+label = "Reacting to sound"
+type = "number"
+detail = "Beats and bass shake the mesh"
+min = 0
+max = 100
+step = 20
+unit = "%"
+default = 40
