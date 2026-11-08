@@ -1,5 +1,7 @@
 name = "Datamosh"
 description = "Frames smear into each other as if the file had been corrupted, and the beat knocks chunks of it clean."
+flow = true
+depth = true
 feedback = true
 audio = true
 scale = 0.75
@@ -45,3 +47,13 @@ max = 100
 step = 10
 unit = "%"
 default = 70
+
+[[settings]]
+key = "near"
+label = "Keep close things clean"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 40

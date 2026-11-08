@@ -23,22 +23,6 @@ float fbm(vec2 p) {
     return sum;
 }
 
-// What's probably behind someone: the picture around them, averaged.
-vec3 room_behind(vec2 uv) {
-    vec3 sum = vec3(0.0);
-    float total = 1e-3;
-    for (int r = 1; r <= 3; r++) {
-        for (int i = 0; i < 8; i++) {
-            float a = float(i) * 0.7853982 + float(r);
-            vec2 q = uv + vec2(cos(a), sin(a)) * vec2(u_resolution.y / u_resolution.x, 1.0) * float(r) * 0.11;
-            float clear = 1.0 - smoothstep(0.1, 0.4, person_at(q));
-            sum += texture(u_video, clamp(q, u_video_rect.xy, u_video_rect.zw)).rgb * clear;
-            total += clear;
-        }
-    }
-    return sum / total;
-}
-
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(c, 1.0);
@@ -68,7 +52,7 @@ vec4 effect(vec2 uv) {
         }
     }
     if (person <= 0.0 && covered <= 0.0) return vec4(c, 1.0);
-    vec3 behind = person > 0.0 ? mix(room_behind(uv) * 0.75, c, s_solid / 100.0) : c;
+    vec3 behind = person > 0.0 ? mix(plate_at(uv) * 0.75, c, s_solid / 100.0) : c;
     vec3 shown = mix(c, behind, person);
     return vec4(mix(shown, speck, covered), 1.0);
 }

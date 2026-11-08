@@ -35,10 +35,13 @@ vec4 effect(vec2 uv) {
     float t = u_time;
     float person = person_at(uv);
     float reach = 0.03 * s_size / 100.0 * (1.0 + u_bass * s_react / 50.0);
-    float near = 0.0;
+    float near = 0.0, source = 0.0;
     for (int i = 0; i < 12; i++) {
         float a = float(i) * 0.5235988;
-        near += person_at(uv + vec2(cos(a), sin(a)) * reach / aspect);
+        vec2 at = uv + vec2(cos(a), sin(a)) * reach / aspect;
+        float there = person_at(at);
+        near += there;
+        if (there > 0.5) source = max(source, depth_at(at));
     }
     near /= 12.0;
     vec2 wander = vec2(fbm(p * 5.0 + vec2(0.0, -t * 0.7)), fbm(p * 5.0 + vec2(6.0, -t * 0.6))) - 0.47;
@@ -47,6 +50,8 @@ vec4 effect(vec2 uv) {
     float field = max(near * 1.1, kept * (0.955 + 0.03 * u_bass * s_react / 100.0));
     vec3 colour = hue(s_colours / 360.0 + s_spread / 100.0 * (field * 0.6 + wander.x * 1.5 + t * 0.05));
     float glow = smoothstep(0.05, 0.9, field) * (1.0 + 1.2 * u_beat * s_react / 100.0);
+    // It's behind them, so anything nearer than the person hides it.
+    if (source > 0.0) glow *= 1.0 - smoothstep(source + 0.02, source + 0.1, depth_at(uv));
     float solid = smoothstep(0.4, 0.7, person);
     return vec4(c + colour * glow * (1.0 - solid) * 0.95, field);
 }

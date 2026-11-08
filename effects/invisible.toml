@@ -1,7 +1,7 @@
 name = "Invisible Man"
-description = "People vanish, leaving only a shimmer in the air, and the room is filled in from what was seen behind them."
+description = "People vanish, leaving only a shimmer in the air, and the room is filled in from what's been seen behind them."
+plate = true
 segment = true
-feedback = true
 
 [[settings]]
 key = "shimmer"
@@ -13,14 +13,3 @@ max = 100
 step = 10
 unit = "%"
 default = 50
-
-[[settings]]
-key = "memory"
-label = "Memory"
-type = "number"
-detail = "How long the room behind someone is remembered before guessing"
-min = 2
-max = 30
-step = 1
-unit = " s"
-default = 10

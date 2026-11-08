@@ -59,6 +59,11 @@ vec3 look(vec2 p, float arms, float zoom, float roam, float aspect) {
     q += vec2(sin(roam * 0.31) * 0.14, sin(roam * 0.23 + 1.0) * 0.07 - 0.03);
     vec2 size = u_video_rect.zw - u_video_rect.xy;
     vec2 picture = bounce(q / vec2(aspect * size.y / size.x, 1.0) / size.y + 0.5);
+    if (s_relief > 0.0) {
+        // Near things bulge out of the pattern.
+        q *= 1.0 - (depth_at(u_video_rect.xy + picture * size) - 0.5) * s_relief / 100.0 * 0.6;
+        picture = bounce(q / vec2(aspect * size.y / size.x, 1.0) / size.y + 0.5);
+    }
     return texture(u_video, u_video_rect.xy + picture * size).rgb;
 }
 

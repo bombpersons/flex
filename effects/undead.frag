@@ -33,6 +33,7 @@ vec4 effect(vec2 uv) {
     float person = smoothstep(0.35, 0.7, person_at(uv));
 
     vec3 world = mix(vec3(luma), c, 0.25) * vec3(0.72, 0.8, 1.0);
+    world *= 1.0 - s_gloom / 100.0 * 0.8 * (1.0 - depth_at(uv));
     float ridge = abs(fbm(p * 22.0) - 0.5);
     float veins = (1.0 - smoothstep(0.0, 0.03, ridge)) * s_rot / 100.0;
     float blotch = fbm(p * 7.0 + 3.0);

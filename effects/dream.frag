@@ -56,5 +56,6 @@ vec4 effect(vec2 uv) {
     p = mix(vec3(lum(p)), p, 1.0 + 0.03 * s_colours / 100.0);
 
     float keep = clamp(s_dream / 100.0, 0.0, 0.97);
+    keep *= 1.0 - s_near / 100.0 * smoothstep(0.45, 0.85, depth_at(uv));
     return vec4(clamp(mix(video, p, keep), 0.0, 1.0), 1.0);
 }

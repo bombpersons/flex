@@ -1,5 +1,6 @@
 name = "Pixel Sort Waterfall"
 description = "Bright pixels pour down the screen in streams and pool at the bottom."
+depth = true
 feedback = true
 audio = true
 
@@ -45,3 +46,13 @@ max = 40
 step = 5
 unit = "%"
 default = 12
+
+[[settings]]
+key = "ledges"
+label = "Pool on surfaces"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 70

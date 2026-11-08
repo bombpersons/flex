@@ -1,5 +1,6 @@
 name = "Reaction-Diffusion Skin"
 description = "Living zebra and coral patterns grow over everything and creep along the shapes in the picture."
+depth = true
 feedback = true
 audio = true
 
@@ -44,3 +45,14 @@ options = [
     { id = "coral", label = "Coral" },
     { id = "zebra", label = "Zebra" },
 ]
+
+[[settings]]
+key = "scale"
+label = "Bigger up close"
+type = "number"
+detail = "The pattern is larger on things near the camera"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 70

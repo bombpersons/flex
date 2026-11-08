@@ -37,6 +37,8 @@ vec4 effect(vec2 uv) {
     float column = floor(uv.x * u_resolution.x / 5.0);
     float height = (uv.y - u_video_rect.y) / max(u_video_rect.w - u_video_rect.y, 1e-3);
     float pooling = 1.0 - smoothstep(s_pool / 100.0 - 0.01, s_pool / 100.0 + 0.01, height + (noise(vec2(x * 30.0, t)) - 0.5) * 0.02);
+    // Drips also come to rest on the top of things.
+    pooling = max(pooling, s_ledges / 100.0 * smoothstep(0.03, 0.08, depth_at(uv) - depth_at(uv + vec2(0.0, 8.0 / u_resolution.y))));
     float fall = (1.0 + 7.0 * pow(hash(vec2(column, 1.0)), 2.0)) * s_speed / 100.0 * 2.0 * (1.0 - pooling);
     vec4 above = u_frame < 2 ? vec4(0.0) : texture(u_prev, uv + vec2(0.0, fall / u_resolution.y));
     float molten = above.a * s_stay / 100.0;

@@ -1,5 +1,6 @@
 name = "Spotlight"
 description = "Faces stay as they are while everything around them melts and dims."
+depth = true
 faces = true
 audio = true
 
@@ -33,3 +34,14 @@ max = 100
 step = 10
 unit = "%"
 default = 30
+
+[[settings]]
+key = "distance"
+label = "More in the distance"
+type = "number"
+detail = "Far away melts and dims more than up close"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 70

@@ -1,5 +1,6 @@
 name = "Colour Time Split"
 description = "Red, green and blue run at different moments, so anything that moves turns into a rainbow."
+depth = true
 feedback = true
 
 [[settings]]
@@ -23,3 +24,13 @@ options = [
     { id = "green", label = "Green" },
     { id = "blue", label = "Blue" },
 ]
+
+[[settings]]
+key = "near"
+label = "Less up close"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 40

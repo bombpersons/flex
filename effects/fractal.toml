@@ -56,3 +56,14 @@ options = [
     { id = "middle", label = "The middle" },
     { id = "face", label = "The first face" },
 ]
+
+[[settings]]
+key = "near"
+label = "Close things in front"
+type = "number"
+detail = "Furniture and anything else up close stands in front of the window too"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 100

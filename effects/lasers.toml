@@ -1,5 +1,6 @@
 name = "Laser Eyes"
 description = "Everyone fires laser beams from their eyes, the way they're facing, flaring on the beat."
+depth = true
 faces = true
 audio = true
 

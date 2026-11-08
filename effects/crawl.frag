@@ -65,7 +65,8 @@ vec4 effect(vec2 uv) {
         if (open > 0.0) {
             vec2 centre = (cell + 0.5) * size;
             vec2 target = u_face_count > 0 ? face_point(0, 2) * aspect : vec2(aspect.x * 0.5 + 0.3 * sin(t * 0.7), 0.4);
-            vec2 q = (p - centre) / (size * 0.42) * vec2(1.0, 1.4);
+            // Further away, smaller.
+            vec2 q = (p - centre) / (size * 0.42 * (0.55 + depth_at(centre / aspect))) * vec2(1.0, 1.4);
             vec4 e = eye(q, normalize(target - centre), open);
             moved = mix(moved, e.rgb, e.a);
         }

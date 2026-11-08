@@ -39,6 +39,7 @@ vec4 effect(vec2 uv) {
     vec3 c = copy_at(levels[last], fall - float(last), low, high);
     for (int i = last - 1; i >= 0; i--) {
         float person = smoothstep(0.4, 0.7, person_at(levels[i])) * s_people / 100.0;
+        person = max(person, smoothstep(0.76, 0.86, depth_at(levels[i])) * s_near / 100.0);
         if (i == 0) person *= 1.0 - smoothstep(0.55, 1.0, fall);
         if (person > 0.0) c = mix(c, copy_at(levels[i], fall - float(i), low, high), person);
     }

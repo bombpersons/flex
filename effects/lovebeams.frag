@@ -62,7 +62,7 @@ vec4 effect(vec2 uv) {
                 float size = f.spread * (0.14 + 0.5 * along) * s_size / 100.0 * (1.0 + 0.4 * u_beat * s_react / 100.0);
                 vec2 q = (p - at) / size;
                 if (dot(q, q) > 3.0) continue;
-                float inside = 1.0 - smoothstep(-0.03, 0.0, heart(q));
+                float inside = (1.0 - smoothstep(-0.03, 0.0, heart(q))) * (1.0 - smoothstep(0.04, 0.12, depth_at(uv) - depth_at(eye / aspect)));
                 light = max(light, vec3(1.0, 0.16, 0.42) * inside * seen * (1.0 - smoothstep(0.55, 1.0, along)));
             }
         }

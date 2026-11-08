@@ -44,3 +44,14 @@ max = 100
 step = 10
 unit = "%"
 default = 60
+
+[[settings]]
+key = "surfaces"
+label = "Follow the surfaces"
+type = "number"
+detail = "How much the bands wrap around the shapes in the scene"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 50

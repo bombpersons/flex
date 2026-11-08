@@ -57,6 +57,8 @@ vec4 effect(vec2 uv) {
     float zoom = 1.0 + 0.08 * sin(t * 0.7) - 0.15 * u_beat * react;
     vec2 pic = k / vec2(aspect, 1.0) * zoom + 0.5;
     pic = (pic - lo) / size;
+    // Near things bulge out of the pattern.
+    pic = 0.5 + (pic - 0.5) * (1.0 - (depth_at(lo + mirror(pic) * size) - 0.5) * s_relief / 100.0 * 0.6);
     bool inside = all(greaterThanEqual(uv, lo)) && all(lessThanEqual(uv, lo + size));
     vec3 video = texture(u_video, lo + mirror(pic) * size).rgb;
     if (s_spill < 0.5 && !inside) video = vec3(0.0);

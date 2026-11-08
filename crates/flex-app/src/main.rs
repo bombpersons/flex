@@ -21,6 +21,7 @@ mod player;
 mod scenery;
 mod screens;
 mod shared;
+mod signals;
 mod sync;
 mod shots;
 mod theme;

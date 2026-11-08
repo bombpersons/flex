@@ -1,8 +1,8 @@
 name = "Tiny People"
 description = "People shrink down where they are, leaving the room around them huge."
+plate = true
 segment = true
 faces = true
-feedback = true
 audio = true
 
 [[settings]]

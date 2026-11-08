@@ -1,5 +1,6 @@
 name = "Smoke People"
 description = "People come apart at the edges and blow away as smoke."
+plate = true
 segment = true
 feedback = true
 audio = true

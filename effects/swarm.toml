@@ -1,5 +1,6 @@
 name = "Swarm"
 description = "People dissolve into thousands of specks that buzz about, holding their shape until the bass scatters them."
+plate = true
 segment = true
 audio = true
 

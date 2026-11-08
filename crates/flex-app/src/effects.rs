@@ -23,13 +23,14 @@ use flex_plugin::serde_json;
 use crate::mpv::Mpv;
 use crate::picture::{Picture, Upscale};
 use crate::shared::Shared;
+use crate::signals::{Cuts, FlowGl, HistoryGl, HistorySpot, PlateGl, Stats};
 
 /// How often the shader file is checked for changes.
 const RECHECK: Duration = Duration::from_millis(500);
 
-struct Target {
-    texture: glow::Texture,
-    fbo: glow::Framebuffer,
+pub(crate) struct Target {
+    pub texture: glow::Texture,
+    pub fbo: glow::Framebuffer,
 }
 
 struct Objects {
@@ -79,6 +80,11 @@ pub struct Renderer {
     held: HeldFrames,
     faces: FaceGl,
     cuts: CutGl,
+    history: HistoryGl,
+    flow: FlowGl,
+    plate: PlateGl,
+    stats: Stats,
+    last_paint: Option<Instant>,
     copy: Option<glow::Program>,
     slots: [Slot; 2],
     /// Which of `slots` has the chosen effect; the other has the one fading out, if any.
@@ -95,8 +101,10 @@ pub struct Frame {
     pub fading: Option<(ActiveEffect, f32)>,
     /// The size mpv draws at, relative to the screen.
     pub video_scale: f32,
-    /// Shuffle wants to know where the shot changes.
+    /// Shuffle or an effect wants to know where the shot changes.
     pub find_cuts: bool,
+    /// What the effects on or coming up want worked out.
+    pub needs: flex_core::effects::Needs,
     /// Where the picture is, without black bars (0–1 from the bottom left).
     pub rect: [f32; 4],
     pub video_time: f32,
@@ -366,6 +374,7 @@ uniform float u_time;
 uniform int u_frame;
 uniform vec4 u_video_rect;
 uniform float u_video_time;
+uniform float u_dt;
 uniform float u_level;
 uniform float u_bass;
 uniform float u_mid;
@@ -415,13 +424,74 @@ float face_at(vec2 uv) {
     }
     return amount;
 }
+// Which face a point of the picture belongs with, as an index into u_faces, or -1 if there are
+// none. Bodies hang below faces, so what's underneath counts as nearer than what's alongside.
+int who_at(vec2 uv) {
+    int best = -1;
+    float nearest = 1e9;
+    for (int i = 0; i < u_face_count; i++) {
+        if (u_face_seen[i] <= 0.02) continue;
+        vec2 centre = 0.5 * (u_faces[i].xy + u_faces[i].zw);
+        vec2 size = max(u_faces[i].zw - u_faces[i].xy, vec2(1e-4));
+        vec2 d = (uv - centre) / size;
+        if (d.y < 0.0) d.y *= 0.35;
+        float away = dot(d, d);
+        if (away < nearest) { nearest = away; best = i; }
+    }
+    return best;
+}
+// How long the frame on screen has been in its shot, in seconds, and 1 on a cut, fading to 0 in
+// about half a second (with cuts = true). u_since_cut is huge until the first cut.
+uniform float u_cut;
+uniform float u_since_cut;
+// The look of the picture (with stats = true). u_palette holds its main colours, each keeping its
+// slot as they change, and u_palette_share how much of the picture each covers.
+uniform float u_brightness;
+uniform float u_colourfulness;
+uniform float u_warmth;
+uniform vec3 u_palette[4];
+uniform float u_palette_share[4];
+// The picture some seconds ago, up to about one, at half size (with history = true).
+uniform sampler2DArray u_history;
+uniform float u_has_history;
+uniform float u_history_head;
+uniform float u_history_count;
+uniform float u_history_rate;
+vec3 history_at(vec2 uv, float seconds) {
+    float frames = clamp(seconds * u_history_rate, 0.0, max(u_history_count - 1.0, 0.0));
+    float older = floor(frames);
+    vec3 a = texture(u_history, vec3(uv, mod(u_history_head - older + 240.0, 24.0))).rgb;
+    vec3 b = texture(u_history, vec3(uv, mod(u_history_head - older - 1.0 + 240.0, 24.0))).rgb;
+    return mix(a, b, u_history_count > older + 1.0 ? frames - older : 0.0);
+}
+// How a point of the screen is moving, in screen widths and heights a second (with flow = true).
+uniform sampler2D u_flow;
+uniform float u_has_flow;
+vec2 flow_at(vec2 uv) {
+    vec2 size = max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
+    return texture(u_flow, (uv - u_video_rect.xy) / size).rg * size * u_has_flow;
+}
+// The room with the people taken out, and how much of a point has actually been seen rather than
+// filled in from around it (with plate = true).
+uniform sampler2D u_plate;
+uniform float u_has_plate;
+vec3 plate_at(vec2 uv) {
+    vec4 sum = textureLod(u_plate, uv, 0.0);
+    for (int lod = 1; lod < 9 && sum.a < 0.97; lod++) {
+        sum += textureLod(u_plate, uv, float(lod)) * (1.0 - sum.a);
+    }
+    return sum.rgb / max(sum.a, 1e-3);
+}
+float plate_known(vec2 uv) {
+    return textureLod(u_plate, uv, 0.0).a * u_has_plate;
+}
 ";
 
 /// The effect's fragment shader: Flex's header, the plugin's file (which defines
 /// `vec4 effect(vec2 uv)`) and a `main` calling it. `#line 1` keeps error line numbers
 /// matching the plugin's file.
 pub fn fragment_source(version: &str, embedded: bool, uniforms: &[String], body: &str) -> String {
-    let precision = if embedded { "precision highp float;\nprecision highp int;\n" } else { "" };
+    let precision = if embedded { "precision highp float;\nprecision highp int;\nprecision highp sampler2DArray;\n" } else { "" };
     let settings: String = uniforms.iter().map(|u| format!("uniform float {u};\n")).collect();
     format!(
         "{version}\n{precision}{HEADER}{settings}in vec2 v_uv;\nout vec4 flex_color;\n#line 1\n{body}\n\
@@ -582,6 +652,27 @@ impl Renderer {
             let (depth_texture, mask_texture) = if frame.depth.is_some() { self.depth.map_for(pts) } else { (None, None) };
             let faces = if frame.faces.is_some() { self.faces.uniforms(pts, rect) } else { FaceUniforms::default() };
 
+            let painted_at = Instant::now();
+            let dt = self.last_paint.map_or(1.0 / 60.0, |t| painted_at.duration_since(t).as_secs_f32()).min(0.25);
+            self.last_paint = Some(painted_at);
+            let decl = version.version_declaration();
+            let vertex = vertex_source(decl);
+            if frame.needs.history {
+                self.history.push(gl, source, size, source_time);
+            }
+            if let Some(at) = self.cuts.fresh.take() {
+                self.flow.zero_at(gl, at);
+            }
+            if frame.needs.flow {
+                self.flow.update(gl, decl, &vertex, version.is_embedded(), vao, source, size, rect, source_time);
+            }
+            if frame.needs.plate && let Some(people) = mask_texture.filter(|_| self.depth.has_masks) {
+                let reset = self.plate.last_time().is_some_and(|last| self.cuts.found.between(last, pts));
+                self.plate.update(gl, decl, &vertex, version.is_embedded(), vao, video_texture, people, size, rect, pts, reset);
+            }
+            let snap = self.cuts.found.since(pts).is_some_and(|since| since < 0.05);
+            self.stats.ease(&self.cuts.stats, if snap { 1.0 } else { (dt * 6.0).min(1.0) });
+
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(vao));
@@ -604,7 +695,22 @@ impl Renderer {
             gl.bind_texture(glow::TEXTURE_2D, depth_texture);
             gl.active_texture(glow::TEXTURE4);
             gl.bind_texture(glow::TEXTURE_2D, mask_texture);
+            let history = if frame.needs.history { self.history.texture() } else { None };
+            let flow = if frame.needs.flow { self.flow.at(pts) } else { None };
+            let plate = if frame.needs.plate { self.plate.texture() } else { None };
+            gl.active_texture(glow::TEXTURE5);
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, history);
+            gl.active_texture(glow::TEXTURE6);
+            gl.bind_texture(glow::TEXTURE_2D, flow);
+            gl.active_texture(glow::TEXTURE7);
+            gl.bind_texture(glow::TEXTURE_2D, plate);
             let given = Given {
+                dt,
+                since_cut: if frame.needs.cuts { self.cuts.found.since(pts) } else { None },
+                history: history.map(|_| self.history.spot(pts)),
+                has_flow: flow.is_some(),
+                has_plate: plate.is_some(),
+                stats: &self.stats,
                 rect,
                 video_time: frame.video_time,
                 audio,
@@ -643,10 +749,12 @@ impl Renderer {
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
             gl.bind_texture(glow::TEXTURE_2D, None);
-            for unit in [glow::TEXTURE1, glow::TEXTURE2, glow::TEXTURE3, glow::TEXTURE4] {
+            for unit in [glow::TEXTURE1, glow::TEXTURE2, glow::TEXTURE3, glow::TEXTURE4, glow::TEXTURE6, glow::TEXTURE7] {
                 gl.active_texture(unit);
                 gl.bind_texture(glow::TEXTURE_2D, None);
             }
+            gl.active_texture(glow::TEXTURE5);
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_vertex_array(None);
             gl.use_program(None);
@@ -674,6 +782,10 @@ impl Renderer {
             self.held.free(gl);
             self.faces.release(gl);
             self.cuts.release(gl);
+            self.history.release(gl);
+            self.flow.release(gl);
+            self.plate.release(gl);
+            self.last_paint = None;
             if let Some(vao) = self.vao.take() {
                 gl.delete_vertex_array(vao);
             }
@@ -726,6 +838,12 @@ impl Renderer {
 
 /// What every effect drawn this frame is given, besides the textures already bound.
 struct Given<'a> {
+    dt: f32,
+    since_cut: Option<f32>,
+    history: Option<HistorySpot>,
+    has_flow: bool,
+    has_plate: bool,
+    stats: &'a Stats,
     rect: [f32; 4],
     video_time: f32,
     audio: Option<&'a Features>,
@@ -835,6 +953,25 @@ impl Slot {
             let rect = given.rect;
             gl.uniform_4_f32(at("u_video_rect").as_ref(), rect[0], rect[1], rect[2], rect[3]);
             gl.uniform_1_f32(at("u_video_time").as_ref(), given.video_time);
+            gl.uniform_1_f32(at("u_dt").as_ref(), given.dt);
+            gl.uniform_1_f32(at("u_since_cut").as_ref(), given.since_cut.unwrap_or(1e6));
+            gl.uniform_1_f32(at("u_cut").as_ref(), given.since_cut.map_or(0.0, |s| (-s * 6.0).exp()));
+            gl.uniform_1_i32(at("u_history").as_ref(), 5);
+            let spot = given.history.unwrap_or_default();
+            gl.uniform_1_f32(at("u_has_history").as_ref(), if given.history.is_some() { 1.0 } else { 0.0 });
+            gl.uniform_1_f32(at("u_history_head").as_ref(), spot.head);
+            gl.uniform_1_f32(at("u_history_count").as_ref(), spot.count);
+            gl.uniform_1_f32(at("u_history_rate").as_ref(), spot.rate);
+            gl.uniform_1_i32(at("u_flow").as_ref(), 6);
+            gl.uniform_1_f32(at("u_has_flow").as_ref(), if given.has_flow { 1.0 } else { 0.0 });
+            gl.uniform_1_i32(at("u_plate").as_ref(), 7);
+            gl.uniform_1_f32(at("u_has_plate").as_ref(), if given.has_plate { 1.0 } else { 0.0 });
+            let stats = given.stats;
+            gl.uniform_1_f32(at("u_brightness").as_ref(), stats.brightness);
+            gl.uniform_1_f32(at("u_colourfulness").as_ref(), stats.colourfulness);
+            gl.uniform_1_f32(at("u_warmth").as_ref(), stats.warmth);
+            gl.uniform_3_f32_slice(at("u_palette").as_ref(), stats.palette.as_flattened());
+            gl.uniform_1_f32_slice(at("u_palette_share").as_ref(), &stats.share);
             let level = |f: fn(&Features) -> f32| given.audio.map_or(0.0, f);
             gl.uniform_1_f32(at("u_level").as_ref(), level(|a| a.level));
             gl.uniform_1_f32(at("u_bass").as_ref(), level(|a| a.bass));
@@ -888,7 +1025,7 @@ impl Slot {
     }
 }
 
-unsafe fn compile(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
+pub(crate) unsafe fn compile(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
     unsafe {
         let program = gl.create_program()?;
         let mut shaders = Vec::new();
@@ -923,7 +1060,7 @@ unsafe fn compile(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<gl
     }
 }
 
-unsafe fn create_target(gl: &glow::Context, (w, h): (i32, i32), formats: &[(u32, u32)]) -> Result<Target, String> {
+pub(crate) unsafe fn create_target(gl: &glow::Context, (w, h): (i32, i32), formats: &[(u32, u32)]) -> Result<Target, String> {
     unsafe {
         for &(internal, kind) in formats {
             let texture = gl.create_texture()?;
@@ -1297,6 +1434,12 @@ struct CutGl {
     finder: CutFinder,
     /// The newest cut found that hasn't reached the screen yet.
     due: Option<f32>,
+    /// Cuts found lately, and one not dealt with yet.
+    found: Cuts,
+    fresh: Option<f32>,
+    /// What the picture was like when last looked at.
+    stats: Stats,
+    seen_at: Option<f32>,
 }
 
 impl CutGl {
@@ -1336,10 +1479,18 @@ impl CutGl {
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
                             let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
                             if !ptr.is_null() {
-                                if self.finder.is_cut(std::slice::from_raw_parts(ptr, bytes), at) {
+                                let tiny = std::slice::from_raw_parts(ptr, bytes);
+                                if self.seen_at.is_some_and(|last| at < last || at > last + 1.0) {
+                                    self.found.clear();
+                                }
+                                self.seen_at = Some(at);
+                                if self.finder.is_cut(tiny, at) {
                                     log::debug!("scene cut at {at:.3}");
                                     self.due = Some(at);
+                                    self.found.add(at);
+                                    self.fresh = Some(at);
                                 }
+                                self.stats = self.stats.measure(tiny);
                                 gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
                             }
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -1387,6 +1538,9 @@ impl CutGl {
         self.last_time = None;
         self.finder = CutFinder::default();
         self.due = None;
+        self.found.clear();
+        self.fresh = None;
+        self.seen_at = None;
     }
 }
 

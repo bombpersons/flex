@@ -1,6 +1,6 @@
-// Time-Lagged Body: each point of a person is a running average of the past, which reaches further
-// back the higher up it is. Alpha remembers where people were lately, so the laggy part can hang
-// about after they've moved on.
+// Time-Lagged Body: each point of a person shows what was there a moment ago, longer ago the
+// higher up it is. Alpha remembers where people were lately, so the laggy part can hang about
+// after they've moved on.
 
 vec4 effect(vec2 uv) {
     vec3 video = texture(u_video, uv).rgb;
@@ -12,10 +12,9 @@ vec4 effect(vec2 uv) {
     float person = smoothstep(0.4, 0.7, person_at(from));
     vec3 now = texture(u_video, clamp(from, u_video_rect.xy, u_video_rect.zw)).rgb;
     if (u_frame < 2) return vec4(video, person);
-    vec4 before = texture(u_prev, uv);
-    float lately = max(person, before.a * 0.96);
-    float rate = mix(0.7, 0.025, pow(clamp(height + 0.1, 0.0, 1.0), 1.4) * s_lag / 100.0);
-    float split = s_colour / 100.0;
-    vec3 lagged = vec3(mix(before.r, now.r, rate), mix(before.g, now.g, mix(rate, min(rate * 2.5, 1.0), split)), mix(before.b, now.b, mix(rate, min(rate * 5.0, 1.0), split)));
+    float lately = max(person, texture(u_prev, uv).a * 0.96);
+    float ago = pow(clamp(height + 0.1, 0.0, 1.0), 1.4) * s_lag / 100.0;
+    float split = s_colour / 100.0 * 0.12;
+    vec3 lagged = vec3(history_at(from, ago).r, history_at(from, ago + split).g, history_at(from, ago + split * 2.0).b);
     return vec4(mix(video, lagged, smoothstep(0.02, 0.4, lately)), lately);
 }

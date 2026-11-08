@@ -35,6 +35,7 @@ vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, clamp(q + warp * 0.11, u_video_rect.xy, u_video_rect.zw)).rgb;
     float luma = dot(c, vec3(0.3, 0.59, 0.11));
     float blot = luma + (fbm(p * 9.0 + warp * 3.0 - t * 0.1) - 0.5) * 0.45 - u_bass * 0.1;
+    blot -= depth_at(clamp(q + warp * 0.11, u_video_rect.xy, u_video_rect.zw)) * s_shapes / 100.0 * 0.5;
     float edge = s_ink / 100.0 * 0.85;
     float ink = (1.0 - smoothstep(edge - 0.012, edge + 0.012, blot));
     float soak = (1.0 - smoothstep(edge, edge + 0.09, blot)) * 0.2;

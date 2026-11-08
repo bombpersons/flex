@@ -53,3 +53,14 @@ options = [
     { id = "people", label = "Inside the people" },
     { id = "world", label = "Everywhere else" },
 ]
+
+[[settings]]
+key = "keep"
+label = "Keep close things"
+type = "number"
+detail = "With space everywhere else, keeps furniture and things up close"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 0

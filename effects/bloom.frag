@@ -21,6 +21,10 @@ vec4 effect(vec2 uv) {
     vec2 fold = vec2(cos(a), sin(a)) * r / aspect;
     vec2 q = abs(mod(fold / size + 0.5, 2.0));
     q = u_video_rect.xy + size * min(q, 2.0 - q);
+    // Near things bulge out of the pattern.
+    fold *= 1.0 - (depth_at(q) - 0.5) * s_relief / 100.0 * 0.6;
+    q = abs(mod(fold / size + 0.5, 2.0));
+    q = u_video_rect.xy + size * min(q, 2.0 - q);
     vec3 scope = texture(u_video, q).rgb;
     vec2 inward = centre + (uv - centre) * (0.985 - 0.02 * u_beat);
     vec3 past = hue(texture(u_prev, inward).rgb, 0.05 + 0.2 * u_beat);

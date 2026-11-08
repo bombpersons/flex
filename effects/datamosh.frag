@@ -1,6 +1,5 @@
-// Datamosh: works out how each block of the picture moved, as a video codec does, then moves last
-// frame's output that way instead of showing the new frame, so the wrong picture gets dragged
-// about by the right movement. Alpha keeps last frame's real brightness to compare with.
+// Datamosh: moves last frame's output along with how each block of the picture is moving, instead
+// of showing the new frame, so the wrong picture gets dragged about by the right movement.
 
 float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -38,26 +37,14 @@ vec4 effect(vec2 uv) {
     vec2 cell = floor(uv * u_resolution / block);
     vec2 middle = (cell + 0.5) * block * pixel;
 
-    // Lucas-Kanade over a few points of the block.
-    float xx = 1e-3, yy = 1e-3, xy = 0.0, xt = 0.0, yt = 0.0;
-    float reach = block * 0.33;
-    for (int i = -1; i <= 1; i += 2) {
-        for (int j = -1; j <= 1; j += 2) {
-            vec2 q = middle + vec2(float(i), float(j)) * reach * pixel;
-            float dx = luma(texture(u_video, q + vec2(reach, 0.0) * pixel).rgb) - luma(texture(u_video, q - vec2(reach, 0.0) * pixel).rgb);
-            float dy = luma(texture(u_video, q + vec2(0.0, reach) * pixel).rgb) - luma(texture(u_video, q - vec2(0.0, reach) * pixel).rgb);
-            float dt = luma(texture(u_video, q).rgb) - texture(u_prev, q).a;
-            xx += dx * dx; yy += dy * dy; xy += dx * dy; xt += dx * dt; yt += dy * dt;
-        }
-    }
-    float det = xx * yy - xy * xy + 1e-5;
-    vec2 moved = -vec2(yy * xt - xy * yt, xx * yt - xy * xt) / det * reach * 2.0;
-    moved = clamp(moved, vec2(-block * 2.0), vec2(block * 2.0)) * s_smear / 100.0;
+    vec2 moved = flow_at(middle) * u_resolution * u_dt * s_smear / 100.0;
 
+    float close = s_near / 100.0 * smoothstep(0.5, 0.85, depth_at(middle));
+    moved *= 1.0 - close;
     vec3 c = texture(u_prev, uv - moved * pixel).rgb;
     float seed = hash(cell + floor(u_video_time * 8.0));
     float clean = step(seed, u_beat * s_clean / 100.0);
     float back = mix(0.04, 0.002, s_rot / 100.0);
-    c = mix(c, video, max(clean, back));
+    c = mix(c, video, max(max(clean, back), close * 0.25));
     return vec4(c, now);
 }

@@ -1,5 +1,6 @@
 name = "Time-Lagged Body"
 description = "The tops of people run behind their bottoms, so they ripple and smear as they move."
+history = true
 segment = true
 feedback = true
 audio = true

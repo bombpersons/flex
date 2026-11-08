@@ -1,5 +1,6 @@
 name = "Inkblot"
 description = "The picture folds down the middle into a mirrored Rorschach blot that never stops changing."
+depth = true
 audio = true
 
 [[settings]]
@@ -45,3 +46,14 @@ max = 90
 step = 5
 unit = "%"
 default = 30
+
+[[settings]]
+key = "shapes"
+label = "Near things in ink"
+type = "number"
+detail = "People and things up close stand out as solid shapes"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 40

@@ -18,6 +18,8 @@ vec4 effect(vec2 uv) {
             if (from != clamp(from, u_video_rect.xy, u_video_rect.zw)) continue;
             float there = smoothstep(0.4, 0.7, person_at(from));
             if (there <= 0.0) continue;
+            // Each row stands further back, so whatever's nearer hides it.
+            if (depth_at(uv) > depth_at(from) * (1.0 - 0.1 * r) + 0.04) continue;
             vec3 clone = mix(texture(u_video, from).rgb, fog, (1.0 - size) * s_fog / 100.0);
             c = mix(c, clone, there);
         }

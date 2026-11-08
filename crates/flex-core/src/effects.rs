@@ -38,6 +38,21 @@ pub struct Manifest {
     /// the GPU.
     #[serde(default)]
     pub faces: bool,
+    /// Keep the last second or so of frames for `history_at`.
+    #[serde(default)]
+    pub history: bool,
+    /// Work out how things are moving, for `flow_at`.
+    #[serde(default)]
+    pub flow: bool,
+    /// Build up the room behind people, for `plate_at`. Runs the masks.
+    #[serde(default)]
+    pub plate: bool,
+    /// Find scene cuts, for `u_cut` and `u_since_cut`.
+    #[serde(default)]
+    pub cuts: bool,
+    /// Measure the picture's palette and brightness.
+    #[serde(default)]
+    pub stats: bool,
     /// Size to work at, relative to the screen (0.25–1): lower is lighter on the GPU.
     #[serde(default = "full")]
     pub scale: f32,
@@ -58,7 +73,7 @@ fn yes() -> bool {
 
 impl Default for Manifest {
     fn default() -> Self {
-        Self { name: String::new(), description: String::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, scale: 1.0, shuffle: true, settings: Vec::new() }
+        Self { name: String::new(), description: String::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, history: false, flow: false, plate: false, cuts: false, stats: false, scale: 1.0, shuffle: true, settings: Vec::new() }
     }
 }
 
@@ -155,6 +170,11 @@ pub struct Needs {
     pub depth: bool,
     pub segment: bool,
     pub faces: bool,
+    pub history: bool,
+    pub flow: bool,
+    pub plate: bool,
+    pub cuts: bool,
+    pub stats: bool,
     /// The largest size any of them works at (0.25–1).
     pub scale: f32,
 }
@@ -489,13 +509,18 @@ impl Effects {
             let id = Some(e.id.as_str());
             id == self.chosen.as_deref() || id == fading || (self.shuffle.on && self.in_shuffle(&e.id))
         });
-        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, scale: 0.25 };
+        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, history: false, flow: false, plate: false, cuts: false, stats: false, scale: 0.25 };
         for e in counted {
             let m = &e.manifest;
             needs.audio |= m.audio;
-            needs.depth |= m.depth || m.segment;
-            needs.segment |= m.segment;
+            needs.depth |= m.depth || m.segment || m.plate;
+            needs.segment |= m.segment || m.plate;
             needs.faces |= m.faces;
+            needs.history |= m.history;
+            needs.flow |= m.flow;
+            needs.plate |= m.plate;
+            needs.cuts |= m.cuts;
+            needs.stats |= m.stats;
             needs.scale = needs.scale.max(usable_scale(m.scale));
         }
         needs

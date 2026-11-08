@@ -33,6 +33,7 @@ vec4 effect(vec2 uv) {
     float person = person_at(uv);
     film += person * 0.35;
     film += u_bass * 0.04;
+    film += depth_at(uv) * s_surfaces / 100.0 * 1.6;
 
     float order = film * 7.0 * s_bands / 100.0;
     vec3 colour = 0.5 + 0.5 * cos(6.2831853 * order * vec3(1.0, 1.22, 1.45));

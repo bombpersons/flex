@@ -39,7 +39,7 @@ vec4 effect(vec2 uv) {
     if (u_frame < 3) {
         pattern = noise(uv * u_resolution / (s_size * u_resolution.y / 720.0 * 1.7));
     } else {
-        float size = s_size * u_resolution.y / 720.0;
+        float size = s_size * u_resolution.y / 720.0 * mix(1.0, 0.55 + 1.1 * depth_at(uv), s_scale / 100.0);
         float close = 0.5 * (texture(u_prev, uv).a + around(uv, size * 0.6, 0.3));
         float far = 0.5 * (around(uv, size * 1.5, 0.0) + around(uv, size * 2.4, 0.4));
         float luma = dot(c, vec3(0.3, 0.59, 0.11));

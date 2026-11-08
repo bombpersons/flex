@@ -48,5 +48,15 @@ vec4 effect(vec2 uv) {
     float char = burning * s_char / 100.0;
     vec3 shown = c * (1.0 - char * 0.75) + vec3(0.25, 0.05, 0.0) * char * smoothstep(0.55, 0.8, fbm(p * 30.0 + t));
     shown += flame(heat) * 1.15;
+    // Firelight on whatever's at about the same distance as the flames.
+    if (s_light > 0.0 && u_frame > 2) {
+        float here = depth_at(uv), spill = 0.0;
+        for (int i = 0; i < 8; i++) {
+            float a = float(i) * 0.7853982;
+            vec2 at = uv + vec2(cos(a) * u_resolution.y / u_resolution.x, sin(a)) * 0.13;
+            spill += texture(u_prev, at).a * (1.0 - smoothstep(0.05, 0.35, abs(depth_at(at) - here)));
+        }
+        shown += c * vec3(1.0, 0.5, 0.15) * spill / 8.0 * s_light / 100.0 * 4.0;
+    }
     return vec4(shown, heat);
 }

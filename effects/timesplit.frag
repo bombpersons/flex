@@ -11,5 +11,7 @@ vec4 effect(vec2 uv) {
     if (s_order < 0.5) rates = vec3(1.0, soon, late);
     else if (s_order < 1.5) rates = vec3(late, 1.0, soon);
     else rates = vec3(soon, late, 1.0);
+    // Up close it's nearly in step; the distance falls further behind.
+    rates = mix(rates, vec3(1.0), s_near / 100.0 * smoothstep(0.4, 0.85, depth_at(uv)));
     return vec4(mix(before, video, rates), 1.0);
 }

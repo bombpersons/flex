@@ -128,6 +128,12 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Neon Grid**: the world goes dark and everything's edges light up in neon.
 - **God Rays**: shafts of coloured light pour through the room, and whatever's close blocks them.
 - **Film Mountains**: the picture as a landscape: close things are peaks, far things are valleys.
+- **Signals**: shows what Flex can work out from the picture, for checking and making effects.
+- **Motion Paint**: only what's moving shows, painted in a colour for each direction.
+- **Echoes**: everything leaves a trail of coloured copies of where it was a moment ago.
+- **Everyone's Colour**: each person is washed in their own colour, which follows them about.
+- **Film Palette**: the film redrawn in just its own four main colours.
+- **Slow Burn**: the picture gets stranger the longer a shot goes on, and every cut snaps it back.
 - **Soundstage**: sounds light up what's closest and roll back through the scene.
 
 ## Making one
@@ -185,6 +191,13 @@ don't declare them yourself:
 | `float u_face_seen[MAX_FACES]` | 0 to 1, fading as a face comes and goes; multiply by it so faces don't pop. It's 0 for empty slots |
 | `vec2 face_point(int face, int point)` | where on the screen a face's point is: 0 right eye, 1 left eye, 2 nose, 3 right corner of the mouth, 4 left (the person's own right and left) |
 | `float face_at(vec2 uv)` | a function: how much of any face is at that point of the screen, from 0 to 1, soft at the edges |
+| `int who_at(vec2 uv)` | a function: which face a point of the picture belongs with, as an index into `u_faces`, or -1 (with `faces = true`). Use it with `person_at` to treat people separately |
+| `float u_dt` | seconds since the last frame was drawn |
+| `float u_cut`, `u_since_cut` | 1 on a scene cut, fading to 0 in about half a second, and seconds since the last one, for the frame on screen (with `cuts = true`) |
+| `vec3 history_at(vec2 uv, float seconds)` | a function: the picture that many seconds ago, up to about one, at half size (with `history = true`) |
+| `vec2 flow_at(vec2 uv)` | a function: how a point is moving, in screen widths and heights a second (with `flow = true`) |
+| `vec3 plate_at(vec2 uv)`, `float plate_known(vec2 uv)` | functions: the room with people taken out, and how much of that point has really been seen since the last cut rather than filled in from around it (with `plate = true`) |
+| `float u_brightness`, `u_colourfulness`, `u_warmth`, `vec3 u_palette[4]`, `float u_palette_share[4]` | the look of the picture: 0–1, 0–1, -1 (blue) to 1 (orange), its four main colours, and how much of the picture each covers (with `stats = true`). Colours keep their slots as they change |
 
 `uv` and `u_video_rect` run from 0 to 1, starting at the bottom left. Effects cover the
 whole screen, black bars included, so they can draw into them.
@@ -205,6 +218,11 @@ segment = true                 # where people, walls and sky are; default false
 faces = true                   # where faces are; default false
 scale = 1.0                    # work at this fraction of the screen's size (0.25–1), then
                                # scale up: lower is lighter on the GPU; default 1
+history = true                 # older frames; default false
+flow = true                    # how things are moving; default false
+plate = true                   # the room behind people (runs the masks); default false
+cuts = true                    # scene cuts; default false
+stats = true                   # the picture's palette and brightness; default false
 shuffle = false                # leave it out of shuffle unless someone adds it; default true
 
 [[settings]]

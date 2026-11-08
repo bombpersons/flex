@@ -45,3 +45,14 @@ max = 100
 step = 10
 unit = "%"
 default = 50
+
+[[settings]]
+key = "light"
+label = "Firelight"
+type = "number"
+detail = "How much the flames light up things at the same distance"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 60
