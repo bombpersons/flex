@@ -36,6 +36,7 @@ default = 40
 
 [[settings]]
 key = "speed"
+drift = "off"
 label = "Colour speed"
 type = "number"
 min = 0

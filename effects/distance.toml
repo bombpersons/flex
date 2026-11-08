@@ -50,6 +50,7 @@ default = 70
 
 [[settings]]
 key = "speed"
+drift = "off"
 label = "Speed"
 type = "number"
 min = 0

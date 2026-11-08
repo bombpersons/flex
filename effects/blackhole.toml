@@ -25,6 +25,7 @@ default = 100
 
 [[settings]]
 key = "drift"
+drift = "off"
 label = "Drift"
 type = "number"
 min = 0

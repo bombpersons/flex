@@ -9,6 +9,9 @@ Hold OK (or right-click) while a video plays to open the effects panel beside th
 Up and Down pick a row, Left and Right change it, and Back closes the panel: switch effect
 and adjust its settings while you watch. They're also in Settings → Picture → Video effects.
 
+Turn up Drift in the panel and every effect's settings wander slowly around where they're set.
+The bars move as they go. Things that change at a rate, like Speed, stay put.
+
 Turn on Shuffle in the panel and effects take turns at random, each staying for a random time
 between the shortest and longest you set, then fading into the next. Every effect plays once
 before any comes round again, and the clock stops while the video's paused. Set "Change at"
@@ -22,6 +25,8 @@ that use them if the GPU struggles.
 
 Flex comes with these to start from, in [`effects`](effects):
 
+- **Kaleidoscope**: every part of a kaleidoscope on a slider: arms, nested folds, tiling, tunnels,
+  which part of the film it sees, colour and trails.
 - **Melt**: a turning kaleidoscope with glowing trails that change colour; beats kick it.
 - **Dream**: a DeepDream-like feedback loop where edges curl into tendrils, bright
   patches blossom and details sprout texture.
@@ -167,7 +172,10 @@ default = 1
 ```
 
 Settings show under the effect in the panel and in Settings → Picture → Video effects, and
-are kept per effect. A `choice` setting takes `options = [{ id = "soft", label = "Soft" }, ...]`, and
+are kept per effect. A `number` setting can say how it drifts with `drift = "smooth"`,
+`"steps"` or `"off"`: use `"off"` for anything multiplied by the time, like a speed, or the
+picture will jump as it changes. Left out, whole-numbered counts go in steps and the rest
+smoothly. A `choice` setting takes `options = [{ id = "soft", label = "Soft" }, ...]`, and
 the shader gets the chosen option's position (0, 1, ...).
 
 ### Sound

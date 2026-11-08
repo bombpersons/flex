@@ -5,6 +5,7 @@ audio = true
 
 [[settings]]
 key = "speed"
+drift = "off"
 label = "Speed"
 type = "number"
 min = 10

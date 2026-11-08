@@ -10,7 +10,7 @@ use flex_plugin::Settings;
 use serde::{Deserialize, Serialize};
 
 use crate::Db;
-use crate::plugins::{SettingKind, SettingSpec};
+use crate::plugins::{SettingDrift, SettingKind, SettingSpec};
 
 /// `<id>.toml`.
 #[derive(Clone, Debug, Deserialize)]
@@ -183,6 +183,26 @@ impl Default for Shuffle {
     }
 }
 
+/// Settings wandering slowly on their own, for whichever effect is on.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Drift {
+    /// How far they go, in percent: 100 can reach anywhere in their range.
+    pub amount: f32,
+    /// How fast, in percent of the usual pace.
+    pub speed: f32,
+}
+
+impl Default for Drift {
+    fn default() -> Self {
+        Self { amount: 0.0, speed: 100.0 }
+    }
+}
+
+/// How long a setting takes to wander there and back at the usual pace, in seconds: from this
+/// long, up to a bit under twice as quick.
+const DRIFT_PERIOD: f64 = 90.0;
+
 /// An effect on its way out.
 struct Fading {
     from: String,
@@ -191,6 +211,7 @@ struct Fading {
 
 const CHOSEN_KEY: &str = "video_effect";
 const SHUFFLE_KEY: &str = "video_effect_shuffle";
+const DRIFT_KEY: &str = "video_effect_drift";
 /// Kept with an effect's settings: whether shuffle may pick it.
 const IN_SHUFFLE_SETTING: &str = "_in_shuffle";
 
@@ -217,13 +238,19 @@ pub struct Effects {
     /// What shuffle hasn't played yet this time round.
     turns: Vec<String>,
     random: u64,
+    drift: Drift,
+    /// How far along drifting is, which only moves while playing.
+    drift_clock: f64,
+    /// `drift.amount` (as 0–1), eased, so turning it on doesn't jolt the picture.
+    drift_now: f64,
 }
 
 impl Effects {
     pub fn new(dirs: &[PathBuf], db: &Db) -> Self {
         let chosen = db.setting(CHOSEN_KEY).ok().flatten().filter(|s| !s.is_empty());
         let shuffle = db.setting(SHUFFLE_KEY).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let mut effects = Self { chosen, shuffle, ..Self::default() };
+        let drift = db.setting(DRIFT_KEY).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let mut effects = Self { chosen, shuffle, drift, ..Self::default() };
         effects.refresh(dirs, db);
         effects.wait();
         effects
@@ -305,6 +332,51 @@ impl Effects {
         }
     }
 
+    pub fn drift(&self) -> Drift {
+        self.drift
+    }
+
+    pub fn set_drift(&mut self, drift: Drift, db: &Db) {
+        self.drift = drift;
+        let saved = serde_json::to_string(&drift).map_err(anyhow::Error::from).and_then(|json| db.set_setting(DRIFT_KEY, &json));
+        if let Err(e) = saved {
+            log::warn!("saving the video effect drift: {e:#}");
+        }
+    }
+
+    /// A number setting as it is right now, having drifted from `base`.
+    fn drifted(&self, id: &str, spec: &SettingSpec, base: f64) -> f64 {
+        if self.drift_now <= 0.0 || spec.drift == SettingDrift::Off {
+            return base;
+        }
+        // Each setting of each effect goes its own way.
+        let mut seed = 0xcbf29ce484222325u64;
+        for byte in id.bytes().chain(spec.key.bytes()) {
+            seed = (seed ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+        }
+        let part = |shift: u32| ((seed >> shift) & 0xffff) as f64 / 65536.0;
+        let tau = std::f64::consts::TAU;
+        let turns = self.drift_clock / DRIFT_PERIOD * (1.0 + 0.8 * part(0));
+        let wave = 0.65 * (tau * (turns + part(16))).sin() + 0.35 * (tau * (turns * 2.37 + part(32))).sin();
+        let (min, max) = (spec.min.unwrap_or(0.0), spec.max.unwrap_or(100.0));
+        let moved = base + (min + (0.5 + 0.5 * wave) * (max - min) - base) * self.drift_now;
+        let steps = match spec.drift {
+            SettingDrift::Steps => true,
+            SettingDrift::Auto => spec.unit.is_empty() && spec.step.is_some_and(|s| s >= 1.0),
+            _ => false,
+        };
+        match spec.step.filter(|_| steps) {
+            Some(step) => (min + ((moved - min) / step).round() * step).clamp(min, max),
+            None => moved,
+        }
+    }
+
+    /// A number setting of the chosen effect as it is right now.
+    pub fn live_number(&self, spec: &SettingSpec) -> Option<f64> {
+        let id = &self.chosen()?.id;
+        Some(self.drifted(id, spec, self.value(id, &spec.key)?.as_f64()?))
+    }
+
     pub fn in_shuffle(&self, id: &str) -> bool {
         let default = self.effects.iter().find(|e| e.id == id).is_some_and(|e| e.manifest.shuffle);
         self.value(id, IN_SHUFFLE_SETTING).and_then(serde_json::Value::as_bool).unwrap_or(default)
@@ -319,7 +391,10 @@ impl Effects {
     pub fn step(&mut self, dt: f32, playing: bool) {
         if playing {
             self.turn += dt;
+            self.drift_clock += f64::from(dt * self.drift.speed / 100.0);
         }
+        let aim = f64::from(self.drift.amount / 100.0).clamp(0.0, 1.0);
+        self.drift_now += (aim - self.drift_now) * f64::from(dt * 0.4).min(1.0);
         if let Some(fading) = &mut self.fading {
             fading.elapsed += dt;
             if fading.elapsed < self.shuffle.fade {
@@ -520,7 +595,7 @@ impl Effects {
                         let id = value.and_then(serde_json::Value::as_str).unwrap_or("");
                         s.options.iter().position(|o| o.id == id).unwrap_or(0) as f32
                     }
-                    _ => value.and_then(serde_json::Value::as_f64).unwrap_or(s.min.unwrap_or(0.0)) as f32,
+                    _ => self.drifted(&e.id, s, value.and_then(serde_json::Value::as_f64).unwrap_or(s.min.unwrap_or(0.0))) as f32,
                 };
                 (format!("s_{}", s.key), v)
             })
@@ -749,6 +824,53 @@ mod tests {
         // Turned off, it's back to the saved ones.
         effects.set_shuffle(Shuffle { randomise: 0.0, ..on }, &db);
         assert_eq!(effects.value(&id, "size").unwrap(), 6);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn settings_drift_slowly_and_stay_in_range() {
+        let root = std::env::temp_dir().join(format!("flex-effects-drift-{}", std::process::id()));
+        write(&root, "a.frag", "");
+        write(
+            &root,
+            "a.toml",
+            "[[settings]]\nkey = \"wide\"\nlabel = \"W\"\ntype = \"number\"\nmin = 0\nmax = 100\nstep = 5\nunit = \"%\"\ndefault = 50\n\
+             [[settings]]\nkey = \"count\"\nlabel = \"C\"\ntype = \"number\"\nmin = 2\nmax = 12\nstep = 1\ndefault = 6\n\
+             [[settings]]\nkey = \"rate\"\nlabel = \"R\"\ntype = \"number\"\nmin = 0\nmax = 10\ndrift = \"off\"\ndefault = 3\n",
+        );
+        let db = Db::open_in_memory().unwrap();
+        let dirs = [root.clone()];
+        let mut effects = Effects::new(&dirs, &db);
+        effects.choose(Some("a"), &db);
+        let uniform = |e: &Effects, i: usize| e.active().unwrap().uniforms[i].1;
+        assert_eq!(uniform(&effects, 0), 50.0, "off to start with");
+
+        effects.set_drift(Drift { amount: 100.0, speed: 100.0 }, &db);
+        effects.step(0.016, true);
+        assert!((uniform(&effects, 0) - 50.0).abs() < 2.0, "eases in rather than jumping");
+
+        let (mut low, mut high, mut last) = (f32::MAX, f32::MIN, None);
+        for _ in 0..30000 {
+            effects.step(0.033, true);
+            let wide = uniform(&effects, 0);
+            assert!((0.0..=100.0).contains(&wide));
+            if let Some(last) = last {
+                assert!((wide - last as f32).abs() < 0.5, "slowly");
+            }
+            last = Some(wide);
+            (low, high) = (low.min(wide), high.max(wide));
+            let count = uniform(&effects, 1);
+            assert!((2.0..=12.0).contains(&count) && count.fract() == 0.0, "{count}");
+            assert_eq!(uniform(&effects, 2), 3.0, "rates stay put");
+        }
+        assert!(high - low > 40.0, "{low} to {high}");
+
+        // Paused, nothing moves.
+        let held = uniform(&effects, 0);
+        let eased = (0..200).fold((), |_, _| effects.step(0.033, false));
+        let _ = eased;
+        assert!((uniform(&effects, 0) - held).abs() < 0.01);
+        assert_eq!(Effects::new(&dirs, &db).drift().amount, 100.0, "kept");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

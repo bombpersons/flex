@@ -5,7 +5,7 @@
 //! click a row, or click or drag along one with a bar.
 
 use eframe::egui::{self, Align2, Pos2, Rect, TextStyle, pos2, vec2};
-use flex_core::effects::Shuffle;
+use flex_core::effects::{Drift, Shuffle};
 use flex_core::plugins::{SettingKind, SettingSpec};
 use flex_plugin::serde_json::{Value, json};
 
@@ -24,10 +24,14 @@ const FOOTER: f32 = 100.0;
 const TURN: (f32, f32, f32) = (5.0, 600.0, 5.0);
 const FADE: (f32, f32, f32) = (0.0, 15.0, 0.5);
 const RANDOMISE: (f32, f32, f32) = (0.0, 100.0, 10.0);
+const DRIFT: (f32, f32, f32) = (0.0, 100.0, 10.0);
+const DRIFT_SPEED: (f32, f32, f32) = (10.0, 400.0, 10.0);
 
 #[derive(Clone)]
 enum Line {
     Effect,
+    Drift,
+    DriftSpeed,
     Shuffle,
     ChangeAt,
     Shortest,
@@ -64,7 +68,11 @@ pub struct EffectPanel {
 }
 
 fn lines(sh: &Shared) -> Vec<Line> {
-    let mut lines = vec![Line::Effect, Line::Shuffle];
+    let mut lines = vec![Line::Effect, Line::Drift];
+    if sh.effects.drift().amount > 0.0 {
+        lines.push(Line::DriftSpeed);
+    }
+    lines.push(Line::Shuffle);
     if sh.effects.shuffle().on {
         lines.extend([Line::ChangeAt, Line::Shortest, Line::Longest, Line::Fade, Line::Randomise]);
     }
@@ -164,7 +172,7 @@ impl EffectPanel {
         match line {
             Line::Defaults => self.defaults(sh),
             // There's no "next" for a value along a bar.
-            Line::Shortest | Line::Longest | Line::Fade | Line::Randomise => {}
+            Line::Drift | Line::DriftSpeed | Line::Shortest | Line::Longest | Line::Fade | Line::Randomise => {}
             Line::Setting(spec) if spec.kind == SettingKind::Number => {}
             _ => self.change(sh, line, 1.0, false),
         }
@@ -182,7 +190,7 @@ impl EffectPanel {
     }
 
     fn change(&mut self, sh: &mut Shared, line: &Line, direction: f32, held: bool) {
-        let shuffle = sh.effects.shuffle();
+        let (shuffle, drift) = (sh.effects.shuffle(), sh.effects.drift());
         let timed = |value: f32, (min, max, step): (f32, f32, f32)| along(value.into(), direction.into(), min.into(), max.into(), step.into()) as f32;
         match line {
             Line::Effect => {
@@ -195,6 +203,8 @@ impl EffectPanel {
                 let (effects, db) = sh.effects_mut();
                 effects.choose(next.as_deref(), db);
             }
+            Line::Drift => set_drift(sh, Drift { amount: timed(drift.amount, DRIFT), ..drift }),
+            Line::DriftSpeed => set_drift(sh, Drift { speed: timed(drift.speed, DRIFT_SPEED), ..drift }),
             Line::Shuffle => set_shuffle(sh, Shuffle { on: !shuffle.on, ..shuffle }),
             Line::ChangeAt => set_shuffle(sh, Shuffle { at_cuts: !shuffle.at_cuts, ..shuffle }),
             Line::Shortest => {
@@ -234,9 +244,11 @@ impl EffectPanel {
 
     /// The mouse put a bar at `fraction` of the way along.
     fn set_along(&mut self, sh: &mut Shared, line: &Line, fraction: f32, released: bool) {
-        let shuffle = sh.effects.shuffle();
+        let (shuffle, drift) = (sh.effects.shuffle(), sh.effects.drift());
         let timed = |(min, max, step): (f32, f32, f32)| along((min + fraction * (max - min)).into(), 0.0, min.into(), max.into(), step.into()) as f32;
         match line {
+            Line::Drift => set_drift(sh, Drift { amount: timed(DRIFT), ..drift }),
+            Line::DriftSpeed => set_drift(sh, Drift { speed: timed(DRIFT_SPEED), ..drift }),
             Line::Shortest => {
                 let shortest = timed(TURN);
                 set_shuffle(sh, Shuffle { shortest, longest: shuffle.longest.max(shortest), ..shuffle });
@@ -259,12 +271,14 @@ impl EffectPanel {
 
     /// What a row says: its name, its value, and a bar if it has one.
     fn describe(sh: &Shared, line: &Line) -> (String, String, Option<Bar>) {
-        let shuffle = sh.effects.shuffle();
+        let (shuffle, drift) = (sh.effects.shuffle(), sh.effects.drift());
         let timed = |value: f32, (min, max, _): (f32, f32, f32)| Some(Bar { min, max, value });
         let chosen = sh.effects.chosen();
         let on_off = |on: bool| (if on { "on" } else { "off" }).to_owned();
         match line {
             Line::Effect => ("Effect".into(), chosen.map_or("Off".into(), |e| e.manifest.name.clone()), None),
+            Line::Drift => ("Drift".into(), if drift.amount > 0.0 { format!("{}%", drift.amount) } else { "Off".into() }, timed(drift.amount, DRIFT)),
+            Line::DriftSpeed => ("Drift speed".into(), format!("{}%", drift.speed), timed(drift.speed, DRIFT_SPEED)),
             Line::Shuffle => ("Shuffle".into(), on_off(shuffle.on), None),
             Line::ChangeAt => ("Change at".into(), (if shuffle.at_cuts { "Scene cuts" } else { "Any time" }).into(), None),
             Line::Shortest => ("Shortest turn".into(), seconds(shuffle.shortest), timed(shuffle.shortest, TURN)),
@@ -284,7 +298,9 @@ impl EffectPanel {
                     _ => {
                         let (min, max) = (spec.min.unwrap_or(0.0), spec.max.unwrap_or(100.0));
                         let n = value.and_then(Value::as_f64).unwrap_or(min);
-                        (spec.label.clone(), format!("{n}{}", spec.unit), Some(Bar { min: min as f32, max: max as f32, value: n as f32 }))
+                        // The bar shows where it's drifted to, the number what it's set to.
+                        let live = sh.effects.live_number(spec).unwrap_or(n);
+                        (spec.label.clone(), format!("{n}{}", spec.unit), Some(Bar { min: min as f32, max: max as f32, value: live as f32 }))
                     }
                 }
             }
@@ -302,6 +318,8 @@ impl EffectPanel {
                     (_, None) => "No effect".into(),
                 }
             }
+            Line::Drift => "Every effect's settings wander slowly on their own: this is how far from where they're set.".into(),
+            Line::DriftSpeed => "How quickly they wander.".into(),
             Line::Shuffle => "Effects take turns at random, fading from one to the next.".into(),
             Line::ChangeAt if sh.effects.shuffle().at_cuts => "The next effect starts on the frame the shot changes.".into(),
             Line::ChangeAt => "The next effect starts at a random moment.".into(),
@@ -403,6 +421,11 @@ impl EffectPanel {
             self.set_along(sh, &line, fraction, released);
         }
     }
+}
+
+fn set_drift(sh: &mut Shared, drift: Drift) {
+    let (effects, db) = sh.effects_mut();
+    effects.set_drift(drift, db);
 }
 
 fn set_shuffle(sh: &mut Shared, shuffle: Shuffle) {

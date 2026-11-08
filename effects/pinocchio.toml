@@ -5,6 +5,7 @@ feedback = true
 
 [[settings]]
 key = "speed"
+drift = "off"
 label = "Growth"
 type = "number"
 detail = "How fast noses grow"

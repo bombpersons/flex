@@ -5,6 +5,7 @@ audio = true
 
 [[settings]]
 key = "speed"
+drift = "off"
 label = "Speed"
 type = "number"
 min = 0
@@ -36,6 +37,7 @@ default = 85
 
 [[settings]]
 key = "colours"
+drift = "off"
 label = "Colour shifting"
 type = "number"
 min = 0

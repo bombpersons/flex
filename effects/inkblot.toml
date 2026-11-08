@@ -15,6 +15,7 @@ default = 25
 
 [[settings]]
 key = "wander"
+drift = "off"
 label = "Change"
 type = "number"
 detail = "How fast the blot changes"
