@@ -197,7 +197,7 @@ don't declare them yourself:
 | `float u_time` | seconds since the effect started; keeps going while paused |
 | `float u_video_time` | the playback position in seconds: stops when paused, jumps when you seek |
 | `int u_frame` | frames drawn since the effect started |
-| `vec4 u_video_rect` | where the picture is without its black bars: `x0, y0, x1, y1` |
+| `vec4 u_video_rect` | where the picture is: `x0, y0, x1, y1`. Now that effects only see the picture, this is always 0, 0, 1, 1 |
 | `float s_<key>` | each `number`, `bool` (0 or 1) or `choice` (the option's index) setting |
 | `float u_level`, `u_bass`, `u_mid`, `u_treble` | how loud the sound is overall, below 150 Hz, 150 Hz–2 kHz and above 2 kHz (0–1, with `audio = true`) |
 | `float u_beat` | 1 on a beat (a jump in the bass), fading to 0 in about half a second |
@@ -227,8 +227,7 @@ don't declare them yourself:
 | `float u_brightness`, `u_colourfulness`, `u_warmth`, `vec3 u_palette[4]`, `float u_palette_share[4]` | the look of the picture: 0–1, 0–1, -1 (blue) to 1 (orange), its four main colours, and how much of the picture each covers (with `stats = true`). Colours keep their slots as they change |
 | `vec3 u_light` | with `stats = true`: where the brightest part of the picture is, x and y from 0 to 1 across the picture, and in z how much it stands out as one place |
 
-`uv` and `u_video_rect` run from 0 to 1, starting at the bottom left. Effects cover the
-whole screen, black bars included, so they can draw into them.
+`uv` and `u_video_rect` run from 0 to 1 over the picture, starting at the bottom left.
 
 Use `u_video_time` for anything that should freeze when the video's paused, and `u_time`
 for things that should keep drifting. Go easy on big sudden changes driven by `u_beat`:
@@ -334,6 +333,12 @@ the same place on every face however it's turned. Painting in `face_uv` keeps th
 skin. `face_texture` gives a face's own pixels at any such position, for moving a face to
 somewhere else. They only cover the face itself, from hairline to chin, and only faces with a
 mesh; `meshed(face)` says whether a slot has one, so an effect can fall back on `u_faces`.
+
+### Black bars
+
+Effects only see the picture. Black bars are left out, whether they're there to fit the window
+or are part of the file (Flex finds those from the frames, so they take a moment), and `uv` runs
+from 0 to 1 over the picture alone. Subtitles can still sit in the bars.
 
 ### Subtitles
 

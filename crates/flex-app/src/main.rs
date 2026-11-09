@@ -5,6 +5,7 @@ mod ambient;
 mod audio_tap;
 mod app;
 mod awake;
+mod bars;
 #[cfg(windows)]
 mod autostart;
 mod depth;

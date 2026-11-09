@@ -34,9 +34,12 @@ pub(crate) struct Target {
 }
 
 struct Objects {
+    /// The size of the whole window, and of the picture in it, as effects work on them.
+    window: (i32, i32),
     size: (i32, i32),
-    /// What mpv draws.
+    /// What mpv draws, and the picture cut out of that.
     video: Target,
+    cropped: Target,
 }
 
 /// What's compiled: the file, when it was last changed, and the setting uniforms (which
@@ -80,6 +83,7 @@ pub struct Renderer {
     held: HeldFrames,
     /// The subtitles for each of those frames, and the ones mpv's just drawn.
     held_words: HeldFrames,
+    bars: crate::bars::BarGl,
     words: Option<(Target, (i32, i32))>,
     faces: FaceGl,
     cuts: CutGl,
@@ -640,11 +644,13 @@ fn vertex_source(version: &str) -> String {
 fn copy_source(version: &str, embedded: bool) -> String {
     let precision = if embedded { "precision highp float;\n" } else { "" };
     format!(
-        "{version}\n{precision}uniform sampler2D u_tex;\nuniform sampler2D u_from;\nuniform sampler2D u_words;\nuniform float u_has_words;\nuniform float u_faded_in;\nuniform float u_flip;\n\
+        "{version}\n{precision}uniform sampler2D u_tex;\nuniform sampler2D u_from;\nuniform sampler2D u_words;\nuniform float u_has_words;\nuniform vec4 u_picture;\nuniform float u_faded_in;\nuniform float u_flip;\n\
          in vec2 v_uv;\nout vec4 flex_color;\n\
          void main() {{\n    vec2 uv = vec2(v_uv.x, u_flip > 0.5 ? 1.0 - v_uv.y : v_uv.y);\n\
          vec4 words = texture(u_words, uv) * u_has_words;\n\
-         flex_color = vec4(mix(texture(u_from, uv).rgb, texture(u_tex, uv).rgb, u_faded_in) * (1.0 - words.a) + words.rgb, 1.0);\n}}\n"
+         vec2 at = (uv - u_picture.xy) / (u_picture.zw - u_picture.xy);\n\
+         vec3 picture = at == clamp(at, 0.0, 1.0) ? mix(texture(u_from, at).rgb, texture(u_tex, at).rgb, u_faded_in) : vec3(0.0);\n\
+         flex_color = vec4(picture * (1.0 - words.a) + words.rgb, 1.0);\n}}\n"
     )
 }
 
@@ -679,7 +685,8 @@ impl Renderer {
         (w, h): (i32, i32),
         render: impl FnOnce(i32, i32, i32, Option<i32>),
     ) -> bool {
-        let (effect, rect) = (&frame.effect, frame.rect);
+        // Effects only see the picture itself: to them, its edges are the edges of everything.
+        let (effect, rect) = (&frame.effect, [0.0, 0.0, 1.0, 1.0]);
         unsafe {
             if self.unsupported || w <= 0 || h <= 0 {
                 return false;
@@ -719,12 +726,23 @@ impl Renderer {
             }
             let (Some(copy), Some(vao)) = (self.copy, self.vao) else { return false };
 
-            let at_scale = |scale: f32| (((w as f32 * scale).round() as i32).max(1), ((h as f32 * scale).round() as i32).max(1));
-            let size = at_scale(frame.video_scale.max(effect.scale).clamp(0.25, 1.0));
-            if self.objects.as_ref().is_none_or(|o| o.size != size) {
+            // Where the picture is in the window, leaving out black bars, whether mpv added them
+            // or they're part of the file. Not while the layout's still settling.
+            let picture = self.bars.inside(frame.rect);
+            let picture = if picture[2] - picture[0] < 0.2 || picture[3] - picture[1] < 0.2 { [0.0, 0.0, 1.0, 1.0] } else { picture };
+            let at_scale = |scale: f32| {
+                let across = w as f32 * (picture[2] - picture[0]) * scale;
+                let down = h as f32 * (picture[3] - picture[1]) * scale;
+                ((across.round() as i32).max(1), (down.round() as i32).max(1))
+            };
+            let working = frame.video_scale.max(effect.scale).clamp(0.25, 1.0);
+            let window = (((w as f32 * working).round() as i32).max(1), ((h as f32 * working).round() as i32).max(1));
+            let size = at_scale(working);
+            if self.objects.as_ref().is_none_or(|o| o.window != window || o.size != size) {
                 self.free_objects(gl);
-                match create_target(gl, size, &[(glow::RGBA8, glow::UNSIGNED_BYTE)]) {
-                    Ok(video) => self.objects = Some(Objects { size, video }),
+                let rgba8 = [(glow::RGBA8, glow::UNSIGNED_BYTE)];
+                match create_target(gl, window, &rgba8).and_then(|video| Ok((video, create_target(gl, size, &rgba8)?))) {
+                    Ok((video, cropped)) => self.objects = Some(Objects { window, size, video, cropped }),
                     Err(e) => {
                         log::warn!("video effects: {e}");
                         self.slots[front].status = Some((effect.shader.clone(), (false, format!("Can't run: {e}"))));
@@ -755,7 +773,7 @@ impl Renderer {
             }
 
             // Subtitles go on top of the effect, not through it.
-            if self.words.as_ref().is_some_and(|(_, at)| *at != size || !frame.subtitles) {
+            if self.words.as_ref().is_some_and(|(_, at)| *at != window || !frame.subtitles) {
                 if let Some((words, _)) = self.words.take() {
                     gl.delete_framebuffer(words.fbo);
                     gl.delete_texture(words.texture);
@@ -763,17 +781,25 @@ impl Renderer {
                 self.held_words.free(gl);
             }
             if frame.subtitles && self.words.is_none() {
-                match create_target(gl, size, &[(glow::RGBA8, glow::UNSIGNED_BYTE)]) {
-                    Ok(words) => self.words = Some((words, size)),
+                match create_target(gl, window, &[(glow::RGBA8, glow::UNSIGNED_BYTE)]) {
+                    Ok(words) => self.words = Some((words, window)),
                     Err(e) => log::warn!("video effects: subtitles: {e}"),
                 }
             }
-            render(o.video.fbo.0.get() as i32, size.0, size.1, self.words.as_ref().map(|(words, _)| words.fbo.0.get() as i32));
-            let video = &o.video;
+            render(o.video.fbo.0.get() as i32, window.0, window.1, self.words.as_ref().map(|(words, _)| words.fbo.0.get() as i32));
+            self.bars.update(gl, o.video.fbo, window, frame.rect, frame.video_time);
+            let x0 = ((picture[0] * window.0 as f32).round() as i32).clamp(0, window.0 - size.0);
+            let y0 = ((picture[1] * window.1 as f32).round() as i32).clamp(0, window.1 - size.1);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(o.video.fbo));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(o.cropped.fbo));
+            gl.blit_framebuffer(x0, y0, x0 + size.0, y0 + size.1, 0, 0, size.0, size.1, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            let video = &o.cropped;
             if frame.depth.is_some() || frame.faces.is_some() {
                 self.held.push(gl, video, size, frame.pts);
                 if let Some((words, _)) = &self.words {
-                    self.held_words.push(gl, words, size, frame.pts);
+                    self.held_words.push(gl, words, window, frame.pts);
                 }
             } else {
                 self.held.free(gl);
@@ -910,6 +936,7 @@ impl Renderer {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(new));
             gl.uniform_1_i32(gl.get_uniform_location(copy, "u_words").as_ref(), 13);
+            gl.uniform_4_f32(gl.get_uniform_location(copy, "u_picture").as_ref(), picture[0], picture[1], picture[2], picture[3]);
             gl.uniform_1_f32(gl.get_uniform_location(copy, "u_has_words").as_ref(), if words_texture.is_some() { 1.0 } else { 0.0 });
             gl.uniform_1_i32(gl.get_uniform_location(copy, "u_tex").as_ref(), 0);
             gl.uniform_1_i32(gl.get_uniform_location(copy, "u_from").as_ref(), 1);
@@ -951,6 +978,7 @@ impl Renderer {
             }
             self.depth.release(gl);
             self.held.free(gl);
+            self.bars.release(gl);
             self.faces.release(gl);
             self.cuts.release(gl);
             self.history.release(gl);
@@ -1007,8 +1035,10 @@ impl Renderer {
         }
         if let Some(o) = self.objects.take() {
             unsafe {
-                gl.delete_framebuffer(o.video.fbo);
-                gl.delete_texture(o.video.texture);
+                for t in [o.video, o.cropped] {
+                    gl.delete_framebuffer(t.fbo);
+                    gl.delete_texture(t.texture);
+                }
             }
         }
     }
@@ -1285,7 +1315,7 @@ pub(crate) unsafe fn create_target(gl: &glow::Context, (w, h): (i32, i32), forma
 /// A GL fence, only touched on the GL thread (the renderer sits in a Mutex shared with the
 /// UI thread, which only reads its status).
 #[derive(Clone, Copy)]
-struct Fence(glow::Fence);
+pub(crate) struct Fence(pub(crate) glow::Fence);
 
 unsafe impl Send for Fence {}
 
