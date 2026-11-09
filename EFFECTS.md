@@ -6,22 +6,30 @@ can react to the sound, and reload as soon as you save the file, so you can writ
 while watching it.
 
 Hold OK (or right-click) while a video plays to open the effects panel beside the picture.
-Up and Down pick a row, Left and Right change it, and Back closes the panel: switch effect
-and adjust its settings while you watch. They're also in Settings → Picture → Video effects.
+Up and Down pick a row, Left and Right change it, OK opens the rows with an arrow, and Back goes
+out a level and closes the panel. The cursor starts on the Effects row, so holding OK and then
+pressing OK turns effects off, and doing it again brings back the same effect, shuffle and drift.
+They're also in Settings → Picture → Video effects.
+
+OK on the Effect row opens the list of effects, and whichever one you rest on shows behind it.
+OK keeps it and Back returns to the one you had. Left and Right change section: All, Favourites,
+and the effects that use people, faces, depth or the sound. Holding OK (or right-clicking) stars
+an effect as a favourite, or with shuffle on ticks it in or out of the shuffle. Left and Right on
+the Effect row move to the previous or next effect without opening the list.
 
 Turn up Drift in the panel and every effect's settings wander slowly around where they're set.
-The bars move as they go. Things that change at a rate, like Speed, stay put.
+The bars move as they go. Things that change at a rate, like Speed, stay put. OK on the row sets
+how quickly.
 
-Turn on Shuffle in the panel and effects take turns at random, each staying for a random time
+Set Shuffle to Timed in the panel and effects take turns at random, each staying for a random time
 between the shortest and longest you set, then fading into the next. Every effect plays once
-before any comes round again, and the clock stops while the video's paused. Set "Change at"
-to Scene cuts and the next effect starts on the frame the shot changes instead, once the
-shortest turn is up. Either way, Fade sets how long the change takes, and Off makes it instant. Random settings
-moves an effect's settings at random each time it comes up, without changing the ones you've
-set. "In the shuffle"
-leaves out the effect you're on. Shuffle keeps sound, depth, masks and faces running for
-whatever it might pick next, so that nothing stutters at the changes; leave out the effects
-that use them if the GPU struggles.
+before any comes round again, and the clock stops while the video's paused or the list of effects
+is open. Set it to Scene cuts and the next effect starts on the frame the shot changes instead,
+once the shortest turn is up. OK on the row opens the rest: Fade sets how long the change takes,
+and Off makes it instant. Random settings moves an effect's settings at random each time it comes
+up, without changing the ones you've set. Shuffle keeps sound, depth, masks and faces running for
+whatever it might pick next, so that nothing stutters at the changes; untick the effects that use
+them if the GPU struggles.
 
 Flex comes with these to start from, in [`effects`](effects):
 
@@ -42,7 +50,7 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Undertow**: the background melts and pours away while whoever's up close stays solid.
 - **Ego Death**: people leave rainbow ghosts of themselves that spiral away.
 - **Sky Eater**: the sky opens into a spiral that endlessly swallows the rest of the film.
-- **Breathing Walls**: walls swell and sink and crawl with colour that follows the room.
+- **Breathing Walls**: the room is inside something alive: walls swell and sink with each breath, buckling into wet folds and throbbing veins.
 - **Third Eye**: everyone grows a real eye in the middle of their forehead.
 - **Wax Museum**: faces soften like candle wax and run down people's necks.
 - **Hall of Faces**: each face sprouts a turning ring of copies of itself.
@@ -67,16 +75,16 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Invisible Man**: people vanish and the room behind them is filled in from what's been seen.
 - **Clone Army**: rows of the same people stretch away behind them.
 - **Wallpaper Crawl**: walls writhe, and eyes open in them and watch the people.
-- **Aquarium**: the room really floods: a water surface that wraps around people and furniture,
+- **Aquarium**: the room really floods: a water surface lying level with the floor or table, that wraps around people and furniture,
   with reflections, wakes, fish, and bubbles from people's mouths.
 - **Snow Globe**: snow falls behind whatever's near and settles on things; a beat shakes it off.
 - **Thermal Vision**: heat colours, with people and faces hottest.
 - **Night of the Living**: grey-green people with hollow eyes, under a flickering light.
-- **Black Hole**: drifts through the room, dragging the distance in first.
+- **Black Hole**: a real black hole hanging in the room: light bends round it into a ring, people pass in front of it, and its disc lights the walls.
 - **Melting Clocks**: everything but people sags and drips over its edges.
 - **Fractal Zoom**: an endless fall through copies of the live picture, centred on a face.
 - **Oil on Water**: rainbow bands like petrol on a puddle, curling around people.
-- **Reaction-Diffusion Skin**: living zebra and coral patterns grow over the picture.
+- **Reaction-Diffusion Skin**: animal markings that grow by themselves over every surface, wrapping round shapes and lining up along the depth of the room.
 - **Datamosh**: the wrong frames get dragged around by the right movement; the beat cleans it.
 - **Pixel Sort Waterfall**: bright pixels pour down the screen and pool at the bottom.
 - **Colour Time Split**: red, green and blue run at different moments.
@@ -107,7 +115,7 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Moustache Everyone**: a curly handlebar moustache under every nose.
 - **Love Beams**: hearts stream out of people's eyes the way they're facing.
 - **Kaleidoface**: a kaleidoscope of someone's face, centred on their nose as they move.
-- **Anime Eyes**: huge shining eyes that sparkle on the beat.
+- **Anime Eyes**: big drawn anime eyes, inked and shining, that blink, look where the head's facing and sparkle on the beat.
 - **Hypno Eyes**: eyes turn into spinning spirals.
 - **Perfect Symmetry**: each face is one half mirrored, which is more unsettling than you'd think.
 - **Spinning Features**: eyes and mouths turn round and round where they are.
@@ -126,7 +134,7 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Beyond the Veil**: past a shimmering line in the distance, the world turns into something else.
 - **Voxel World**: the scene rebuilt from blocks, standing taller the closer they are.
 - **Neon Grid**: the world goes dark and everything's edges light up in neon.
-- **God Rays**: shafts of coloured light pour through the room, and whatever's close blocks them.
+- **God Rays**: shafts of light through the air, from the brightest thing in the shot and in its colour, with people cutting dark shadows through them and dust that swirls as things move.
 - **Film Mountains**: the picture as a landscape: close things are peaks, far things are valleys.
 - **Signals**: shows what Flex can work out from the picture, for checking and making effects.
 - **Motion Paint**: only what's moving shows, painted in a colour for each direction.
@@ -185,6 +193,7 @@ don't declare them yourself:
 | `float u_beat` | 1 on a beat (a jump in the bass), fading to 0 in about half a second |
 | `sampler2D u_spectrum` | the sound's spectrum: x is frequency (30 Hz to 11 kHz, log-spaced, 64 bands), y is age (0 is now, 1 is about two seconds ago); values 0–1 in `.r` |
 | `float depth_at(vec2 uv)` | a function: how near that point of the screen is, from 0 (far) to 1 (near) (with `depth = true`; 0 until the first depth map arrives) |
+| `vec4 u_ground` | with `depth = true`: the floor, a table or whatever else is flat and level, found from depth. At a point of the picture (0 to 1, y up) its depth is `dot(vec3(x, y, 1.0), u_ground.xyz)`, and `u_ground.w` is how sure that is, from 0 to 1 |
 | `sampler2D u_depth`, `float u_has_depth` | the depth map itself, covering the picture rather than the screen, and 1 once there is one |
 | `float person_at(vec2 uv)`, `wall_at`, `sky_at` | functions: how much of that point of the screen is a person, a wall or sky, from 0 to 1 (with `segment = true`; 0 until the first masks arrive). `vec4 masks_at(vec2 uv)` gives all three in r, g and b |
 | `int u_face_count`, `vec4 u_faces[MAX_FACES]` | how far through the arrays to look, and each face's box on screen: x0, y0, x1, y1 (with `faces = true`) |
@@ -198,6 +207,7 @@ don't declare them yourself:
 | `vec2 flow_at(vec2 uv)` | a function: how a point is moving, in screen widths and heights a second (with `flow = true`) |
 | `vec3 plate_at(vec2 uv)`, `float plate_known(vec2 uv)` | functions: the room with people taken out, and how much of that point has really been seen since the last cut rather than filled in from around it (with `plate = true`) |
 | `float u_brightness`, `u_colourfulness`, `u_warmth`, `vec3 u_palette[4]`, `float u_palette_share[4]` | the look of the picture: 0–1, 0–1, -1 (blue) to 1 (orange), its four main colours, and how much of the picture each covers (with `stats = true`). Colours keep their slots as they change |
+| `vec3 u_light` | with `stats = true`: where the brightest part of the picture is, x and y from 0 to 1 across the picture, and in z how much it stands out as one place |
 
 `uv` and `u_video_rect` run from 0 to 1, starting at the bottom left. Effects cover the
 whole screen, black bars included, so they can draw into them.

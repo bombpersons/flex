@@ -10,6 +10,7 @@ mod depth;
 mod effect_panel;
 mod effects;
 mod faces;
+mod ground;
 mod images;
 mod input;
 mod instance;

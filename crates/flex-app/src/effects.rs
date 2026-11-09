@@ -383,6 +383,9 @@ uniform float u_beat;
 uniform sampler2D u_spectrum;
 uniform sampler2D u_depth;
 uniform float u_has_depth;
+// The floor or other level surface, found from depth: its depth is x, y, 1 dotted with xyz, over
+// the picture from 0 to 1 with y going up. w is how sure that is, from 0 to 1 (0 with none found).
+uniform vec4 u_ground;
 // Depth at a point on screen, from 0 (far) to 1 (near); 0 until there is some.
 float depth_at(vec2 uv) {
     vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
@@ -451,6 +454,9 @@ uniform float u_colourfulness;
 uniform float u_warmth;
 uniform vec3 u_palette[4];
 uniform float u_palette_share[4];
+// Where the brightest part of the picture is, from 0 to 1 across the picture with y going up, and
+// in z how much it stands out as one place.
+uniform vec3 u_light;
 // The picture some seconds ago, up to about one, at half size (with history = true).
 uniform sampler2DArray u_history;
 uniform float u_has_history;
@@ -715,6 +721,7 @@ impl Renderer {
                 video_time: frame.video_time,
                 audio,
                 has_depth: depth_texture.is_some() && self.depth.serial > 0,
+                ground: self.depth.ground,
                 has_masks: mask_texture.is_some() && self.depth.has_masks,
                 faces: &faces,
             };
@@ -848,6 +855,7 @@ struct Given<'a> {
     video_time: f32,
     audio: Option<&'a Features>,
     has_depth: bool,
+    ground: [f32; 4],
     has_masks: bool,
     faces: &'a FaceUniforms,
 }
@@ -972,6 +980,7 @@ impl Slot {
             gl.uniform_1_f32(at("u_warmth").as_ref(), stats.warmth);
             gl.uniform_3_f32_slice(at("u_palette").as_ref(), stats.palette.as_flattened());
             gl.uniform_1_f32_slice(at("u_palette_share").as_ref(), &stats.share);
+            gl.uniform_3_f32(at("u_light").as_ref(), stats.light[0], stats.light[1], stats.light[2]);
             let level = |f: fn(&Features) -> f32| given.audio.map_or(0.0, f);
             gl.uniform_1_f32(at("u_level").as_ref(), level(|a| a.level));
             gl.uniform_1_f32(at("u_bass").as_ref(), level(|a| a.bass));
@@ -981,6 +990,7 @@ impl Slot {
             gl.uniform_1_i32(at("u_spectrum").as_ref(), 2);
             gl.uniform_1_i32(at("u_depth").as_ref(), 3);
             gl.uniform_1_f32(at("u_has_depth").as_ref(), if given.has_depth { 1.0 } else { 0.0 });
+            gl.uniform_4_f32(at("u_ground").as_ref(), given.ground[0], given.ground[1], given.ground[2], given.ground[3]);
             gl.uniform_1_i32(at("u_masks").as_ref(), 4);
             gl.uniform_1_f32(at("u_has_masks").as_ref(), if given.has_masks { 1.0 } else { 0.0 });
             let faces = given.faces;
@@ -1227,6 +1237,8 @@ struct DepthGl {
     last_time: Option<f32>,
     /// Whether masks have arrived.
     has_masks: bool,
+    /// Where the ground is, from the newest depth map.
+    ground: [f32; 4],
     /// The newest depth map, and how many have arrived.
     serial: u64,
     arrived: u32,
@@ -1303,6 +1315,7 @@ impl DepthGl {
                 }
                 gl.bind_texture(glow::TEXTURE_2D, None);
                 self.serial = map.serial;
+                self.ground = map.ground;
                 o.maps[slot].1 = Some(map.time);
                 let late = clock - map.time;
                 // Outside this, it's a seek and says nothing about how long depth takes.
@@ -1383,7 +1396,7 @@ struct FaceGl {
 }
 
 /// The tiny picture compared from frame to frame to find cuts.
-const CUT_SIZE: (i32, i32) = (32, 18);
+const CUT_SIZE: (i32, i32) = (crate::signals::STATS_SIZE.0 as i32, crate::signals::STATS_SIZE.1 as i32);
 /// A halfway size, as one big step down would only look at a few pixels of the frame.
 const CUT_HALFWAY: (i32, i32) = (128, 72);
 /// A cut changes the picture this much on average (0–255 a channel), and this many times as much

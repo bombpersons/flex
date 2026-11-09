@@ -20,6 +20,20 @@ vec4 effect(vec2 uv) {
         vec3 tint = who < 0 ? vec3(0.5) : hue(float(who) * 0.17);
         return vec4(mix(c * 0.4, tint * (0.3 + dot(c, vec3(0.8))), person), 1.0);
     }
+    if (s_view > 5.5) {
+        // The ground in green where the depth agrees with it, and the horizon in red.
+        vec2 size = max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
+        vec2 pic = (uv - u_video_rect.xy) / size;
+        float plane = dot(vec3(pic, 1.0), u_ground.xyz);
+        float on = 1.0 - smoothstep(0.015, 0.03, abs(plane - depth_at(uv)));
+        vec3 shown = mix(c * 0.5, vec3(0.1, 1.0, 0.3), on * u_ground.w * 0.7);
+        shown = mix(shown, vec3(1.0, 0.1, 0.1), (1.0 - smoothstep(0.0, 0.012, abs(plane))) * u_ground.w);
+        float aspect = u_resolution.x / u_resolution.y;
+        float d = length((pic - u_light.xy) * size * vec2(aspect, 1.0));
+        shown = mix(shown, vec3(1.0, 0.9, 0.1), (1.0 - smoothstep(0.015, 0.02, d)) * (0.3 + 0.7 * u_light.z));
+        if (pic.x > 0.97) shown = vec3(step(pic.y, u_ground.w));
+        return vec4(shown, 1.0);
+    }
     if (uv.y < 0.12) {
         int k = int(clamp(uv.x * 4.0, 0.0, 3.0));
         return vec4(u_palette[k], 1.0);

@@ -479,6 +479,9 @@ impl PlateGl {
 
 pub const PALETTE: usize = 4;
 
+/// The size of picture `Stats` measures.
+pub const STATS_SIZE: (usize, usize) = (32, 18);
+
 /// The overall look of the picture.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stats {
@@ -488,11 +491,14 @@ pub struct Stats {
     pub warmth: f32,
     pub palette: [[f32; 3]; PALETTE],
     pub share: [f32; PALETTE],
+    /// Where the brightest part is, across and up the picture from 0 to 1, and how much it
+    /// stands out as one place.
+    pub light: [f32; 3],
 }
 
 impl Default for Stats {
     fn default() -> Self {
-        Self { brightness: 0.0, colourfulness: 0.0, warmth: 0.0, palette: [[0.1; 3], [0.35; 3], [0.6; 3], [0.85; 3]], share: [0.25; PALETTE] }
+        Self { brightness: 0.0, colourfulness: 0.0, warmth: 0.0, palette: [[0.1; 3], [0.35; 3], [0.6; 3], [0.85; 3]], share: [0.25; PALETTE], light: [0.5, 1.0, 0.0] }
     }
 }
 
@@ -505,6 +511,7 @@ impl Stats {
         out.brightness = pixels.iter().map(|p| 0.3 * p[0] + 0.59 * p[1] + 0.11 * p[2]).sum::<f32>() / n;
         out.colourfulness = pixels.iter().map(|p| p.iter().copied().fold(0.0, f32::max) - p.iter().copied().fold(1.0, f32::min)).sum::<f32>() / n;
         out.warmth = (pixels.iter().map(|p| p[0] - p[2]).sum::<f32>() / n * 3.0).clamp(-1.0, 1.0);
+        out.light = brightest(rgba);
         let distance = |a: &[f32; 3], b: &[f32; 3]| (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f32>();
         for _ in 0..3 {
             let (mut sums, mut counts) = ([[0.0f32; 3]; PALETTE], [0u32; PALETTE]);
@@ -537,6 +544,10 @@ impl Stats {
         step(&mut self.brightness, target.brightness);
         step(&mut self.colourfulness, target.colourfulness);
         step(&mut self.warmth, target.warmth);
+        // Slower, so the light doesn't hop about between lamps.
+        for (now, new) in self.light.iter_mut().zip(target.light) {
+            *now += (new - *now) * amount * 0.25;
+        }
         for k in 0..PALETTE {
             step(&mut self.share[k], target.share[k]);
             for c in 0..3 {
@@ -544,6 +555,38 @@ impl Stats {
             }
         }
     }
+}
+
+/// Where the brightest part of an RGBA picture is (bottom row first), favouring higher up.
+fn brightest(rgba: &[u8]) -> [f32; 3] {
+    let (width, height) = STATS_SIZE;
+    let lumas: Vec<f32> = rgba.as_chunks::<4>().0.iter().map(|p| (0.3 * f32::from(p[0]) + 0.59 * f32::from(p[1]) + 0.11 * f32::from(p[2])) / 255.0).collect();
+    if lumas.len() != width * height {
+        return [0.5, 1.0, 0.0];
+    }
+    let mean = lumas.iter().sum::<f32>() / lumas.len() as f32;
+    let peak = lumas.iter().copied().fold(0.0, f32::max);
+    let line = mean + (peak - mean) * 0.65;
+    let place = |at: usize| ((at % width) as f32 / (width - 1) as f32, (at / width) as f32 / (height - 1) as f32);
+    let (mut sum, mut sx, mut sy) = (0.0, 0.0, 0.0);
+    for (at, l) in lumas.iter().enumerate() {
+        let (x, y) = place(at);
+        let weight = (l - line).max(0.0) * (0.5 + y);
+        sum += weight;
+        sx += weight * x;
+        sy += weight * y;
+    }
+    if sum <= 0.0 {
+        return [0.5, 1.0, 0.0];
+    }
+    let (x, y) = (sx / sum, sy / sum);
+    let mut spread = 0.0;
+    for (at, l) in lumas.iter().enumerate() {
+        let (px, py) = place(at);
+        spread += (l - line).max(0.0) * (0.5 + py) * ((px - x).powi(2) + (py - y).powi(2));
+    }
+    let tight = (1.0 - (spread / sum).sqrt() / 0.4).clamp(0.0, 1.0);
+    [x, y, ((peak - mean) * 2.2).clamp(0.0, 1.0) * tight]
 }
 
 /// Recent cuts, oldest first, to tell how long the frame on screen has been in its shot.
@@ -578,6 +621,21 @@ impl Cuts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_light_is_found_where_the_picture_is_brightest() {
+        let (width, height) = STATS_SIZE;
+        let mut rgba = vec![30u8; width * height * 4];
+        for y in 13..16 {
+            for x in 24..27 {
+                rgba[(y * width + x) * 4..][..3].fill(250);
+            }
+        }
+        let light = Stats::default().measure(&rgba).light;
+        assert!((light[0] - 25.0 / 31.0).abs() < 0.02 && (light[1] - 14.0 / 17.0).abs() < 0.03, "{light:?}");
+        assert!(light[2] > 0.5, "{light:?}");
+        assert!(Stats::default().measure(&vec![90u8; width * height * 4]).light[2] < 0.01);
+    }
 
     #[test]
     fn the_palette_finds_the_main_colours_and_keeps_them_in_their_slots() {

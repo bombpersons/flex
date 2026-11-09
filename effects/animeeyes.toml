@@ -1,5 +1,5 @@
 name = "Anime Eyes"
-description = "Huge shining eyes on everyone, sparkling on the beat."
+description = "Everyone gets big drawn anime eyes, inked and shining, that blink, look where they're facing and sparkle on the beat."
 faces = true
 audio = true
 
@@ -7,11 +7,11 @@ audio = true
 key = "size"
 label = "Size"
 type = "number"
-min = 120
+min = 100
 max = 300
 step = 10
 unit = "%"
-default = 190
+default = 220
 
 [[settings]]
 key = "sparkle"
@@ -22,6 +22,36 @@ max = 100
 step = 10
 unit = "%"
 default = 70
+
+[[settings]]
+key = "colour"
+label = "Colour"
+type = "choice"
+default = "each"
+options = [
+    { id = "each", label = "Each their own" },
+    { id = "blue", label = "Blue" },
+    { id = "violet", label = "Violet" },
+    { id = "green", label = "Green" },
+    { id = "amber", label = "Amber" },
+    { id = "red", label = "Red" },
+]
+
+[[settings]]
+key = "blush"
+label = "Blush"
+type = "number"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 40
+
+[[settings]]
+key = "blink"
+label = "Blinking"
+type = "bool"
+default = true
 
 [[settings]]
 key = "react"

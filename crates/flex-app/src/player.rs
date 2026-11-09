@@ -657,7 +657,9 @@ impl Player {
         // Ambient light: sample the picture (without the black bars) right after it's drawn.
         let sampler = sh.plugins.wants_light().then(|| sh.ambient.sampler.clone());
         // The video effect: drawn every frame, so it moves while paused too.
-        sh.effects.step(ctx.input(|i| i.unstable_dt).min(0.25), self.loaded && !self.paused());
+        // Shuffle waits while the list of effects is open, so it doesn't change what's being tried.
+        let picking = self.effect_panel.as_ref().is_some_and(EffectPanel::picking);
+        sh.effects.step(ctx.input(|i| i.unstable_dt).min(0.25), self.loaded && !self.paused() && !picking);
         let effects = sh.effect_renderer.clone();
         let held = effects.lock().unwrap_or_else(|e| e.into_inner()).held_back();
         if held != self.audio_held {
@@ -977,7 +979,7 @@ impl Screen for Player {
 
     fn on_leave(&mut self, sh: &mut Shared) {
         if let Some(panel) = &mut self.effect_panel {
-            panel.save(sh);
+            panel.leave(sh);
         }
         self.save_progress(sh);
         self.log_session(sh);

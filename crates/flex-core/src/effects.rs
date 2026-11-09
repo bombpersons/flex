@@ -1,7 +1,8 @@
 //! Video effects: shaders Flex runs over the video (the drawing is in the app). Each is
 //! a `<id>.frag` in an `effects` folder, with an optional `<id>.toml` for its name,
-//! options and settings. One effect is chosen at a time (or none); its settings are kept
-//! per effect. Shuffle swaps the chosen effect at random, fading from one to the next.
+//! options and settings. One effect is chosen at a time, and they can all be switched off
+//! without forgetting it; its settings are kept per effect. Shuffle swaps the chosen effect
+//! at random, fading from one to the next.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -230,10 +231,14 @@ struct Fading {
 }
 
 const CHOSEN_KEY: &str = "video_effect";
+/// "0" when effects are switched off. Before this existed, off was having none chosen.
+const ON_KEY: &str = "video_effects_on";
 const SHUFFLE_KEY: &str = "video_effect_shuffle";
 const DRIFT_KEY: &str = "video_effect_drift";
 /// Kept with an effect's settings: whether shuffle may pick it.
 const IN_SHUFFLE_SETTING: &str = "_in_shuffle";
+/// Kept with an effect's settings: whether it's in the favourites.
+const FAVOURITE_SETTING: &str = "_favourite";
 
 fn settings_key(id: &str) -> String {
     format!("video_effect.{id}")
@@ -243,8 +248,10 @@ fn settings_key(id: &str) -> String {
 #[derive(Default)]
 pub struct Effects {
     effects: Vec<Effect>,
-    /// The chosen effect's id (kept even if its file has gone).
+    /// The chosen effect's id (kept even if its file has gone, or effects are off).
     chosen: Option<String>,
+    /// Whether effects are switched on at all.
+    on: bool,
     settings: HashMap<String, Settings>,
     /// Random settings for this turn of shuffle, in place of `settings`, and never saved.
     rolled: HashMap<String, Settings>,
@@ -270,7 +277,8 @@ impl Effects {
         let chosen = db.setting(CHOSEN_KEY).ok().flatten().filter(|s| !s.is_empty());
         let shuffle = db.setting(SHUFFLE_KEY).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let drift = db.setting(DRIFT_KEY).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let mut effects = Self { chosen, shuffle, drift, ..Self::default() };
+        let on = db.setting(ON_KEY).ok().flatten().map_or(chosen.is_some(), |s| s != "0");
+        let mut effects = Self { chosen, on, shuffle, drift, ..Self::default() };
         effects.refresh(dirs, db);
         effects.wait();
         effects
@@ -294,24 +302,55 @@ impl Effects {
         &self.effects
     }
 
+    /// The effect that's on: none while they're switched off.
     pub fn chosen(&self) -> Option<&Effect> {
+        self.remembered().filter(|_| self.on)
+    }
+
+    /// The effect that's on, or would be if they were switched back on.
+    pub fn remembered(&self) -> Option<&Effect> {
         let id = self.chosen.as_deref()?;
         self.effects.iter().find(|e| e.id == id)
     }
 
+    pub fn is_on(&self) -> bool {
+        self.on
+    }
+
+    /// Switches effects off, keeping which one, shuffle and drift for when they come back.
+    pub fn set_on(&mut self, on: bool, db: &Db) {
+        self.on = on;
+        self.status = None;
+        self.fading = None;
+        if on && self.remembered().is_none() {
+            self.chosen = self.next_turn();
+            self.save_chosen(db);
+        }
+        self.wait();
+        self.save_on(db);
+    }
+
+    fn save_on(&self, db: &Db) {
+        if let Err(e) = db.set_setting(ON_KEY, if self.on { "1" } else { "0" }) {
+            log::warn!("saving whether video effects are on: {e:#}");
+        }
+    }
+
     /// Someone chose an effect: it shows at once, and with shuffle on gets a full turn.
-    /// Choosing none turns shuffle off.
+    /// Choosing none switches effects off.
     pub fn choose(&mut self, id: Option<&str>, db: &Db) {
-        self.chosen = id.map(str::to_owned);
+        let Some(id) = id else {
+            self.set_on(false, db);
+            return;
+        };
+        self.chosen = Some(id.to_owned());
+        self.on = true;
         self.status = None;
         self.fading = None;
         self.rolled.clear();
-        if id.is_none() && self.shuffle.on {
-            self.shuffle.on = false;
-            self.save_shuffle(db);
-        }
         self.wait();
         self.save_chosen(db);
+        self.save_on(db);
     }
 
     fn save_chosen(&self, db: &Db) {
@@ -330,7 +369,11 @@ impl Effects {
         self.shuffle = shuffle;
         self.save_shuffle(db);
         if started && self.chosen().is_none() {
-            self.chosen = self.next_turn();
+            self.on = true;
+            self.save_on(db);
+            if self.remembered().is_none() {
+                self.chosen = self.next_turn();
+            }
             self.status = None;
         }
         if restart {
@@ -406,9 +449,20 @@ impl Effects {
         self.set_setting(id, IN_SHUFFLE_SETTING, serde_json::json!(included), db);
     }
 
+    pub fn is_favourite(&self, id: &str) -> bool {
+        self.value(id, FAVOURITE_SETTING).and_then(serde_json::Value::as_bool).unwrap_or(false)
+    }
+
+    pub fn set_favourite(&mut self, id: &str, favourite: bool, db: &Db) {
+        self.set_setting(id, FAVOURITE_SETTING, serde_json::json!(favourite), db);
+    }
+
     /// Call once per frame, with the seconds since the last. The fade keeps going while
     /// paused, but only playing counts towards the next change.
     pub fn step(&mut self, dt: f32, playing: bool) {
+        if !self.on {
+            return;
+        }
         if playing {
             self.turn += dt;
             self.drift_clock += f64::from(dt * self.drift.speed / 100.0);
@@ -480,7 +534,7 @@ impl Effects {
 
     /// Whether the player should look for scene cuts.
     pub fn wants_cuts(&self) -> bool {
-        self.shuffle.on && self.shuffle.at_cuts
+        self.on && self.shuffle.on && self.shuffle.at_cuts
     }
 
     /// The shot has just changed: moves to the next effect if this one has had its turn.
@@ -507,7 +561,7 @@ impl Effects {
         let fading = self.fading.as_ref().map(|f| f.from.as_str());
         let counted = self.effects.iter().filter(|e| {
             let id = Some(e.id.as_str());
-            id == self.chosen.as_deref() || id == fading || (self.shuffle.on && self.in_shuffle(&e.id))
+            self.on && (id == self.chosen.as_deref() || id == fading || (self.shuffle.on && self.in_shuffle(&e.id)))
         });
         let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, history: false, flow: false, plate: false, cuts: false, stats: false, scale: 0.25 };
         for e in counted {
@@ -790,13 +844,48 @@ mod tests {
         effects.scene_changed();
         assert_eq!(effects.chosen().unwrap().id, moved, "cuts are ignored unless asked for");
 
-        // Choosing one stops any fade; choosing none stops shuffle; both are kept.
+        // Choosing one stops any fade; both are kept.
         effects.set_in_shuffle("c", false, &db);
         effects.choose(Some("a"), &db);
         assert!(Effects::new(&dirs, &db).shuffle().on);
         assert!(!Effects::new(&dirs, &db).in_shuffle("c"));
+
+        // Switched off, nothing runs or changes, and it all comes back where it was.
+        effects.set_on(false, &db);
+        assert!(effects.chosen().is_none() && effects.active().is_none());
+        assert!(!effects.needs().depth && !effects.wants_cuts());
+        for _ in 0..200 {
+            effects.step(1.0, true);
+        }
+        assert_eq!(effects.remembered().unwrap().id, "a");
+        let reopened = Effects::new(&dirs, &db);
+        assert!(!reopened.is_on() && reopened.chosen().is_none() && reopened.shuffle().on);
+        effects.set_on(true, &db);
+        assert_eq!(effects.chosen().unwrap().id, "a");
+        assert!(effects.shuffle().on);
+
+        // Choosing none is switching off, and choosing one switches back on.
         effects.choose(None, &db);
-        assert!(!effects.shuffle().on);
+        assert!(!effects.is_on() && effects.shuffle().on);
+        effects.choose(Some("b"), &db);
+        assert!(effects.is_on() && Effects::new(&dirs, &db).is_on());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn favourites_are_kept_and_nothing_chosen_starts_off() {
+        let root = std::env::temp_dir().join(format!("flex-effects-fav-{}", std::process::id()));
+        write(&root, "one.frag", "");
+        let dirs = [root.clone()];
+        let db = Db::open_in_memory().unwrap();
+        let mut effects = Effects::new(&dirs, &db);
+        assert!(!effects.is_on());
+        assert!(!effects.is_favourite("one"));
+        effects.set_favourite("one", true, &db);
+        assert!(Effects::new(&dirs, &db).is_favourite("one"));
+        // Nothing to go back to, so switching on finds one.
+        effects.set_on(true, &db);
+        assert_eq!(effects.chosen().unwrap().id, "one");
         let _ = std::fs::remove_dir_all(&root);
     }
 

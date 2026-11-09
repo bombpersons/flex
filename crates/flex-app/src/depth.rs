@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use flex_depth::Depth;
 
+use crate::ground::Ground;
+
 /// The sizes the model can run at, in patches of 14 pixels, biggest first: all about 16:9. Below
 /// the last, it gets little faster.
 const LEVELS: [(usize, usize); 5] = [(37, 21), (32, 18), (28, 16), (24, 14), (21, 12)];
@@ -86,6 +88,8 @@ pub struct DepthMap {
     /// How much of each pixel is a person (red), wall (green) and sky (blue), RGBA, bottom row
     /// first, `WIDTH` × `HEIGHT`, when an effect asked for them.
     pub masks: Option<Vec<u8>>,
+    /// Where the ground is, as `ground::Ground::update` gives it.
+    pub ground: [f32; 4],
 }
 
 struct State {
@@ -359,6 +363,7 @@ impl Link {
         let mut previous_masks: Option<[Vec<f32>; MASKS]> = None;
         let mut last_own: Option<Vec<f32>> = None;
         let mut range: Option<(f32, f32)> = None;
+        let mut ground = Ground::default();
         let mut serial = 0;
         let mut rgb = vec![0u8; WIDTH * HEIGHT * 3];
         loop {
@@ -409,6 +414,7 @@ impl Link {
                 previous = None;
                 previous_masks = None;
                 range = None;
+                ground.forget();
             }
             last_own = Some(own);
             let (lo, hi) = match range {
@@ -439,9 +445,10 @@ impl Link {
                 previous_masks = Some(now);
                 rgba
             });
+            let ground = ground.update(&values, masks.as_deref(), (WIDTH, HEIGHT));
             {
                 let mut state = self.lock();
-                state.output = Some(Arc::new(DepthMap { values, serial, time, masks }));
+                state.output = Some(Arc::new(DepthMap { values, serial, time, masks, ground }));
                 state.status = Status::Ready { adapter: depth.adapter().to_owned(), ms, size, masks: with_masks };
             }
             // Still "busy" while waiting, so no frame is read back in the meantime.

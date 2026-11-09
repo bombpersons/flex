@@ -7,6 +7,8 @@ plate = true
 cuts = true
 stats = true
 faces = true
+depth = true
+segment = true
 
 [[settings]]
 key = "view"
@@ -20,4 +22,5 @@ options = [
     { id = "known", label = "How much of the room is known" },
     { id = "who", label = "Who is who" },
     { id = "look", label = "Palette and cuts" },
+    { id = "ground", label = "The ground and the light" },
 ]

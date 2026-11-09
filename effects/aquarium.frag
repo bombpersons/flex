@@ -1,6 +1,6 @@
-// Aquarium: a flat sheet of water in the room, worked out from depth. A point is underwater if
-// it's further away than where its line of sight meets the water, so the waterline runs along
-// the table and around people on its own. What's seen is then refracted, reflected about where it
+// Aquarium: a flat sheet of water in the room, level with the floor or table found from depth, so
+// it tilts with the camera. A point is underwater if it's further away than where its line of
+// sight meets the water, so the waterline runs along the table and around people on its own. What's seen is then refracted, reflected about where it
 // meets the water, lit by caustics and fogged by how much water is in front of it.
 
 float hash(vec2 p) {
@@ -51,6 +51,9 @@ float caustics(vec2 p, float t) {
     return min(pow(abs(sum), 8.0), 1.5);
 }
 
+// How far past everything in the picture the true horizon's depth is.
+const float BEYOND = 0.1;
+
 float ring_bubble(vec2 p, vec2 centre, float size) {
     float d = length(p - centre) / size;
     return (1.0 - smoothstep(0.85, 1.0, d)) * (0.2 + 0.8 * smoothstep(0.55, 0.95, d)) + 0.7 * (1.0 - smoothstep(0.0, 0.25, length(p - centre - vec2(-0.3, 0.3) * size) / size));
@@ -68,12 +71,19 @@ vec4 effect(vec2 uv) {
 
     float sky = smoothstep(0.4, 0.7, sky_at(uv));
     float near = mix(depth_at(uv), 0.0, sky);
-    float far = 1.0 / (0.1 + near * 1.2);
+    float far = 1.0 / max(near + BEYOND, 0.02);
     float person = person_at(uv);
 
     float filled = s_rise < 0.5 ? 1.0 : smoothstep(0.0, 1.0, t / s_rise);
-    float above_water = mix(0.6, -0.25, s_level / 100.0 * filled) - 0.012 * u_bass * react;
-    float below = (s_horizon / 100.0 - pic.y);
+    // The level surface, as how far below the horizon each point of the picture is. With 1 for
+    // the height of that surface below the camera, the water is at above_water.
+    float found = s_find * u_ground.w;
+    vec3 ground = mix(vec3(0.0, -1.7, 1.7 * s_horizon / 100.0), u_ground.xyz + vec3(0.0, 0.0, BEYOND), found);
+    float above_water = mix(1.0, -0.4, s_level / 100.0 * filled) - 0.012 * u_bass * react;
+    float below = dot(ground, vec3(pic, 1.0));
+    vec2 downhill = ground.xy / vec2(aspect, 1.0);
+    vec2 along = normalize(vec2(-downhill.y, downhill.x));
+    float across = dot((pic - 0.5) * vec2(aspect, 1.0), along * sign(along.x + 1e-5));
     float waves = s_waves / 100.0 * (1.0 + 1.2 * u_bass * react);
 
     // How far along the line of sight the water starts, if it does.
@@ -81,11 +91,11 @@ vec4 effect(vec2 uv) {
     bool from_above = above_water > 0.0;
     if (from_above && below > 0.002) hit = above_water / below;
     if (!from_above && below < -0.002) hit = -above_water / -below;
-    vec2 on_surface = vec2((pic.x - 0.5) * aspect, 1.0) * min(hit, 12.0);
+    vec2 on_surface = vec2(across, 1.0) * min(hit, 12.0);
     if (hit < 1e3) {
         float lift = swell(on_surface, t) * 0.012 * waves;
         hit = from_above ? max(above_water + lift, 0.001) / below : max(-above_water + lift, 0.001) / -below;
-        on_surface = vec2((pic.x - 0.5) * aspect, 1.0) * min(hit, 12.0);
+        on_surface = vec2(across, 1.0) * min(hit, 12.0);
     }
     bool sees_surface = hit < far;
     bool under = from_above ? sees_surface : true;
@@ -145,8 +155,8 @@ vec4 effect(vec2 uv) {
 
     if (sees_surface && from_above) {
         // The reflection, flipped about where this point's own distance meets the water.
-        float line = s_horizon / 100.0 - above_water / far;
-        vec2 mirrored = vec2(pic.x, 2.0 * line - pic.y) + tilt * 0.012 * vec2(0.5, 1.0);
+        vec2 flipped = pic * vec2(aspect, 1.0) + downhill * 2.0 * (above_water / far - below) / max(dot(downhill, downhill), 1e-4);
+        vec2 mirrored = flipped / vec2(aspect, 1.0) + tilt * 0.012 * vec2(0.5, 1.0);
         vec3 seen = texture(u_video, low + clamp(mirrored, vec2(0.001), vec2(0.999)) * size).rgb;
         float glance = mix(0.12, 0.85, smoothstep(0.25, 3.0, hit));
         w = mix(w, seen * vec3(0.8, 0.92, 1.0), glance * s_mirror / 100.0);
@@ -176,16 +186,16 @@ vec4 effect(vec2 uv) {
     for (int i = 0; i < u_face_count; i++) {
         if (u_face_seen[i] <= 0.0 || amount <= 0.0) continue;
         vec2 mouth = 0.5 * (face_point(i, 3) + face_point(i, 4));
-        float mouth_below = s_horizon / 100.0 - (mouth.y - low.y) / size.y;
-        float mouth_far = 1.0 / (0.1 + depth_at(mouth) * 1.2);
+        float mouth_below = dot(ground, vec3((mouth - low) / size, 1.0));
+        float mouth_far = 1.0 / max(depth_at(mouth) + BEYOND, 0.02);
         if (from_above && (mouth_below <= 0.002 || above_water / mouth_below >= mouth_far)) continue;
         vec2 at = mouth * vec2(aspect, 1.0);
-        float across = u_faces[i].z - u_faces[i].x;
+        float face_width = u_faces[i].z - u_faces[i].x;
         for (int b = 0; b < 7; b++) {
             float n = float(b);
             float life = fract(t * 0.35 + n / 7.0 + float(i) * 0.3);
             vec2 centre = at + vec2(sin(life * 9.0 + n * 2.0) * 0.015, life * 0.5);
-            w += vec3(0.9, 0.97, 1.0) * ring_bubble(p, centre, across * (0.04 + 0.05 * fract(n * 0.37))) * u_face_seen[i] * 0.7 * (1.0 - life);
+            w += vec3(0.9, 0.97, 1.0) * ring_bubble(p, centre, face_width * (0.04 + 0.05 * fract(n * 0.37))) * u_face_seen[i] * 0.7 * (1.0 - life);
         }
     }
     return vec4(w, 1.0);
