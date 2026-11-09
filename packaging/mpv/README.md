@@ -8,11 +8,13 @@ Flex can use any libmpv, but these two patches let it do things an ordinary one 
   played to Flex, so effects can react to the real sound about a hundred times a second.
 
 `v0.40.0/` is built on Debian 13 for the Linux package. `windows/` is the same change against the
-commit in `windows/COMMIT`, which needs newer libraries than Debian has. Flex looks for `mpv_flex_set_audio_tap` when it loads libmpv. If it
+commit in `windows/COMMIT`, which needs newer libraries than Debian has. It isn't built yet, and the
+Windows package ships an ordinary libmpv. Flex looks for `mpv_flex_set_audio_tap` when it loads libmpv. If it
 isn't there, subtitles go through the effect and sound comes from a filter inside mpv, as before.
 
     git clone -b v0.40.0 https://github.com/mpv-player/mpv
     cd mpv
     git am /path/to/flex/packaging/mpv/v0.40.0/*.patch
 
-`.github/scripts/build-libmpv-linux.sh` and `build-libmpv-windows.sh` build them for release.
+`.github/scripts/build-libmpv-linux.sh` builds them for release. `build-libmpv-windows.sh` is for the
+Windows patch, and isn't part of the build.

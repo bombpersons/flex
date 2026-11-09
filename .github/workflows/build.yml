@@ -17,30 +17,7 @@ permissions:
   contents: read
 
 jobs:
-  # Flex's patched libmpv, rebuilt only when its patches change. The Windows one takes hours,
-  # so pull requests skip these.
-  libmpv-windows:
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 350
-    container:
-      image: ghcr.io/shinchiro/archlinux:latest
-    steps:
-      - uses: actions/checkout@v4
-      - id: cache
-        uses: actions/cache@v4
-        with:
-          path: libmpv-windows
-          key: libmpv-windows-${{ hashFiles('packaging/mpv/windows/**', '.github/scripts/build-libmpv-windows.sh') }}
-      - name: Build
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: bash .github/scripts/build-libmpv-windows.sh libmpv-windows
-      - uses: actions/upload-artifact@v4
-        with:
-          name: flex-libmpv-windows
-          path: libmpv-windows/libmpv-2.dll
-          retention-days: 14
-
+  # Flex's patched libmpv for Linux, rebuilt only when its patches change. Pull requests skip it.
   libmpv-linux:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -121,7 +98,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux, libmpv-windows]
+    needs: [windows, linux]
     runs-on: windows-latest
     permissions:
       contents: write
@@ -135,10 +112,6 @@ jobs:
         with:
           name: flex-linux-x64
           path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: flex-libmpv-windows
-          path: build
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-about
@@ -153,7 +126,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: LIBMPV_DLL=build/libmpv-2.dll .github/scripts/package.sh "$GITHUB_REF_NAME" build/flex.exe dist
+        run: .github/scripts/package.sh "$GITHUB_REF_NAME" build/flex.exe dist
       - name: Package symbols
         shell: bash
         run: 7z a "dist/flex-$GITHUB_REF_NAME-symbols.zip" ./build/flex.pdb

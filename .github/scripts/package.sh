@@ -26,9 +26,9 @@ FFMPEG_VERSION=9.0.2
 FFMPEG_URL="https://github.com/GyanD/codexffmpeg/releases/download/${FFMPEG_VERSION}/ffmpeg-${FFMPEG_VERSION}-full_build-shared.7z"
 FFMPEG_SHA256=4d2060a8b34a940aa47d785142055bb92a63053781e55f2ace4546edd519a8f5
 
-# libmpv: built with Flex's patches (packaging/mpv), by .github/scripts/build-libmpv-windows.sh.
+# libmpv: the newest shinchiro build (it only keeps about two months of builds, so a
+# pinned one would soon disappear). The exact build goes into the notices.
 MPV_BUILDS=shinchiro/mpv-winbuild-cmake
-LIBMPV_DLL=${LIBMPV_DLL:?set LIBMPV_DLL to the patched libmpv-2.dll}
 
 fail() { echo "error: $*" >&2; exit 1; }
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
@@ -64,9 +64,15 @@ cp "$FF/README.txt" "$DIR/licenses/ffmpeg-build-README.txt" # versions of everyt
 
 # --- libmpv ---------------------------------------------------------------------------
 
-# Built by build-libmpv-windows.sh with Flex's patches, from the commit in packaging/mpv.
-MPV_COMMIT=$(cat "$ROOT/packaging/mpv/windows/COMMIT")
-cp "$LIBMPV_DLL" "$DIR/"
+MPV_TAG=$(gh release view -R "$MPV_BUILDS" --json tagName --jq .tagName)
+MPV_ASSET=$(gh release view "$MPV_TAG" -R "$MPV_BUILDS" --json assets --jq '.assets[].name' |
+    grep -E '^mpv-dev-x86_64-[0-9]{8}-git-[0-9a-f]+\.7z$' | head -1) ||
+    fail "no mpv-dev-x86_64 package in $MPV_BUILDS release $MPV_TAG"
+MPV_COMMIT=$(sed -E 's/.*-git-([0-9a-f]+)\.7z/\1/' <<<"$MPV_ASSET")
+echo "Downloading $MPV_ASSET (mpv $MPV_COMMIT)"
+gh release download "$MPV_TAG" -R "$MPV_BUILDS" -p "$MPV_ASSET" -D "$WORK"
+"$SEVENZIP" x -y -bso0 -o"$WORK/mpv" "$WORK/$MPV_ASSET" libmpv-2.dll
+cp "$WORK/mpv/libmpv-2.dll" "$DIR/"
 for f in LICENSE.GPL Copyright; do
     curl -fsSL --retry 3 -o "$DIR/licenses/mpv-$f.txt" "https://raw.githubusercontent.com/mpv-player/mpv/$MPV_COMMIT/$f"
 done
@@ -125,11 +131,12 @@ FFmpeg $FFMPEG_VERSION (ffmpeg.exe, ffprobe.exe and the DLLs other than libmpv-2
   Source: https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz
     (sources of the bundled libraries: see https://www.gyan.dev/ffmpeg/builds/)
 
-libmpv (libmpv-2.dll), mpv commit $MPV_COMMIT with Flex's patch
+libmpv (libmpv-2.dll), mpv commit $MPV_COMMIT
   License: GNU GPL version 2 or later (licenses/mpv-LICENSE.GPL.txt,
   licenses/mpv-Copyright.txt).
+  Build: $MPV_BUILDS $MPV_TAG ($MPV_ASSET),
+    https://github.com/$MPV_BUILDS/releases/tag/$MPV_TAG
   Source: https://github.com/mpv-player/mpv/tree/$MPV_COMMIT
-  Flex's patch: packaging/mpv/windows in https://github.com/catchouli/flex
     (build scripts and the versions of its dependencies:
     https://github.com/$MPV_BUILDS)
 
@@ -159,7 +166,7 @@ Run **$NAME-setup.exe** to install or update Flex: it installs for your account 
 
 Or unzip **$NAME.zip** anywhere and run \`flex.exe\`. To update that way, quit Flex first (tray icon → Quit, or \`flex.exe --quit\`) and replace the files.
 
-Bundled: FFmpeg $FFMPEG_VERSION ([gyan.dev](https://github.com/GyanD/codexffmpeg/releases/tag/$FFMPEG_VERSION)), libmpv [mpv@$MPV_COMMIT](https://github.com/mpv-player/mpv/tree/$MPV_COMMIT) with Flex's patches. Licenses and source links are in THIRD-PARTY-NOTICES.txt.
+Bundled: FFmpeg $FFMPEG_VERSION ([gyan.dev](https://github.com/GyanD/codexffmpeg/releases/tag/$FFMPEG_VERSION)), libmpv [mpv@$MPV_COMMIT](https://github.com/mpv-player/mpv/tree/$MPV_COMMIT) ([$MPV_TAG](https://github.com/$MPV_BUILDS/releases/tag/$MPV_TAG)). Licenses and source links are in THIRD-PARTY-NOTICES.txt.
 EOF
 
 rm -f "$OUT/$NAME.zip"
