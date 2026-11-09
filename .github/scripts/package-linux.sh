@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Packages a Linux build: flex and the plugins, with the Rust crates' licenses. libmpv
-# (and ffmpeg, for the web UI) come from the system, so nothing else is bundled.
+# Packages a Linux build: flex and the plugins, with the Rust crates' licenses, and Flex's
+# patched libmpv and what it needs when LIBMPV_DIR says where they are (from
+# build-libmpv-linux.sh). ffmpeg, for the web UI, comes from the system.
 #
 #   package-linux.sh <tag or branch, e.g. v0.9.0> <cargo release dir> <output dir>
 #
@@ -22,6 +23,9 @@ DIR="$WORK/$NAME"
 mkdir -p "$DIR/licenses"
 
 cp "$BIN/flex" "$DIR/flex"
+if [[ -n ${LIBMPV_DIR:-} ]]; then
+    cp -R "$LIBMPV_DIR"/. "$DIR/"
+fi
 # Plugins: plugins/<id>/plugin.toml plus its program. They're off until switched on in
 # Settings → Plugins.
 for MANIFEST in "$ROOT"/plugins/*/plugin.toml; do
@@ -45,9 +49,10 @@ https://github.com/catchouli/flex
 Run ./flex. Libraries, watch history and settings are kept in ~/.local/share/flex
 (or \$XDG_DATA_HOME/flex).
 
-Flex needs libmpv from your system: on Debian or Ubuntu, "apt install libmpv2". It looks
-for libmpv.so.2 next to flex and then on the usual library path; FLEX_LIBMPV=/path/to/it
-overrides that. Optional:
+Flex comes with its own patched libmpv.so.2, built on Debian 13, which keeps subtitles out of
+video effects and gives them the real sound. If it can't load on your system, Flex uses the
+system's libmpv instead (on Debian or Ubuntu, "apt install libmpv2"), without those two things.
+FLEX_LIBMPV=/path/to/it picks a different one. Optional:
 - fonts-noto-cjk: Japanese, Chinese and Korean titles.
 - ffmpeg: playing in the web UI (Settings → Web access) when a browser can't play a file
   as it is.

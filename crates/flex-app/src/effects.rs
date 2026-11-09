@@ -78,6 +78,9 @@ pub struct Renderer {
     spectrum: Option<glow::Texture>,
     depth: DepthGl,
     held: HeldFrames,
+    /// The subtitles for each of those frames, and the ones mpv's just drawn.
+    held_words: HeldFrames,
+    words: Option<(Target, (i32, i32))>,
     faces: FaceGl,
     cuts: CutGl,
     history: HistoryGl,
@@ -116,6 +119,8 @@ pub struct Frame {
     pub depth: Option<crate::depth::Link>,
     /// The face worker, when the effect asked for faces.
     pub faces: Option<crate::faces::Link>,
+    /// Subtitles are to be kept out of the effect and laid on top of it.
+    pub subtitles: bool,
 }
 
 /// The player's side: a smooth playback clock, and the sound for effects that want it.
@@ -133,9 +138,50 @@ pub struct Inputs {
     waiting: VecDeque<(Instant, Levels)>,
     levels: Option<Levels>,
     analyser: Option<Analyser>,
+    /// Whether subtitles are showing and there's a patched libmpv to take them apart.
+    subtitles: bool,
+    /// With a patched libmpv: the samples being analysed, and what they gave, waiting to be heard.
+    tapped: bool,
+    samples: audio::SampleBands,
+    heard: VecDeque<(f64, Levels)>,
 }
 
 impl Inputs {
+    /// Whether there are subtitles for effects to leave out and lay on top afterwards.
+    pub fn subtitles(&self) -> bool {
+        self.subtitles
+    }
+
+    /// Takes in the samples mpv's played lately, with Flex's patched libmpv.
+    fn collect_samples(&mut self, mpv: &Mpv) {
+        if self.filter.is_none() {
+            let _ = crate::audio_tap::take();
+            if let Err(e) = mpv.command(&["af", "add", &format!("@{}:flextap", audio::FILTER_LABEL)]) {
+                log::warn!("video effects: no sound for effects: {e:#}");
+            }
+            self.filter = Some((0, "tap".into()));
+        }
+        for chunk in crate::audio_tap::take() {
+            self.samples.push(chunk.pts, chunk.rate, &chunk.mono);
+        }
+        while let Some(heard) = self.samples.measure() {
+            self.heard.push_back(heard);
+        }
+        let Some(now) = mpv.get_f64("audio-pts") else { return };
+        let mut latest: Option<Levels> = None;
+        while self.heard.front().is_some_and(|(pts, _)| *pts <= now) {
+            let Some((_, levels)) = self.heard.pop_front() else { break };
+            // Between frames there are several readings: the loudest of each keeps the beats.
+            latest = Some(match latest {
+                Some(l) => l.loudest_of(&levels),
+                None => levels,
+            });
+        }
+        if latest.is_some() {
+            self.levels = latest;
+        }
+    }
+
     /// Adds mpv's audio filter, or replaces it if the sound's channels changed.
     fn keep_filter(&mut self, mpv: &Mpv) {
         let (Some(channels), Some(layout)) = (mpv.get_i64("audio-params/channel-count"), mpv.get_string("audio-params/channels")) else { return };
@@ -159,6 +205,8 @@ impl Inputs {
         self.metadata = None;
         self.waiting.clear();
         self.levels = None;
+        self.samples = Default::default();
+        self.heard.clear();
     }
 
     /// Call once per frame while an effect is on.
@@ -166,6 +214,8 @@ impl Inputs {
         let now = Instant::now();
         let dt = self.last.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
         self.last = Some(now);
+        self.tapped = mpv.set_audio_tap(crate::audio_tap::receive);
+        self.subtitles = self.tapped && mpv.get_i64("current-tracks/sub/id").is_some() && mpv.get_flag("sub-visibility").unwrap_or(false);
         let paused = mpv.get_flag("pause").unwrap_or(false) || mpv.get_flag("paused-for-cache").unwrap_or(false);
         match mpv.get_f64("time-pos") {
             Some(pos) if paused || (pos - self.clock).abs() > 0.25 => self.clock = pos,
@@ -182,8 +232,12 @@ impl Inputs {
             self.analyser = None;
             return (self.clock as f32, None);
         }
-        self.keep_filter(mpv);
-        if let Some((channels, _)) = self.filter {
+        if self.tapped {
+            self.collect_samples(mpv);
+        } else {
+            self.keep_filter(mpv);
+        }
+        if let Some((channels, _)) = self.filter.as_ref().filter(|_| !self.tapped).cloned() {
             let metadata = mpv.get_string(&format!("af-metadata/{}", audio::FILTER_LABEL));
             if metadata.is_some() && metadata != self.metadata {
                 if let Some(levels) = metadata.as_deref().and_then(|m| audio::read_levels(m, channels)) {
@@ -586,10 +640,11 @@ fn vertex_source(version: &str) -> String {
 fn copy_source(version: &str, embedded: bool) -> String {
     let precision = if embedded { "precision highp float;\n" } else { "" };
     format!(
-        "{version}\n{precision}uniform sampler2D u_tex;\nuniform sampler2D u_from;\nuniform float u_faded_in;\nuniform float u_flip;\n\
+        "{version}\n{precision}uniform sampler2D u_tex;\nuniform sampler2D u_from;\nuniform sampler2D u_words;\nuniform float u_has_words;\nuniform float u_faded_in;\nuniform float u_flip;\n\
          in vec2 v_uv;\nout vec4 flex_color;\n\
          void main() {{\n    vec2 uv = vec2(v_uv.x, u_flip > 0.5 ? 1.0 - v_uv.y : v_uv.y);\n\
-         flex_color = vec4(mix(texture(u_from, uv).rgb, texture(u_tex, uv).rgb, u_faded_in), 1.0);\n}}\n"
+         vec4 words = texture(u_words, uv) * u_has_words;\n\
+         flex_color = vec4(mix(texture(u_from, uv).rgb, texture(u_tex, uv).rgb, u_faded_in) * (1.0 - words.a) + words.rgb, 1.0);\n}}\n"
     )
 }
 
@@ -622,7 +677,7 @@ impl Renderer {
         frame: &Frame,
         target: Option<glow::Framebuffer>,
         (w, h): (i32, i32),
-        render: impl FnOnce(i32, i32, i32),
+        render: impl FnOnce(i32, i32, i32, Option<i32>),
     ) -> bool {
         let (effect, rect) = (&frame.effect, frame.rect);
         unsafe {
@@ -699,15 +754,34 @@ impl Renderer {
                 }
             }
 
-            render(o.video.fbo.0.get() as i32, size.0, size.1);
+            // Subtitles go on top of the effect, not through it.
+            if self.words.as_ref().is_some_and(|(_, at)| *at != size || !frame.subtitles) {
+                if let Some((words, _)) = self.words.take() {
+                    gl.delete_framebuffer(words.fbo);
+                    gl.delete_texture(words.texture);
+                }
+                self.held_words.free(gl);
+            }
+            if frame.subtitles && self.words.is_none() {
+                match create_target(gl, size, &[(glow::RGBA8, glow::UNSIGNED_BYTE)]) {
+                    Ok(words) => self.words = Some((words, size)),
+                    Err(e) => log::warn!("video effects: subtitles: {e}"),
+                }
+            }
+            render(o.video.fbo.0.get() as i32, size.0, size.1, self.words.as_ref().map(|(words, _)| words.fbo.0.get() as i32));
+            let video = &o.video;
             if frame.depth.is_some() || frame.faces.is_some() {
-                self.held.push(gl, &o.video, size, frame.pts);
+                self.held.push(gl, video, size, frame.pts);
+                if let Some((words, _)) = &self.words {
+                    self.held_words.push(gl, words, size, frame.pts);
+                }
             } else {
                 self.held.free(gl);
+                self.held_words.free(gl);
             }
             // The networks look at the kept copy of a frame, however many paints later they get
             // to it, so what they find is about exactly the picture that will be drawn.
-            let (source, source_time) = self.held.newest().unwrap_or((o.video.fbo, frame.pts));
+            let (source, source_time) = self.held.newest().unwrap_or((video.fbo, frame.pts));
             match &frame.depth {
                 Some(link) => self.depth.update(gl, link, source, size, rect, source_time, frame.video_time),
                 None => self.depth.delay = 0.0,
@@ -721,10 +795,13 @@ impl Renderer {
             }
             // The picture is held back to the frame depth and faces have caught up with.
             let (video_texture, pts) = if frame.depth.is_some() || frame.faces.is_some() {
-                self.held.pick(frame.video_time - self.depth.delay.max(self.faces.delay)).unwrap_or((o.video.texture, frame.pts))
+                self.held.pick(frame.video_time - self.depth.delay.max(self.faces.delay)).unwrap_or((video.texture, frame.pts))
             } else {
-                (o.video.texture, frame.pts)
+                (video.texture, frame.pts)
             };
+            let words_texture = self.words.as_ref().map(|(words, _)| {
+                self.held_words.pick(frame.video_time - self.depth.delay.max(self.faces.delay)).map_or(words.texture, |w| w.0)
+            });
             let (depth_texture, mask_texture) = if frame.depth.is_some() { self.depth.map_for(pts) } else { (None, None) };
             let faces = if frame.faces.is_some() { self.faces.uniforms(pts, rect) } else { FaceUniforms::default() };
             if frame.needs.mesh {
@@ -826,10 +903,14 @@ impl Renderer {
             gl.bind_framebuffer(glow::FRAMEBUFFER, target);
             gl.viewport(0, 0, w, h);
             gl.use_program(Some(copy));
+            gl.active_texture(glow::TEXTURE13);
+            gl.bind_texture(glow::TEXTURE_2D, words_texture);
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(old));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(new));
+            gl.uniform_1_i32(gl.get_uniform_location(copy, "u_words").as_ref(), 13);
+            gl.uniform_1_f32(gl.get_uniform_location(copy, "u_has_words").as_ref(), if words_texture.is_some() { 1.0 } else { 0.0 });
             gl.uniform_1_i32(gl.get_uniform_location(copy, "u_tex").as_ref(), 0);
             gl.uniform_1_i32(gl.get_uniform_location(copy, "u_from").as_ref(), 1);
             gl.uniform_1_f32(gl.get_uniform_location(copy, "u_faded_in").as_ref(), faded_in);
@@ -839,7 +920,7 @@ impl Renderer {
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
             gl.bind_texture(glow::TEXTURE_2D, None);
-            for unit in [glow::TEXTURE1, glow::TEXTURE2, glow::TEXTURE3, glow::TEXTURE4, glow::TEXTURE6, glow::TEXTURE7, glow::TEXTURE8, glow::TEXTURE9, glow::TEXTURE10, glow::TEXTURE11, glow::TEXTURE12] {
+            for unit in [glow::TEXTURE1, glow::TEXTURE2, glow::TEXTURE3, glow::TEXTURE4, glow::TEXTURE6, glow::TEXTURE7, glow::TEXTURE8, glow::TEXTURE9, glow::TEXTURE10, glow::TEXTURE11, glow::TEXTURE12, glow::TEXTURE13] {
                 gl.active_texture(unit);
                 gl.bind_texture(glow::TEXTURE_2D, None);
             }
@@ -916,7 +997,14 @@ impl Renderer {
     }
 
     unsafe fn free_objects(&mut self, gl: &glow::Context) {
-        unsafe { self.held.free(gl) };
+        unsafe {
+            self.held.free(gl);
+            self.held_words.free(gl);
+            if let Some((words, _)) = self.words.take() {
+                gl.delete_framebuffer(words.fbo);
+                gl.delete_texture(words.texture);
+            }
+        }
         if let Some(o) = self.objects.take() {
             unsafe {
                 gl.delete_framebuffer(o.video.fbo);

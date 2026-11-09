@@ -335,6 +335,12 @@ skin. `face_texture` gives a face's own pixels at any such position, for moving 
 somewhere else. They only cover the face itself, from hairline to chin, and only faces with a
 mesh; `meshed(face)` says whether a slot has one, so an effect can fall back on `u_faces`.
 
+### Subtitles
+
+With Flex's patched libmpv (`packaging/mpv`), subtitles are kept out of `u_video` and laid over
+the finished effect, so effects never distort them, and sound reactions come from the real
+samples. With an ordinary libmpv, subtitles go through the effect as part of the picture.
+
 ## Testing
 
 - While a video plays, Flex checks the shader twice a second and reloads it when it

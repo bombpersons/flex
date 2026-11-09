@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod ambient;
+mod audio_tap;
 mod app;
 mod awake;
 #[cfg(windows)]

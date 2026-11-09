@@ -695,7 +695,7 @@ impl Player {
                     sh.faces.clone()
                 });
                 let fading = sh.effects.fading();
-                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts() || needs.cuts || needs.flow || needs.stats || needs.plate, needs, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces })
+                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts() || needs.cuts || needs.flow || needs.stats || needs.plate, needs, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces, subtitles: self.effect_inputs.subtitles() })
             }
             _ => {
                 self.effect_inputs.stop(&self.mpv);
@@ -727,7 +727,7 @@ impl Player {
                         1.0 - margins.right as f32 / wf,
                         1.0 - margins.top as f32 / hf,
                     ];
-                    let draw = |fbo, w, h| renderer.render(fbo, w, h, true);
+                    let draw = |fbo, w, h, subtitles| renderer.render(fbo, w, h, true, subtitles);
                     unsafe { effects.paint(painter.gl(), &frame, target, (w, h), draw) }
                 }
                 None => {
@@ -739,7 +739,7 @@ impl Player {
             };
             drop(effects);
             if !drawn {
-                renderer.render(fbo, w, h, target.is_none());
+                renderer.render(fbo, w, h, target.is_none(), None);
             }
             if let Some(sampler) = &sampler {
                 let mut sampler = sampler.lock().unwrap_or_else(|e| e.into_inner());

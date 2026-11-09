@@ -1,7 +1,9 @@
-//! Sound for video effects. libmpv can't hand over the samples it plays, so a filter inside
-//! mpv splits the sound into frequency bands and reports how loud each one is, several times
-//! a second (`filter_graph`, `read_levels`). `Analyser` turns that into levels, a beat and a
-//! spectrum. Nothing reads the file a second time, and it works for anything mpv can play.
+//! Sound for video effects. Flex's patched libmpv hands over the samples it plays, which
+//! `SampleBands` measures about a hundred times a second. An ordinary libmpv can't do that, so
+//! there a filter inside mpv splits the sound into frequency bands and reports how loud each
+//! one is, several times a second (`filter_graph`, `read_levels`). `Analyser` turns either into
+//! levels, a beat and a spectrum. Nothing reads the file a second time, and it works for
+//! anything mpv can play.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -56,6 +58,120 @@ pub fn filter_graph(channels: usize, layout: &str) -> String {
 pub struct Levels {
     pub overall: f32,
     pub bands: [f32; FILTER_BANDS],
+}
+
+impl Levels {
+    /// The louder of these and `other`, band by band.
+    pub fn loudest_of(&self, other: &Levels) -> Levels {
+        let mut bands = self.bands;
+        for (a, b) in bands.iter_mut().zip(&other.bands) {
+            *a = a.max(*b);
+        }
+        Levels { overall: self.overall.max(other.overall), bands }
+    }
+}
+
+/// How many samples each measurement looks at, and how many it moves on by.
+const WINDOW: usize = 2048;
+const HOP: usize = 512;
+/// A gap this big (seconds) between what's expected and what comes is a seek.
+const SAMPLE_JUMP: f64 = 0.2;
+
+/// Measures sound as it comes, into the same bands the filter would give.
+pub struct SampleBands {
+    buffer: VecDeque<f32>,
+    /// When the sample at the front of `buffer` plays, and the sample rate.
+    front_pts: f64,
+    rate: u32,
+    window: Vec<f32>,
+    window_power: f32,
+}
+
+impl Default for SampleBands {
+    fn default() -> Self {
+        let window: Vec<f32> = (0..WINDOW).map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / WINDOW as f32).cos()).collect();
+        let window_power = window.iter().map(|w| w * w).sum();
+        Self { buffer: VecDeque::new(), front_pts: 0.0, rate: 48_000, window, window_power }
+    }
+}
+
+impl SampleBands {
+    /// Some more sound, starting at `pts` (negative if that's unknown).
+    pub fn push(&mut self, pts: f64, rate: u32, mono: &[f32]) {
+        let expected = self.front_pts + self.buffer.len() as f64 / f64::from(self.rate);
+        if self.buffer.is_empty() || rate != self.rate || (pts >= 0.0 && (pts - expected).abs() > SAMPLE_JUMP) {
+            self.buffer.clear();
+            self.rate = rate;
+            self.front_pts = pts.max(0.0);
+        }
+        self.buffer.extend(mono);
+    }
+
+    /// The next measurement, if there's enough sound for one, and the moment it's centred on.
+    pub fn measure(&mut self) -> Option<(f64, Levels)> {
+        if self.buffer.len() < WINDOW {
+            return None;
+        }
+        let mut re = [0f32; WINDOW];
+        let mut im = [0f32; WINDOW];
+        let mut overall = 0.0;
+        for (i, sample) in self.buffer.iter().take(WINDOW).enumerate() {
+            overall += sample * sample;
+            re[i] = sample * self.window[i];
+        }
+        fft(&mut re, &mut im);
+        let scale = 2.0 / (WINDOW as f32 * self.window_power);
+        let hz_per_bin = self.rate as f32 / WINDOW as f32;
+        let mut bands = [0f32; FILTER_BANDS];
+        for (b, band) in bands.iter_mut().enumerate() {
+            let edge = |at: f32| LOW_HZ * (HIGH_HZ / LOW_HZ).powf(at / FILTER_BANDS as f32) / hz_per_bin;
+            let (low, high) = (edge(b as f32), edge(b as f32 + 1.0));
+            let first = (low + 0.5).floor().max(1.0) as usize;
+            let last = ((high + 0.5).floor() as usize).min(WINDOW / 2 - 1);
+            for k in first..=last.max(first) {
+                // How much of this bin is inside the band, so narrow low bands still get a share.
+                let inside = ((k as f32 + 0.5).min(high) - (k as f32 - 0.5).max(low)).clamp(0.0, 1.0);
+                *band += (re[k] * re[k] + im[k] * im[k]) * scale * inside;
+            }
+        }
+        let centre = self.front_pts + (WINDOW / 2) as f64 / f64::from(self.rate);
+        self.buffer.drain(..HOP);
+        self.front_pts += HOP as f64 / f64::from(self.rate);
+        Some((centre, Levels { overall: overall / WINDOW as f32, bands }))
+    }
+}
+
+/// A fast Fourier transform, in place. The length has to be a power of two.
+fn fft(re: &mut [f32], im: &mut [f32]) {
+    let n = re.len();
+    let mut j = 0;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j ^= bit;
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    let mut size = 2;
+    while size <= n {
+        let (sin, cos) = (-std::f32::consts::TAU / size as f32).sin_cos();
+        for start in (0..n).step_by(size) {
+            let (mut wr, mut wi) = (1.0f32, 0.0f32);
+            for k in 0..size / 2 {
+                let (a, b) = (start + k, start + k + size / 2);
+                let (tr, ti) = (re[b] * wr - im[b] * wi, re[b] * wi + im[b] * wr);
+                (re[b], im[b]) = (re[a] - tr, im[a] - ti);
+                (re[a], im[a]) = (re[a] + tr, im[a] + ti);
+                (wr, wi) = (wr * cos - wi * sin, wr * sin + wi * cos);
+            }
+        }
+        size *= 2;
+    }
 }
 
 /// Reads mpv's `af-metadata/<FILTER_LABEL>` (JSON), for audio with `channels` channels. astats
@@ -215,6 +331,51 @@ impl Analyser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sine(hz: f32, count: usize) -> Vec<f32> {
+        (0..count).map(|i| (std::f32::consts::TAU * hz * i as f32 / 48_000.0).sin()).collect()
+    }
+
+    #[test]
+    fn a_tone_lands_in_its_own_band_at_its_own_loudness() {
+        let mut bands = SampleBands::default();
+        bands.push(0.0, 48_000, &sine(1000.0, 4096));
+        let (_, levels) = bands.measure().unwrap();
+        let loudest = (0..FILTER_BANDS).max_by(|a, b| levels.bands[*a].total_cmp(&levels.bands[*b])).unwrap();
+        assert!((filter_hz(loudest) / 1000.0 - 1.0).abs() < 0.2, "band {loudest} at {}", filter_hz(loudest));
+        let total: f32 = levels.bands.iter().sum();
+        assert!((total - 0.5).abs() < 0.03, "a sine of amplitude 1 has a power of a half: {total}");
+        assert!((levels.overall - 0.5).abs() < 0.01, "{}", levels.overall);
+    }
+
+    #[test]
+    fn measurements_say_when_they_are_about() {
+        let mut bands = SampleBands::default();
+        bands.push(10.0, 48_000, &vec![0.0; 3000]);
+        let (first, _) = bands.measure().unwrap();
+        assert!((first - (10.0 + 1024.0 / 48_000.0)).abs() < 1e-6);
+        let (second, _) = bands.measure().unwrap();
+        assert!((second - first - 512.0 / 48_000.0).abs() < 1e-6);
+        assert!(bands.measure().is_none(), "not enough left");
+    }
+
+    #[test]
+    fn a_seek_starts_again() {
+        let mut bands = SampleBands::default();
+        bands.push(5.0, 48_000, &vec![0.0; 1000]);
+        bands.push(60.0, 48_000, &vec![0.0; 2048]);
+        let (at, _) = bands.measure().unwrap();
+        assert!((at - (60.0 + 1024.0 / 48_000.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_loudest_of_two_readings_keeps_each_peak() {
+        let quiet = Levels { overall: 0.1, bands: [0.2; FILTER_BANDS] };
+        let mut loud = quiet.clone();
+        loud.bands[3] = 0.9;
+        let both = quiet.loudest_of(&loud);
+        assert_eq!((both.bands[3], both.bands[4], both.overall), (0.9, 0.2, 0.1));
+    }
 
     /// What the filter would report for one tone over a very quiet floor.
     fn tone(hz: f32, amp: f32) -> Levels {
