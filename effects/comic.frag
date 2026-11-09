@@ -8,18 +8,86 @@ float dots(vec2 p, float amount, float angle, float size) {
     return 1.0 - smoothstep(-0.08, 0.08, d - 0.72 * sqrt(clamp(amount, 0.0, 1.0)));
 }
 
+// Features drawn crisply from the mesh, where the picture alone would be mush: an inked line at
+// the edge of the lips, eyes and brows.
+float features(vec2 uv) {
+    return lips_at(uv) + eye_at(uv) + brows_at(uv) + mouth_at(uv) * 0.5 + iris_at(uv) * 0.8;
+}
+
+float feature_line(vec2 uv, float wide) {
+    vec2 e = wide / u_resolution;
+    return clamp((abs(features(uv + vec2(e.x, 0.0)) - features(uv - vec2(e.x, 0.0))) + abs(features(uv + vec2(0.0, e.y)) - features(uv - vec2(0.0, e.y)))) * 1.5, 0.0, 1.0);
+}
+
+// Speech bubbles while someone's talking: how recently each mouth was open is kept in the alpha
+// of the bottom row of u_prev.
+float talking(int face) {
+    return texelFetch(u_prev, ivec2(face, 0), 0).a;
+}
+
+vec3 bubbles(vec3 c, vec2 uv) {
+    vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
+    vec2 p = uv * aspect;
+    float biggest = 0.0;
+    for (int i = 0; i < u_face_count; i++) biggest = max(biggest, u_faces[i].w - u_faces[i].y);
+    for (int i = 0; i < u_face_count; i++) {
+        float t = talking(i);
+        vec4 b = u_faces[i];
+        // Only the people the shot's about get to speak.
+        if (t <= 0.02 || u_face_seen[i] < 0.5 || b.w - b.y < biggest * 0.75) continue;
+        vec2 size = (b.zw - b.xy) * aspect;
+        // On whichever side of the head there's more picture.
+        float side = 0.5 * (b.x + b.z) < 0.5 ? 1.0 : -1.0;
+        vec2 mouth = 0.5 * (face_point(i, 3) + face_point(i, 4)) * aspect;
+        vec2 radius = size * vec2(0.72, 0.36) * smoothstep(0.0, 0.5, t);
+        vec2 middle = vec2(mouth.x + side * size.x * 1.25, b.w - size.y * 0.12);
+        middle.x = clamp(middle.x, u_video_rect.x * aspect.x + radius.x * 1.05, u_video_rect.z * aspect.x - radius.x * 1.05);
+        middle.y = clamp(middle.y, u_video_rect.y + radius.y * 1.1, u_video_rect.w - radius.y * 1.1);
+        vec2 q = (p - middle) / max(radius, vec2(1e-4));
+        float d = length(q);
+        // The tail, a thin triangle back to the mouth.
+        vec2 to_mouth = mouth - middle;
+        float along = clamp(dot(p - middle, to_mouth) / dot(to_mouth, to_mouth), 0.0, 0.92);
+        float tail = length(p - middle - to_mouth * along) / (size.x * 0.13 * (1.0 - along));
+        float shape = min(d, 0.6 + 0.4 * tail);
+        float line = 2.5 / u_resolution.y / max(radius.y, 1e-4);
+        c = mix(c, vec3(0.02), 1.0 - smoothstep(1.0 + line, 1.0 + line * 1.6, shape));
+        c = mix(c, vec3(0.98), 1.0 - smoothstep(1.0 - line * 0.3, 1.0 + line * 0.3, shape));
+        // Scribbled words, jumping with the sound.
+        float rows = floor((q.y + 0.6) * 3.0 / 1.2);
+        vec2 row = vec2(q.x, fract((q.y + 0.6) * 3.0 / 1.2) - 0.5);
+        if (rows >= 0.0 && rows < 3.0 && abs(q.x) < 0.68 - rows * 0.08 * (rows - 1.0)) {
+            float word = sin(q.x * 90.0 + rows * 2.0 + floor(u_time * 6.0)) * 0.16 * (0.4 + u_mid);
+            float gaps = smoothstep(-0.2, 0.0, sin(q.x * 11.0 + rows * 5.0));
+            c = mix(c, vec3(0.03), (1.0 - smoothstep(0.05, 0.1, abs(row.y - word))) * gaps * (1.0 - smoothstep(1.0, 1.02, d)));
+        }
+    }
+    return c;
+}
+
 float luma(vec2 uv) {
     return dot(texture(u_video, uv).rgb, vec3(0.3, 0.59, 0.11));
 }
 
+// How talkative a face is, for keeping in the alpha.
+float remembered(vec2 uv) {
+    ivec2 pixel = ivec2(gl_FragCoord.xy);
+    if (pixel.y != 0 || pixel.x >= MAX_FACES) return 1.0;
+    int i = pixel.x;
+    bool here = i < u_face_count && u_face_seen[i] > 0.5 && meshed(i);
+    if (!here) return 0.0;
+    return u_face_open[i].z > 0.2 ? 1.0 : talking(i) * pow(0.25, u_dt);
+}
+
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
-    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(c, 1.0);
+    float kept = remembered(uv);
+    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(c, kept);
     float mask = person_at(uv);
     float person = smoothstep(0.42, 0.6, mask);
     vec2 e = 2.0 / u_resolution * u_resolution.y / 720.0;
     float rim = smoothstep(0.32, 0.42, mask) * (1.0 - smoothstep(0.42, 0.56, mask));
-    if (person + rim <= 0.0) return vec4(c, 1.0);
+    if (person + rim <= 0.0) return vec4(bubbles(c, uv), kept);
     // Film is dark for print, so it's lifted a long way first.
     vec3 lifted = pow(clamp(c, 0.0, 1.0), vec3(0.5));
     vec3 flat_colour = clamp((floor(lifted * 5.0 + 0.5) / 5.0 - 0.45) * s_punch / 100.0 + 0.45, 0.0, 1.0);
@@ -34,8 +102,8 @@ vec4 effect(vec2 uv) {
     paper *= 1.0 - dots(p, max(black - 0.35, 0.0) * 1.3, 0.7854, size);
     float dx = luma(uv + vec2(e.x, 0.0)) - luma(uv - vec2(e.x, 0.0));
     float dy = luma(uv + vec2(0.0, e.y)) - luma(uv - vec2(0.0, e.y));
-    float line = smoothstep(0.1, 0.22, length(vec2(dx, dy))) * s_outline / 100.0;
+    float line = clamp(smoothstep(0.1, 0.22, length(vec2(dx, dy))) * s_outline / 100.0 + feature_line(uv, 2.0 * u_resolution.y / 720.0), 0.0, 1.0);
     vec3 printed = mix(paper, vec3(0.02), line);
     vec3 shown = mix(c, printed, person);
-    return vec4(mix(shown, vec3(0.0), rim * s_outline / 70.0), 1.0);
+    return vec4(bubbles(mix(shown, vec3(0.0), rim * s_outline / 70.0), uv), kept);
 }

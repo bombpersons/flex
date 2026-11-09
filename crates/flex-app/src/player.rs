@@ -691,7 +691,7 @@ impl Player {
                     sh.depth.clone()
                 });
                 let faces = needs.faces.then(|| {
-                    sh.faces.wanted();
+                    sh.faces.wanted(needs.mesh);
                     sh.faces.clone()
                 });
                 let fading = sh.effects.fading();

@@ -1,6 +1,7 @@
 name = "Puppet Jaw"
 description = "Everyone's jaw drops open and flaps in time with the sound, like a cut-out puppet."
 faces = true
+mesh = true
 audio = true
 
 [[settings]]
@@ -33,4 +34,5 @@ options = [
     { id = "voices", label = "Voices" },
     { id = "everything", label = "Everything" },
     { id = "bass", label = "Bass" },
+    { id = "mouth", label = "Their own mouth" },
 ]

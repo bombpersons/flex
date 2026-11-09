@@ -43,6 +43,12 @@ vec4 effect(vec2 uv) {
         float keep = s_side > 1.5 ? 1.0 : (s_side > 0.5 ? -1.0 : (dot(f.nose - mid, f.across) > 0.0 ? -1.0 : 1.0));
         vec2 from = p + f.across * (keep * abs(x) - x);
         c = mix(c, texture(u_video, from / aspect).rgb, amount);
+        // With a mesh the fold follows the middle of the face even when it's turned.
+        if (meshed(i) && face_there(uv) == i) {
+            vec2 a = face_uv(uv);
+            float kept_x = keep < 0.0 ? min(a.x, 1.0 - a.x) : max(a.x, 1.0 - a.x);
+            c = mix(c, face_texture(i, vec2(kept_x, a.y)).rgb, on_face(uv) * seen);
+        }
     }
     return vec4(c, 1.0);
 }

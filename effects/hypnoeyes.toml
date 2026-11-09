@@ -1,6 +1,7 @@
 name = "Hypno Eyes"
 description = "Everyone's eyes turn into spinning hypnotic spirals."
 faces = true
+mesh = true
 audio = true
 
 [[settings]]
@@ -43,3 +44,13 @@ max = 100
 step = 10
 unit = "%"
 default = 50
+
+[[settings]]
+key = "where"
+label = "Spirals"
+type = "choice"
+default = "real"
+options = [
+    { id = "real", label = "In their real eyes" },
+    { id = "big", label = "Big discs over them" },
+]

@@ -1,24 +1,27 @@
-// YuNet's layers as compute shaders (see face.rs). Pictures are channels first, [c][h][w], in
+// The face networks' layers as compute shaders (see face.rs). Pictures are channels first, [c][h][w], in
 // `mem`; weights are in `w`, all f32. One thread per output value.
 
 struct Params {
     h: u32, w: u32, cin: u32, cout: u32,
     a: u32, b: u32, c: u32, weights: u32,
     bias: u32, kernel: u32, stride: u32, groups: u32,
-    relu: u32, oh: u32, ow: u32, pad: u32,
+    act: u32, oh: u32, ow: u32, pad: u32,
+    alpha: u32, skip_c: u32, spare0: u32, spare1: u32,
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read_write> mem: array<f32>;
 @group(0) @binding(2) var<storage, read> w: array<f32>;
 
-// A convolution, padded by half its kernel, either full (groups 1) or depthwise (groups =
-// channels). Weights are [cout][cin / groups][kernel][kernel].
+// A convolution starting `pad` before each output, either full (groups 1) or depthwise (groups =
+// channels). Weights are [cout][cin / groups][kernel][kernel]. It can add a residual from `b`
+// (whose first `skip_c` channels line up), then apply act: 1 is ReLU, 2 PReLU with weights at
+// `alpha`, 3 ReLU6.
 @compute @workgroup_size(16, 16)
 fn conv(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= p.ow || id.y >= p.oh) { return; }
     let taps = p.kernel * p.kernel;
-    let radius = i32(p.kernel / 2u);
+    let radius = i32(p.pad);
     let plane = p.h * p.w;
     let inputs = p.cin / p.groups;
     let first = select(0u, id.z, p.groups > 1u);
@@ -32,12 +35,43 @@ fn conv(@builtin(global_invocation_id) id: vec3<u32>) {
             let yy = cy + i32(t / p.kernel) - radius;
             let xx = cx + i32(t % p.kernel) - radius;
             let inside = yy >= 0 && yy < i32(p.h) && xx >= 0 && xx < i32(p.w);
-            let at = u32(clamp(yy, 0, i32(p.h) - 1)) * p.w + u32(clamp(xx, 0, i32(p.w) - 1));
-            acc += select(0.0, mem[src + at], inside) * w[weights + t];
+            let tap = u32(clamp(yy, 0, i32(p.h) - 1)) * p.w + u32(clamp(xx, 0, i32(p.w) - 1));
+            acc += select(0.0, mem[src + tap], inside) * w[weights + t];
         }
     }
-    if (p.relu != 0u) { acc = max(acc, 0.0); }
-    mem[p.c + id.z * p.oh * p.ow + id.y * p.ow + id.x] = acc;
+    let at = id.z * p.oh * p.ow + id.y * p.ow + id.x;
+    if (id.z < p.skip_c) { acc += mem[p.b + at]; }
+    if (p.act == 1u) {
+        acc = max(acc, 0.0);
+    } else if (p.act == 2u) {
+        if (acc < 0.0) { acc *= w[p.alpha + id.z]; }
+    } else if (p.act == 3u) {
+        acc = clamp(acc, 0.0, 6.0);
+    }
+    mem[p.c + at] = acc;
+}
+
+// The same for a kernel of one, which most of the layers are, with nothing to check.
+@compute @workgroup_size(16, 16)
+fn conv1(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= p.ow || id.y >= p.oh) { return; }
+    let pixel = id.y * p.w + id.x;
+    let plane = p.h * p.w;
+    let weights = p.weights + id.z * p.cin;
+    var acc = w[p.bias + id.z];
+    for (var ci = 0u; ci < p.cin; ci++) {
+        acc += mem[p.a + ci * plane + pixel] * w[weights + ci];
+    }
+    let at = id.z * p.oh * p.ow + pixel;
+    if (id.z < p.skip_c) { acc += mem[p.b + at]; }
+    if (p.act == 1u) {
+        acc = max(acc, 0.0);
+    } else if (p.act == 2u) {
+        if (acc < 0.0) { acc *= w[p.alpha + id.z]; }
+    } else if (p.act == 3u) {
+        acc = clamp(acc, 0.0, 6.0);
+    }
+    mem[p.c + at] = acc;
 }
 
 // 2 x 2 max pooling.
@@ -57,4 +91,15 @@ fn add_up(@builtin(global_invocation_id) id: vec3<u32>) {
     let at = id.z * p.oh * p.ow + id.y * p.ow + id.x;
     let up = p.b + id.z * p.h * p.w + (id.y / 2u) * p.w + id.x / 2u;
     mem[p.c + at] = mem[p.a + at] + mem[up];
+}
+
+// The average of each channel.
+@compute @workgroup_size(16, 16)
+fn gap(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= p.ow || id.y >= p.oh) { return; }
+    let plane = p.h * p.w;
+    let src = p.a + id.z * plane;
+    var sum = 0.0;
+    for (var i = 0u; i < plane; i++) { sum += mem[src + i]; }
+    mem[p.c + id.z] = sum / f32(plane);
 }

@@ -9,6 +9,7 @@ mod autostart;
 mod depth;
 mod effect_panel;
 mod effects;
+mod face_map;
 mod faces;
 mod ground;
 mod images;

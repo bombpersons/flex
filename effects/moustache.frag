@@ -59,8 +59,18 @@ vec4 effect(vec2 uv) {
         Face f = face_frame(i, aspect);
         vec2 at = mix(f.nose, f.mouth, 0.52);
         float w = f.spread * 0.72 * s_size / 100.0;
+        vec2 across = f.across, up = f.up;
+        if (meshed(i)) {
+            // Pinned between nose and lip, so it rides on the mouth and narrows as the head turns.
+            vec2 under_nose = mesh_point(i, 2).xy * aspect, top_lip = mesh_point(i, 0).xy * aspect;
+            vec2 corners = (mesh_point(i, 291).xy - mesh_point(i, 61).xy) * aspect;
+            at = mix(under_nose, top_lip, 0.55);
+            w = length(corners) * 1.1 * s_size / 100.0;
+            across = normalize(corners + vec2(1e-6, 0.0));
+            up = vec2(-across.y, across.x);
+        }
         vec2 rel = p - at;
-        float x = dot(rel, f.across) / w, y = dot(rel, f.up) / w;
+        float x = dot(rel, across) / w, y = dot(rel, up) / w;
         float side = abs(x);
         float middle = -0.14 + 0.42 * side * side;
         float thick = 0.24 * pow(max(1.0 - side, 0.0), 0.75) + 0.02;

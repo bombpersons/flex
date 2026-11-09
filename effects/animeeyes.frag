@@ -131,11 +131,22 @@ vec4 effect(vec2 uv) {
                 c = mix(c, c * vec3(1.05, 0.72, 0.72) + vec3(0.2, 0.03, 0.08), blush * hatch * seen * s_blush / 100.0);
             }
 
+            // With a mesh, these eyes do what the real ones are doing.
+            float eye_open = open;
+            vec2 gaze = vec2(look * out_x, 0.0);
+            if (meshed(i)) {
+                if (s_blink > 0.5) eye_open = max(smoothstep(0.0, 0.7, e == 0 ? u_face_open[i].x : u_face_open[i].y), 0.03);
+                vec2 inner = mesh_point(i, e == 0 ? 133 : 362).xy * aspect, outer = mesh_point(i, e == 0 ? 33 : 263).xy * aspect;
+                float wide = max(length(outer - inner), 1e-4);
+                vec2 from_middle = iris_of(i, e) * aspect - 0.5 * (inner + outer);
+                gaze = vec2(clamp(dot(from_middle, outer - inner) / (wide * wide) * 2.4, -0.32, 0.32), clamp(dot(from_middle, up) / wide * 2.0, -0.2, 0.2));
+            }
+
             vec2 rel = p - centre;
             vec2 l = vec2(dot(rel, outward) / (size * squash), dot(rel, up) / size);
             if (dot(l, l) > 6.0) continue;
             float px = 1.6 / (u_resolution.y * size);
-            vec4 drawn = draw_eye(l, vec2(look * out_x, 0.0), open, iris_colour(i), out_x * sign(across.x + 1e-5), pulse, px);
+            vec4 drawn = draw_eye(l, gaze, eye_open, iris_colour(i), out_x * sign(across.x + 1e-5), pulse, px);
             c = mix(c, drawn.rgb, drawn.a * seen);
         }
     }

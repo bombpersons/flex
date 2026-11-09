@@ -51,10 +51,10 @@ vec4 effect(vec2 uv) {
         float seen = u_face_seen[i];
         if (seen <= 0.0) continue;
         Face f = face_frame(i, aspect);
-        vec2 aim = facing(f);
+        vec2 aim = u_face_turn[i].w > 0.5 ? u_face_turn[i].xy : facing(f);
         vec2 d = normalize(mix(f.up, normalize(aim + vec2(0.0, 1e-5)), smoothstep(0.1, 0.3, length(aim))));
         for (int e = 0; e < 2; e++) {
-            vec2 eye = e == 0 ? f.right : f.left;
+            vec2 eye = meshed(i) ? iris_of(i, e) * aspect : (e == 0 ? f.right : f.left);
             for (int h = 0; h < int(count); h++) {
                 float along = fract(t * 0.3 + float(h) / count + float(i) * 0.37 + float(e) * 0.5 / count);
                 vec2 side = vec2(-d.y, d.x);

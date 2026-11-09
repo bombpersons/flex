@@ -34,9 +34,12 @@ vec4 effect(vec2 uv) {
 
     vec3 world = mix(vec3(luma), c, 0.25) * vec3(0.72, 0.8, 1.0);
     world *= 1.0 - s_gloom / 100.0 * 0.8 * (1.0 - depth_at(uv));
-    float ridge = abs(fbm(p * 22.0) - 0.5);
+    // On a mesh the veins are in the skin, rather than sliding over it.
+    float on = on_face(uv);
+    vec2 flesh = on > 0.5 ? face_uv(uv) * 7.0 + 40.0 : p * 22.0;
+    float ridge = abs(fbm(flesh) - 0.5);
     float veins = (1.0 - smoothstep(0.0, 0.03, ridge)) * s_rot / 100.0;
-    float blotch = fbm(p * 7.0 + 3.0);
+    float blotch = fbm((on > 0.5 ? face_uv(uv) * 2.4 + 40.0 : p * 7.0) + 3.0);
     vec3 skin = pow(luma, 1.25) * vec3(0.72, 0.9, 0.62) + vec3(0.03, 0.06, 0.02);
     skin *= mix(1.0, 0.45 + 1.0 * blotch, s_rot / 100.0);
     skin = mix(skin, vec3(0.1, 0.04, 0.12), veins * 0.75);
@@ -49,13 +52,19 @@ vec4 effect(vec2 uv) {
         vec2 mouth = 0.5 * (face_point(i, 3) + face_point(i, 4)) * aspect;
         float spread = max(length(left - right), 0.25 * (u_faces[i].w - u_faces[i].y));
         for (int e = 0; e < 2; e++) {
-            vec2 eye = e == 0 ? right : left;
+            vec2 eye = meshed(i) ? iris_of(i, e) * aspect : (e == 0 ? right : left);
             float d = length((p - eye) / vec2(1.0, 0.8)) / spread;
             c = mix(c, vec3(0.0), (1.0 - smoothstep(0.18, 0.42, d)) * seen);
-            c += vec3(0.7, 0.75, 0.45) * (1.0 - smoothstep(0.02, 0.08, d)) * seen * 0.8;
+            float awake = meshed(i) ? smoothstep(0.05, 0.3, e == 0 ? u_face_open[i].x : u_face_open[i].y) : 1.0;
+            c += vec3(0.7, 0.75, 0.45) * (1.0 - smoothstep(0.02, 0.08, d)) * seen * 0.8 * awake;
         }
         float m = length((p - mouth) / vec2(1.2, 0.55)) / spread;
-        c = mix(c, vec3(0.02, 0.0, 0.0), (1.0 - smoothstep(0.3, 0.55, m)) * seen * 0.85);
+        if (meshed(i)) {
+            c = mix(c, c * vec3(0.3, 0.2, 0.3), lips_at(uv));
+            c = mix(c, vec3(0.02, 0.0, 0.0), mouth_at(uv));
+        } else {
+            c = mix(c, vec3(0.02, 0.0, 0.0), (1.0 - smoothstep(0.3, 0.55, m)) * seen * 0.85);
+        }
     }
 
     float flick = noise(vec2(t * 9.0, 1.0)) * 0.6 + noise(vec2(t * 23.0, 4.0)) * 0.4;

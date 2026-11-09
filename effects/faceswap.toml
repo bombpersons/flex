@@ -1,6 +1,7 @@
 name = "Face Swap Roulette"
 description = "Everyone's faces swap places, and swap again every few seconds."
 faces = true
+mesh = true
 
 [[settings]]
 key = "every"

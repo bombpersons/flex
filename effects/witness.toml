@@ -1,6 +1,7 @@
 name = "Witness Protection"
-description = "Faces get a black bar over the eyes, or get pixelated or blurred."
+description = "Faces get a black bar over the eyes, get pixelated or blurred, or lose their features altogether."
 faces = true
+mesh = true
 
 [[settings]]
 key = "style"
@@ -11,6 +12,7 @@ options = [
     { id = "bar", label = "Black bar" },
     { id = "pixels", label = "Pixelated" },
     { id = "blur", label = "Blurred" },
+    { id = "blank", label = "No features at all" },
 ]
 
 [[settings]]

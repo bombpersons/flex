@@ -48,6 +48,8 @@ vec4 effect(vec2 uv) {
     float h = luma * 0.3 + depth_at(uv) * 0.14;
     h = mix(h, 0.5 + luma * 0.3, person * people);
     h += face * 0.2 * people;
+    // Real faces aren't evenly warm: noses run cold, and eyes and open mouths run hot.
+    h += (eye_at(uv) * 0.1 + mouth_at(uv) * 0.2 + lips_at(uv) * 0.05 - nose_at(uv) * 0.16) * people;
     h += u_bass * 0.04 + (noise(uv * u_resolution * 0.4 + u_time * 37.0) - 0.5) * 0.02;
     vec3 c = colours(h);
     if (s_sights < 0.5) {

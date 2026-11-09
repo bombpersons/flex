@@ -37,7 +37,9 @@ vec4 effect(vec2 uv) {
         float seen = u_face_seen[i];
         if (seen <= 0.0) continue;
         Face f = face_frame(i, aspect);
-        float drop = open * f.height * 0.9 * seen;
+        float gape = s_listen > 2.5 ? (meshed(i) ? smoothstep(0.03, 0.6, u_face_open[i].z) * s_flap / 100.0 : 0.0) : open;
+        float drop = gape * f.height * 0.9 * seen;
+        if (drop < f.height * 0.03) continue;
         vec2 rel = p - f.mouth;
         float x = dot(rel, f.across);
         float y = dot(rel, f.up);

@@ -1,6 +1,7 @@
 name = "Ink Drawing People"
 description = "People become a living pen sketch on paper, while the world stays in full colour."
 segment = true
+mesh = true
 
 [[settings]]
 key = "lines"

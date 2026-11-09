@@ -21,7 +21,7 @@ vec4 effect(vec2 uv) {
         vec2 mouth = 0.5 * (face_point(i, 3) + face_point(i, 4)) * aspect;
         vec2 eyes = 0.5 * (right + left);
         vec2 up = eyes - mouth;
-        vec2 brow = eyes + up * 0.72;
+        vec2 brow = meshed(i) ? mesh_point(i, 151).xy * aspect : eyes + up * 0.72;
         float across = max(length(left - right), 1e-3);
         vec2 side = (left - right) / across;
         vec2 top = vec2(-side.y, side.x) * sign(dot(vec2(-side.y, side.x), up));
@@ -29,6 +29,8 @@ vec4 effect(vec2 uv) {
         // Upright: along the forehead is up and down in the source eye.
         vec2 local = vec2(dot(rel, top), dot(rel, side)) / (across * s_size / 100.0);
         float open = 0.45 + 0.55 * clamp(u_beat + 0.5 + 0.5 * sin(u_time * 0.9 + float(i)), 0.0, 1.0);
+        // It blinks when they blink.
+        if (meshed(i)) open = mix(0.06, open, smoothstep(0.05, 0.5, max(u_face_open[i].x, u_face_open[i].y)));
         float shape = length(local / vec2(0.34, 0.2 * open));
         float mask = (1.0 - smoothstep(0.8, 1.0, shape)) * seen;
         if (mask > 0.0) {

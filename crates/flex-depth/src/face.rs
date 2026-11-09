@@ -1,15 +1,23 @@
-//! Finding faces: YuNet (MIT, from OpenCV's model zoo) as wgpu compute shaders. It gives each
-//! face a box and five points. The plan and weights are in `yunet.bin`, made from the ONNX
-//! file by `tools/face/convert.py`.
+//! Finding faces and looking closer at them, as wgpu compute shaders. YuNet (MIT, from OpenCV's
+//! model zoo) gives each face a box and five points. MediaPipe's Face Mesh V2 (Apache 2.0) then
+//! gives one with 478 points, and a MobileNetV2 trained for head pose (MIT, by yakhyo, as used
+//! by UniFace) says which way it's turned, even side-on where the mesh gives up. The plans and
+//! weights are in `.bin` files, made by `tools/face/convert.py` and `convert_detail.py`.
 
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 
-const MODEL: &[u8] = include_bytes!("yunet.bin");
+const YUNET: &[u8] = include_bytes!("yunet.bin");
+const FACE_MESH: &[u8] = include_bytes!("face_mesh.bin");
+const HEAD_ANGLE: &[u8] = include_bytes!("head_angle.bin");
 /// The picture it takes.
 pub const WIDTH: usize = 640;
 pub const HEIGHT: usize = 352;
+/// The square pictures the closer looks take.
+pub const MESH_SIZE: usize = 256;
+pub const HEAD_SIZE: usize = 224;
+pub const MESH_POINTS: usize = 478;
 const STRIDES: [usize; 3] = [8, 16, 32];
 /// Below this it's probably not a face. Lower than YuNet's usual 0.9, which misses too many
 /// faces in films.
@@ -18,6 +26,9 @@ const MIN_SCORE: f32 = 0.6;
 const SAME_FACE: f32 = 0.3;
 const SLOT: u64 = 256;
 const OPS_PER_SUBMIT: usize = 12;
+/// What the head angle network was trained on: ImageNet's averages.
+const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -34,13 +45,16 @@ struct Params {
     kernel: u32,
     stride: u32,
     groups: u32,
-    relu: u32,
+    act: u32,
     oh: u32,
     ow: u32,
     pad: u32,
+    alpha: u32,
+    skip_c: u32,
+    _spare: [u32; 2],
 }
 
-const KERNELS: [&str; 3] = ["conv", "pool", "add_up"];
+const KERNELS: [&str; 5] = ["conv", "pool", "add_up", "gap", "conv1"];
 
 /// One face, in pixels of the picture given. Points are the right eye, left eye, nose and the
 /// right and left corners of the mouth (the person's own right and left).
@@ -52,6 +66,14 @@ pub struct Detection {
     pub height: f32,
     pub score: f32,
     pub points: [[f32; 2]; 5],
+}
+
+/// A face's 478 points in the square it was given (x and y in pixels, z in about the same
+/// units, smaller nearer), and above 0 if it thinks there's a face there at all.
+#[derive(Clone, Debug)]
+pub struct Mesh {
+    pub points: Vec<[f32; 3]>,
+    pub present: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -70,100 +92,39 @@ fn name<'a>(op: &'a serde_json::Value, key: &str) -> Result<&'a str> {
     op[key].as_str().with_context(|| format!("the plan's op has no {key}"))
 }
 
-pub struct Face {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    pipelines: Vec<wgpu::ComputePipeline>,
-    mem: wgpu::Buffer,
-    bind: wgpu::BindGroup,
-    readback: wgpu::Buffer,
-    ops: Vec<(usize, [u32; 3])>,
-    /// Where each scale's outputs are: cls, obj, bbox, kps.
-    outputs: [[Tensor; 4]; 3],
-    adapter: String,
+/// A half-precision float as a full one.
+fn from_f16(bits: u16) -> f32 {
+    let sign = u32::from(bits >> 15) << 31;
+    let exponent = u32::from(bits >> 10) & 0x1f;
+    let fraction = u32::from(bits) & 0x3ff;
+    f32::from_bits(match exponent {
+        0 if fraction == 0 => sign,
+        0 => {
+            // Too small to have a leading one: shift until it does.
+            let shift = fraction.leading_zeros() - 21;
+            sign | (113 - shift) << 23 | ((fraction << shift) & 0x3ff) << 13
+        }
+        31 => sign | 0x7f80_0000 | fraction << 13,
+        _ => sign | (exponent + 112) << 23 | fraction << 13,
+    })
 }
 
-impl Face {
-    pub fn new() -> Result<Self> {
-        if MODEL.len() < 4 {
-            bail!("the face model is empty");
-        }
-        let plan_len = u32::from_le_bytes([MODEL[0], MODEL[1], MODEL[2], MODEL[3]]) as usize;
-        let plan: serde_json::Value = serde_json::from_slice(&MODEL[4..4 + plan_len]).context("reading the face model's plan")?;
-        let weights: Vec<f32> = MODEL[4 + plan_len..].as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
+/// What every network shares.
+#[derive(Clone)]
+struct Gpu {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    layout: wgpu::BindGroupLayout,
+    pipelines: Vec<wgpu::ComputePipeline>,
+}
 
-        let mut tensors: HashMap<String, Tensor> = HashMap::new();
-        let mut end = (3 * HEIGHT * WIDTH) as u32;
-        tensors.insert("input".into(), Tensor { at: 0, channels: 3, h: HEIGHT, w: WIDTH });
-        let groups = |n: usize| n.div_ceil(16) as u32;
-        let mut ops = Vec::new();
-        let mut params = Vec::new();
-        for op in plan["ops"].as_array().context("the plan has no ops")? {
-            let input = *tensors.get(name(op, "in")?).context("an op's input comes before it's made")?;
-            let (kernel, mut p, out) = match name(op, "op")? {
-                "conv" => {
-                    let (stride, cout) = (field(op, "stride")?, field(op, "cout")?);
-                    let (oh, ow) = ((input.h - 1) / stride + 1, (input.w - 1) / stride + 1);
-                    let p = Params {
-                        cin: field(op, "cin")? as u32,
-                        cout: cout as u32,
-                        weights: field(op, "w")? as u32,
-                        bias: field(op, "b")? as u32,
-                        kernel: field(op, "kernel")? as u32,
-                        stride: stride as u32,
-                        groups: field(op, "groups")? as u32,
-                        relu: u32::from(op["relu"].as_bool().unwrap_or(false)),
-                        ..Default::default()
-                    };
-                    (0, p, Tensor { at: 0, channels: cout, h: oh, w: ow })
-                }
-                "pool" => (1, Params::default(), Tensor { at: 0, channels: input.channels, h: input.h / 2, w: input.w / 2 }),
-                "add_up" => {
-                    let up = *tensors.get(name(op, "up")?).context("an op's input comes before it's made")?;
-                    if up.h * 2 != input.h || up.w * 2 != input.w {
-                        bail!("the picture's size has to be a multiple of 32");
-                    }
-                    (2, Params { b: up.at, ..Default::default() }, Tensor { at: 0, channels: input.channels, h: input.h, w: input.w })
-                }
-                other => bail!("unknown op {other}"),
-            };
-            let out = Tensor { at: end, ..out };
-            end += (out.channels * out.h * out.w) as u32;
-            // add_up's h and w are B's; the others' are the input's.
-            let (h, w) = if kernel == 2 { (input.h / 2, input.w / 2) } else { (input.h, input.w) };
-            p = Params { h: h as u32, w: w as u32, a: input.at, c: out.at, oh: out.h as u32, ow: out.w as u32, ..p };
-            params.push(p);
-            ops.push((kernel, [groups(out.w), groups(out.h), out.channels as u32]));
-            tensors.insert(name(op, "out")?.to_owned(), out);
-        }
-        let output = |kind: &str, stride: usize| -> Result<Tensor> {
-            let name = plan["outputs"][format!("{kind}_{stride}")].as_str().context("the plan has no output")?;
-            tensors.get(name).copied().context("the plan's output isn't made")
-        };
-        let mut outputs = Vec::new();
-        for stride in STRIDES {
-            outputs.push([output("cls", stride)?, output("obj", stride)?, output("bbox", stride)?, output("kps", stride)?]);
-        }
-        let outputs: [[Tensor; 4]; 3] = outputs.try_into().map_err(|_| anyhow::anyhow!("three scales expected"))?;
-
+impl Gpu {
+    fn new() -> Result<(Self, String)> {
         let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
             .map_err(|e| anyhow::anyhow!("no GPU adapter: {e}"))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("flex-face"), ..Default::default() }))
             .map_err(|e| anyhow::anyhow!("GPU device: {e}"))?;
-        let storage = |label, size: u64, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
-        let w = storage("weights", weights.len() as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-        queue.write_buffer(&w, 0, bytemuck::cast_slice(&weights));
-        let mem_bytes = end as u64 * 4;
-        let mem = storage("mem", mem_bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
-        let readback = storage("readback", mem_bytes, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
-        let slots = storage("params", SLOT * params.len() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
-        let mut bytes = vec![0u8; params.len() * SLOT as usize];
-        for (i, p) in params.iter().enumerate() {
-            bytes[i * SLOT as usize..][..std::mem::size_of::<Params>()].copy_from_slice(bytemuck::bytes_of(p));
-        }
-        queue.write_buffer(&slots, 0, &bytes);
-
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None };
         let storage_entry = |read_only| wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -174,19 +135,10 @@ impl Face {
                 entry(2, storage_entry(true)),
             ],
         });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("flex-face"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &slots, offset: 0, size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64) }) },
-                wgpu::BindGroupEntry { binding: 1, resource: mem.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: w.as_entire_binding() },
-            ],
-        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("flex-face"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
         let source = wgpu::ShaderModuleDescriptor { label: Some("face.wgsl"), source: wgpu::ShaderSource::Wgsl(include_str!("face.wgsl").into()) };
-        // SAFETY: our own shaders, and every offset and size comes from the plan above, which
-        // `mem` and the weights are made to fit.
+        // SAFETY: our own shaders, and every offset and size comes from a plan, which each
+        // network's `mem` and weights are made to fit.
         let module = unsafe { device.create_shader_module_trusted(source, wgpu::ShaderRuntimeChecks::unchecked()) };
         let pipelines = KERNELS
             .iter()
@@ -201,8 +153,178 @@ impl Face {
                 })
             })
             .collect();
-        drop(w); // the bind group keeps it
-        Ok(Self { device, queue, pipelines, mem, bind, readback, ops, outputs, adapter: adapter.get_info().name })
+        Ok((Self { device, queue, layout, pipelines }, adapter.get_info().name))
+    }
+}
+
+/// One network: its plan, weights and memory.
+struct Net {
+    gpu: Gpu,
+    mem: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    readback: wgpu::Buffer,
+    ops: Vec<(usize, [u32; 3])>,
+    /// Where the outputs asked for are, and the part of `mem` that holds them.
+    outputs: Vec<Tensor>,
+    span: (u64, u64),
+}
+
+impl Net {
+    /// `input` is the picture's channels, height and width; `wanted` the outputs to read.
+    fn new(gpu: &Gpu, model: &[u8], input: (usize, usize, usize), wanted: &[String]) -> Result<Self> {
+        if model.len() < 4 {
+            bail!("the face model is empty");
+        }
+        let plan_len = u32::from_le_bytes([model[0], model[1], model[2], model[3]]) as usize;
+        let plan: serde_json::Value = serde_json::from_slice(&model[4..4 + plan_len]).context("reading the face model's plan")?;
+        let bytes = &model[4 + plan_len..];
+        let weights: Vec<f32> = if plan["format"].as_str() == Some("f16") {
+            bytes.as_chunks::<2>().0.iter().map(|b| from_f16(u16::from_le_bytes(*b))).collect()
+        } else {
+            bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
+        };
+
+        let mut tensors: HashMap<String, Tensor> = HashMap::new();
+        let (channels, height, width) = input;
+        let mut end = (channels * height * width) as u32;
+        tensors.insert("input".into(), Tensor { at: 0, channels, h: height, w: width });
+        let groups = |n: usize| n.div_ceil(16) as u32;
+        let mut ops = Vec::new();
+        let mut params = Vec::new();
+        for op in plan["ops"].as_array().context("the plan has no ops")? {
+            let input = *tensors.get(name(op, "in")?).context("an op's input comes before it's made")?;
+            let (kernel, mut p, out) = match name(op, "op")? {
+                "conv" => {
+                    let (stride, cout, size) = (field(op, "stride")?, field(op, "cout")?, field(op, "kernel")?);
+                    let (oh, ow) = ((input.h - 1) / stride + 1, (input.w - 1) / stride + 1);
+                    let act = op["act"].as_u64().unwrap_or(u64::from(op["relu"].as_bool().unwrap_or(false))) as u32;
+                    let skip = match op["skip"].as_str() {
+                        Some(skip) => tensors.get(skip).context("an op's input comes before it's made")?.at,
+                        None => 0,
+                    };
+                    let p = Params {
+                        cin: field(op, "cin")? as u32,
+                        cout: cout as u32,
+                        weights: field(op, "w")? as u32,
+                        bias: field(op, "b")? as u32,
+                        kernel: size as u32,
+                        stride: stride as u32,
+                        groups: field(op, "groups")? as u32,
+                        act,
+                        b: skip,
+                        pad: op["pad"].as_u64().unwrap_or(size as u64 / 2) as u32,
+                        alpha: op["alpha"].as_u64().unwrap_or(0) as u32,
+                        skip_c: op["skip_c"].as_u64().unwrap_or(0) as u32,
+                        ..Default::default()
+                    };
+                    (if size == 1 && p.groups == 1 { 4 } else { 0 }, p, Tensor { at: 0, channels: cout, h: oh, w: ow })
+                }
+                "pool" => (1, Params::default(), Tensor { at: 0, channels: input.channels, h: input.h / 2, w: input.w / 2 }),
+                "add_up" => {
+                    let up = *tensors.get(name(op, "up")?).context("an op's input comes before it's made")?;
+                    if up.h * 2 != input.h || up.w * 2 != input.w {
+                        bail!("the picture's size has to be a multiple of 32");
+                    }
+                    (2, Params { b: up.at, ..Default::default() }, Tensor { at: 0, channels: input.channels, h: input.h, w: input.w })
+                }
+                "gap" => (3, Params::default(), Tensor { at: 0, channels: input.channels, h: 1, w: 1 }),
+                other => bail!("unknown op {other}"),
+            };
+            let out = Tensor { at: end, ..out };
+            end += (out.channels * out.h * out.w) as u32;
+            // add_up's h and w are B's; the others' are the input's.
+            let (h, w) = if kernel == 2 { (input.h / 2, input.w / 2) } else { (input.h, input.w) };
+            p = Params { h: h as u32, w: w as u32, a: input.at, c: out.at, oh: out.h as u32, ow: out.w as u32, ..p };
+            params.push(p);
+            ops.push((kernel, [groups(out.w), groups(out.h), out.channels as u32]));
+            tensors.insert(name(op, "out")?.to_owned(), out);
+        }
+        let mut outputs = Vec::new();
+        for kind in wanted {
+            let name = plan["outputs"][kind].as_str().context("the plan has no output")?;
+            outputs.push(*tensors.get(name).context("the plan's output isn't made")?);
+        }
+        let first = outputs.iter().map(|t| t.at).min().unwrap_or(0) as u64 * 4;
+        let last = outputs.iter().map(|t| t.at as u64 + (t.channels * t.h * t.w) as u64).max().unwrap_or(0) * 4;
+
+        let device = &gpu.device;
+        let storage = |label, size: u64, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
+        let w = storage("weights", weights.len() as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        gpu.queue.write_buffer(&w, 0, bytemuck::cast_slice(&weights));
+        let mem = storage("mem", end as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
+        let readback = storage("readback", last - first, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+        let slots = storage("params", SLOT * params.len() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        let mut bytes = vec![0u8; params.len() * SLOT as usize];
+        for (i, p) in params.iter().enumerate() {
+            bytes[i * SLOT as usize..][..std::mem::size_of::<Params>()].copy_from_slice(bytemuck::bytes_of(p));
+        }
+        gpu.queue.write_buffer(&slots, 0, &bytes);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("flex-face"),
+            layout: &gpu.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &slots, offset: 0, size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64) }) },
+                wgpu::BindGroupEntry { binding: 1, resource: mem.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: w.as_entire_binding() },
+            ],
+        });
+        Ok(Self { gpu: gpu.clone(), mem, bind, readback, ops, outputs, span: (first, last) })
+    }
+
+    /// The asked-for outputs of a picture, channels first, each as the shaders leave it.
+    fn run(&mut self, input: &[f32]) -> Result<Vec<Vec<f32>>> {
+        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
+        queue.write_buffer(&self.mem, 0, bytemuck::cast_slice(input));
+        for (part, ops) in self.ops.chunks(OPS_PER_SUBMIT).enumerate() {
+            let mut enc = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                for (i, (kernel, g)) in ops.iter().enumerate() {
+                    pass.set_pipeline(&self.gpu.pipelines[*kernel]);
+                    let slot = (part * OPS_PER_SUBMIT + i) as u64 * SLOT;
+                    pass.set_bind_group(0, &self.bind, &[slot as u32]);
+                    pass.dispatch_workgroups(g[0], g[1], g[2]);
+                }
+            }
+            queue.submit([enc.finish()]);
+            device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        let (first, last) = self.span;
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(&self.mem, first, &self.readback, 0, last - first);
+        queue.submit([enc.finish()]);
+        let slice = self.readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let out = {
+            let view = slice.get_mapped_range().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let floats: &[f32] = bytemuck::cast_slice(&view);
+            self.outputs.iter().map(|t| floats[(t.at as usize - first as usize / 4)..][..t.channels * t.h * t.w].to_vec()).collect()
+        };
+        self.readback.unmap();
+        Ok(out)
+    }
+}
+
+pub struct Face {
+    gpu: Gpu,
+    yunet: Net,
+    /// Made when first asked for, as most effects only want boxes.
+    mesh: Option<Net>,
+    head: Option<Net>,
+    adapter: String,
+    /// The tensors YuNet's outputs are read from, scale by scale.
+    shapes: [[Tensor; 4]; 3],
+}
+
+impl Face {
+    pub fn new() -> Result<Self> {
+        let (gpu, adapter) = Gpu::new()?;
+        let wanted: Vec<String> = STRIDES.iter().flat_map(|s| ["cls", "obj", "bbox", "kps"].map(|k| format!("{k}_{s}"))).collect();
+        let yunet = Net::new(&gpu, YUNET, (3, HEIGHT, WIDTH), &wanted)?;
+        let at = |scale: usize, kind: usize| yunet.outputs[scale * 4 + kind];
+        let shapes = [0, 1, 2].map(|s| [0, 1, 2, 3].map(|k| at(s, k)));
+        Ok(Self { gpu, yunet, mesh: None, head: None, adapter, shapes })
     }
 
     /// The GPU it runs on.
@@ -213,6 +335,43 @@ impl Face {
     /// Faces in a picture of `WIDTH` × `HEIGHT`, as RGB bytes row by row from the top.
     pub fn run(&mut self, rgb: &[u8]) -> Result<Vec<Detection>> {
         Ok(decode(&self.outputs_for(rgb)?))
+    }
+
+    /// The mesh of the face in a square of `MESH_SIZE`, as RGB bytes row by row from the top.
+    pub fn mesh(&mut self, rgb: &[u8]) -> Result<Mesh> {
+        if rgb.len() != MESH_SIZE * MESH_SIZE * 3 {
+            bail!("expected a {MESH_SIZE} square of RGB, got {} bytes", rgb.len());
+        }
+        if self.mesh.is_none() {
+            self.mesh = Some(Net::new(&self.gpu, FACE_MESH, (3, MESH_SIZE, MESH_SIZE), &["points".to_owned(), "present".to_owned()])?);
+        }
+        let mut input = vec![0.0f32; 3 * MESH_SIZE * MESH_SIZE];
+        for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
+            for c in 0..3 {
+                input[c * MESH_SIZE * MESH_SIZE + i] = f32::from(px[c]) / 255.0;
+            }
+        }
+        let out = self.mesh.as_mut().context("just made")?.run(&input)?;
+        let points = out[0].as_chunks::<3>().0.to_vec();
+        Ok(Mesh { points, present: out[1][0] })
+    }
+
+    /// Which way the head in a square of `HEAD_SIZE` is turned, as a rotation matrix.
+    pub fn head(&mut self, rgb: &[u8]) -> Result<[[f32; 3]; 3]> {
+        if rgb.len() != HEAD_SIZE * HEAD_SIZE * 3 {
+            bail!("expected a {HEAD_SIZE} square of RGB, got {} bytes", rgb.len());
+        }
+        if self.head.is_none() {
+            self.head = Some(Net::new(&self.gpu, HEAD_ANGLE, (3, HEAD_SIZE, HEAD_SIZE), &["six".to_owned()])?);
+        }
+        let mut input = vec![0.0f32; 3 * HEAD_SIZE * HEAD_SIZE];
+        for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
+            for c in 0..3 {
+                input[c * HEAD_SIZE * HEAD_SIZE + i] = (f32::from(px[c]) / 255.0 - MEAN[c]) / STD[c];
+            }
+        }
+        let out = self.head.as_mut().context("just made")?.run(&input)?;
+        Ok(rotation(&out[0]))
     }
 
     /// Each scale's cls, obj, bbox and kps cell by cell, as the last convolutions leave them
@@ -228,38 +387,23 @@ impl Face {
                 input[c * HEIGHT * WIDTH + i] = f32::from(px[2 - c]);
             }
         }
-        self.queue.write_buffer(&self.mem, 0, bytemuck::cast_slice(&input));
-        for (part, ops) in self.ops.chunks(OPS_PER_SUBMIT).enumerate() {
-            let mut enc = self.device.create_command_encoder(&Default::default());
-            {
-                let mut pass = enc.begin_compute_pass(&Default::default());
-                for (i, (kernel, g)) in ops.iter().enumerate() {
-                    pass.set_pipeline(&self.pipelines[*kernel]);
-                    let slot = (part * OPS_PER_SUBMIT + i) as u64 * SLOT;
-                    pass.set_bind_group(0, &self.bind, &[slot as u32]);
-                    pass.dispatch_workgroups(g[0], g[1], g[2]);
-                }
-            }
-            self.queue.submit([enc.finish()]);
-            self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{e}"))?;
-        }
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        let tensors = self.outputs;
-        let first = tensors.iter().flatten().map(|t| t.at).min().unwrap_or(0) as u64 * 4;
-        let last = tensors.iter().flatten().map(|t| t.at as u64 + (t.channels * t.h * t.w) as u64).max().unwrap_or(0) * 4;
-        enc.copy_buffer_to_buffer(&self.mem, first, &self.readback, 0, last - first);
-        self.queue.submit([enc.finish()]);
-        let slice = self.readback.slice(..last - first);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let out = {
-            let view = slice.get_mapped_range().map_err(|e| anyhow::anyhow!("{e}"))?;
-            let floats: &[f32] = bytemuck::cast_slice(&view);
-            tensors.map(|scale| scale.map(|t| cells(&floats[(t.at as usize - first as usize / 4)..][..t.channels * t.h * t.w], t)))
-        };
-        self.readback.unmap();
-        Ok(out)
+        let out = self.yunet.run(&input)?;
+        let shapes = self.shapes;
+        Ok([0, 1, 2].map(|s| [0, 1, 2, 3].map(|k| cells(&out[s * 4 + k], shapes[s][k]))))
     }
+}
+
+/// Six numbers to a rotation matrix: the first two columns, made square to each other.
+fn rotation(six: &[f32]) -> [[f32; 3]; 3] {
+    let normal = |v: [f32; 3]| {
+        let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-8);
+        v.map(|x| x / n)
+    };
+    let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let x = normal([six[0], six[1], six[2]]);
+    let z = normal(cross(x, [six[3], six[4], six[5]]));
+    let y = cross(z, x);
+    std::array::from_fn(|row| [x[row], y[row], z[row]])
 }
 
 /// Channels first to cell by cell.
@@ -405,5 +549,81 @@ mod tests {
         }
         eprintln!("{:.1} ms a picture", started.elapsed().as_secs_f64() * 1000.0 / runs as f64);
         eprintln!("{:#?}", face.run(&rgb).unwrap());
+    }
+
+    /// Compares a stretch of outputs with a reference file, returning the worst difference.
+    fn worst(got: &[f32], reference: &[f32]) -> f32 {
+        assert_eq!(got.len(), reference.len());
+        got.iter().zip(reference).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()))
+    }
+
+    fn floats(var: &str) -> Vec<f32> {
+        std::fs::read(std::env::var(var).expect(var)).unwrap().as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
+    }
+
+    /// Compares the mesh with TensorFlow Lite's (needs a GPU, and the files from
+    /// tools/face/convert_detail.py mesh --reference):
+    /// `FLEX_FACE_RGB=out.rgb FLEX_FACE_REF=out.bin cargo test -p flex-depth mesh_matches_tflite -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn mesh_matches_tflite() {
+        let rgb = std::fs::read(std::env::var("FLEX_FACE_RGB").expect("FLEX_FACE_RGB")).unwrap();
+        let reference = floats("FLEX_FACE_REF");
+        let mut face = Face::new().unwrap();
+        let started = std::time::Instant::now();
+        let mesh = face.mesh(&rgb).unwrap();
+        eprintln!("first run, loading included: {:?}", started.elapsed());
+        let flat: Vec<f32> = mesh.points.iter().flatten().copied().collect();
+        let err = worst(&flat, &reference[..1434]);
+        eprintln!("points: max error {err:.2e} pixels; present {} against {}", mesh.present, reference[1434]);
+        assert!(err < 0.05, "worst error {err:.2e}");
+        assert!((mesh.present - reference[1434]).abs() < 0.01);
+        let runs = 60;
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            face.mesh(&rgb).unwrap();
+        }
+        eprintln!("{:.1} ms a face", started.elapsed().as_secs_f64() * 1000.0 / runs as f64);
+    }
+
+    /// Compares the head angle with ONNX Runtime's (needs a GPU, and the files from
+    /// tools/face/convert_detail.py head --reference):
+    /// `FLEX_FACE_RGB=out.rgb FLEX_FACE_REF=out.bin cargo test -p flex-depth head_matches_onnx -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn head_matches_onnx() {
+        let rgb = std::fs::read(std::env::var("FLEX_FACE_RGB").expect("FLEX_FACE_RGB")).unwrap();
+        let reference = floats("FLEX_FACE_REF");
+        let mut face = Face::new().unwrap();
+        let flat: Vec<f32> = face.head(&rgb).unwrap().iter().flatten().copied().collect();
+        let err = worst(&flat, &reference);
+        eprintln!("rotation: max error {err:.2e}\n{flat:?}\n{reference:?}");
+        // Half-precision weights cost about 0.2 degrees, far below what the network can tell.
+        assert!(err < 5e-3, "worst error {err:.2e}");
+        let runs = 60;
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            face.head(&rgb).unwrap();
+        }
+        eprintln!("{:.1} ms a face", started.elapsed().as_secs_f64() * 1000.0 / runs as f64);
+    }
+
+    #[test]
+    fn half_precision_floats_read_right() {
+        assert_eq!(from_f16(0x0000), 0.0);
+        assert_eq!(from_f16(0x3c00), 1.0);
+        assert_eq!(from_f16(0xc000), -2.0);
+        assert_eq!(from_f16(0x3e00), 1.5);
+        assert_eq!(from_f16(0x7bff), 65504.0);
+        assert_eq!(from_f16(0x0400), 2f32.powi(-14));
+        assert_eq!(from_f16(0x0001), 2f32.powi(-24));
+        assert_eq!(from_f16(0x0200), 2f32.powi(-15));
+        assert_eq!(from_f16(0x03ff), 1023.0 * 2f32.powi(-24));
+    }
+
+    #[test]
+    fn six_numbers_make_a_rotation() {
+        let r = rotation(&[2.0, 0.0, 0.0, 1.0, 3.0, 0.0]);
+        assert_eq!(r, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
     }
 }

@@ -1,0 +1,22 @@
+// Drive-In: the picture so far, wrapped around each face using the face's own coordinates, so it
+// bends over the nose and holds on as the head turns. It's drawn from the last frame shown, so
+// faces in the picture on the face have pictures on them too.
+
+vec4 effect(vec2 uv) {
+    vec3 c = texture(u_video, uv).rgb;
+    float on = on_face(uv) * (1.0 - eye_at(uv)) * (1.0 - lips_at(uv)) * (1.0 - mouth_at(uv));
+    if (on <= 0.0) return vec4(c, 1.0);
+    vec2 a = face_uv(uv);
+    // Fitted to the face, film-shaped, with its centre between the eyes and nose.
+    vec2 q = (a - vec2(0.5, 0.48)) / vec2(0.5, 0.46);
+    float edge = max(abs(q.x), abs(q.y));
+    vec2 at = q * 0.4 + 0.5;
+    vec3 screen = texture(u_prev, mix(u_video_rect.xy, u_video_rect.zw, clamp(at, 0.0, 1.0))).rgb;
+    float luma = dot(c, vec3(0.3, 0.59, 0.11));
+    // It's still lit by the room, and it's a cheap old screen.
+    screen = pow(screen, vec3(0.75)) * (0.95 + luma * 1.1 + 0.25 * u_beat);
+    screen *= 0.86 + 0.14 * sin(a.y * 500.0);
+    float within = 1.0 - smoothstep(0.97, 1.05, edge);
+    c = mix(c, mix(vec3(0.03), screen, within), on * s_bright / 100.0);
+    return vec4(c, 1.0);
+}

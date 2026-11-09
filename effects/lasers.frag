@@ -53,7 +53,7 @@ vec4 effect(vec2 uv) {
         vec2 right = face_point(i, 0) * aspect;
         vec2 left = face_point(i, 1) * aspect;
         float spread = max(length(left - right), 0.004);
-        vec2 aim = facing(i, aspect);
+        vec2 aim = u_face_turn[i].w > 0.5 ? u_face_turn[i].xy : facing(i, aspect);
         // Close to head-on the direction means little, so the beam is short or not there at all.
         float out_of_screen = smoothstep(0.08, 0.3, length(aim));
         float reach = 3.0 * out_of_screen * out_of_screen;
@@ -63,10 +63,16 @@ vec4 effect(vec2 uv) {
         float width = spread * 0.05 * (0.6 + power) * flare;
         for (int e = 0; e < 2; e++) {
             vec2 eye = e == 0 ? right : left;
+            float lit = 1.0;
+            if (meshed(i)) {
+                eye = iris_of(i, e) * aspect;
+                // Beams only come out of open eyes.
+                lit = smoothstep(0.05, 0.35, e == 0 ? u_face_open[i].x : u_face_open[i].y);
+            }
             // A beam starts at the face, so anything nearer than that hides it.
             float b = beam(p, eye, d, width, reach) * (1.0 - smoothstep(0.04, 0.12, depth_at(uv) - depth_at(0.5 * (right + left) / aspect)));
             float flash = 1.0 / (1.0 + pow(length(p - eye) / (spread * 0.14 * flare * (2.2 - 1.2 * out_of_screen)), 2.0));
-            light += (b * power + flash * 0.9 * power) * u_face_seen[i];
+            light += (b * power + flash * 0.9 * power) * u_face_seen[i] * lit;
         }
     }
     vec3 colour = tint();

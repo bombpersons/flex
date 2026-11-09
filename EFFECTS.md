@@ -61,6 +61,16 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Masks**: shows what Flex can tell apart in the picture: people, walls and sky.
 - **Faces**: shows what Flex can see of the faces in the picture, for checking and for
   making effects.
+- **Face Mesh**: shows what Flex can see of a face up close: its mesh, which way the head points,
+  and how open the eyes and mouth are, for checking and for working on an effect.
+- **Mouth Portal**: open mouths are holes into a swirling galaxy.
+- **War Paint**: glowing tribal markings painted on every face, flaring on the beat.
+- **Cyborg**: half of every face is torn away to show steel plates, running circuits and a red eye.
+- **Porcelain Dolls**: faces are glazed china with painted lips, and they crack as a shot goes on.
+- **X-Ray**: a scanner sweeps across the picture, turning faces into skulls that talk when they do.
+- **Drive-In**: everyone's skin is a screen showing the film, on and on forever.
+- **Follow Your Nose**: a beam of light comes out of everyone's nose, wherever their head is
+  pointing.
 - **Spotlight**: faces stay as they are while everything around them melts and dims.
 - **Laser Eyes**: a beam from each eye, going the way the face is pointing and flaring on the
   beat.
@@ -96,7 +106,7 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Smoke People**: people come apart at the edges and blow away as smoke.
 - **Pixel People**: people turn to chunky pixels, which change size on the beat.
 - **Ink Drawing People**: people become a living pen sketch in a full-colour world.
-- **Comic Book People**: people are printed in halftone dots with thick outlines.
+- **Comic Book People**: people are printed in halftone dots with thick outlines, and get speech bubbles while they talk.
 - **Fire People**: people burn from the feet up, with flames that follow them.
 - **Tiny People**: people shrink where they are, leaving the room huge.
 - **Time-Lagged Body**: the tops of people run behind their bottoms, so they ripple as they move.
@@ -111,15 +121,15 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Clown Car**: greasepaint, a big red smile and a red nose that swells on the beat.
 - **Deal With It**: pixel sunglasses drop out of the sky onto every face.
 - **Blush Meter**: faces go redder the louder it gets, until steam comes out of their ears.
-- **Witness Protection**: a black bar over the eyes, or faces pixelated or blurred.
+- **Witness Protection**: a black bar over the eyes, faces pixelated or blurred, or no features at all.
 - **Moustache Everyone**: a curly handlebar moustache under every nose.
 - **Love Beams**: hearts stream out of people's eyes the way they're facing.
 - **Kaleidoface**: a kaleidoscope of someone's face, centred on their nose as they move.
-- **Anime Eyes**: big drawn anime eyes, inked and shining, that blink, look where the head's facing and sparkle on the beat.
+- **Anime Eyes**: big drawn anime eyes, inked and shining, that blink when the real ones do, look where they look and sparkle on the beat.
 - **Hypno Eyes**: eyes turn into spinning spirals.
 - **Perfect Symmetry**: each face is one half mirrored, which is more unsettling than you'd think.
 - **Spinning Features**: eyes and mouths turn round and round where they are.
-- **Puppet Jaw**: jaws drop open and flap with the sound, like a cut-out puppet.
+- **Puppet Jaw**: jaws drop open and flap with the sound or with their own mouths, like a cut-out puppet.
 - **Giraffe Necks**: heads rise on long stretchy necks that sway to the music.
 - **Focus Pull**: a shallow film lens drifting between near and far, or held on a face.
 - **Tiny World**: a thin slice in focus and toy-bright colours make everything a model railway.
@@ -200,6 +210,14 @@ don't declare them yourself:
 | `float u_face_seen[MAX_FACES]` | 0 to 1, fading as a face comes and goes; multiply by it so faces don't pop. It's 0 for empty slots |
 | `vec2 face_point(int face, int point)` | where on the screen a face's point is: 0 right eye, 1 left eye, 2 nose, 3 right corner of the mouth, 4 left (the person's own right and left) |
 | `float face_at(vec2 uv)` | a function: how much of any face is at that point of the screen, from 0 to 1, soft at the edges |
+| `vec3 mesh_point(int face, int n)`, `float u_face_mesh[MAX_FACES]` | a function: the mesh's point `n` (0 to 477, MediaPipe's numbering): x, y on screen and z, smaller nearer, in picture widths (with `mesh = true`). `u_face_mesh` says how much of a mesh that face has, from 0 for faces side-on |
+| `vec3 u_face_open[MAX_FACES]` | how open the person's right eye, left eye and mouth are, from 0 to 1 (with `mesh = true`, and only where `u_face_mesh` is above 0) |
+| `vec4 u_face_turn[MAX_FACES]` | which way a head points: x to the right of the picture, y up, z towards the viewer, and w 1 if that's known (with `mesh = true`). Side-on faces have this even with no mesh |
+| `float on_face(vec2 uv)`, `vec2 face_uv(vec2 uv)`, `int face_there(vec2 uv)` | functions: how much of a face a point on screen is, from 0 to 1; where it is on the face (x 0 to 1 across it, y from the chin up, the same spot on every face whichever way it's turned); and which face it is, or -1 (with `mesh = true`) |
+| `float skin_at(vec2 uv)`, `lips_at`, `nose_at`, `brows_at`, `eye_at`, `iris_at`, `mouth_at` | functions: how much of a point on screen is that part of a face, from 0 to 1 (with `mesh = true`). `mouth_at` is the gap between the lips, `eye_at` the whole opening of the eye and `iris_at` the coloured part of it |
+| `vec4 face_texture(int face, vec2 at)` | a function: a face's pixels at a position on it (as `face_uv` gives), for drawing it somewhere else; alpha is 0 off the face (with `mesh = true`) |
+| `float hair_at(vec2 uv)` | a function: roughly where hair is: the person above and around each face (with `mesh = true` and `segment = true`). It knows nothing of individual strands |
+| `float face_roll(int face)` | a function: how far a head tilts to the side, anticlockwise, in radians (with `faces = true`) |
 | `int who_at(vec2 uv)` | a function: which face a point of the picture belongs with, as an index into `u_faces`, or -1 (with `faces = true`). Use it with `person_at` to treat people separately |
 | `float u_dt` | seconds since the last frame was drawn |
 | `float u_cut`, `u_since_cut` | 1 on a scene cut, fading to 0 in about half a second, and seconds since the last one, for the frame on screen (with `cuts = true`) |
@@ -226,6 +244,7 @@ audio = true                   # the sound uniforms; default false
 depth = true                   # how far away things are; default false
 segment = true                 # where people, walls and sky are; default false
 faces = true                   # where faces are; default false
+mesh = true                    # a closer look at faces, as well as where they are; default false
 scale = 1.0                    # work at this fraction of the screen's size (0.25–1), then
                                # scale up: lower is lighter on the GPU; default 1
 history = true                 # older frames; default false
@@ -299,6 +318,22 @@ depth, the picture and sound are held back a moment, usually under a fifth of a 
 also lets Flex steady each face using the frames either side. A face keeps its slot in the arrays while it's on screen. It works best on
 live action; very small faces, faces in profile or turned away, and cartoon characters are
 missed some of the time, so effects need to look fine with no faces at all.
+
+With `mesh = true`, Flex also looks closer at each frame's faces, on that same frame: up to
+three of the largest get a 478-point mesh from MediaPipe's
+[Face Mesh V2](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker) (Apache
+2.0), which gives how open the eyes and mouth are too, and a
+[head pose network](https://github.com/yakhyo/head-pose-estimation) (MIT) says which way heads
+point, taking turns if there are several. Mesh costs more GPU time than `faces` alone, so only
+ask for it if you'll use it. The mesh gives up on faces turned far to the side, so check
+`u_face_mesh`; the direction carries on working there, and is left out for the backs of heads.
+
+The mesh is also drawn into maps of the picture for every frame, so a shader can ask about any
+pixel: `on_face`, the parts of the face (`skin_at`, `lips_at` and so on), and `face_uv`, which is
+the same place on every face however it's turned. Painting in `face_uv` keeps things stuck to the
+skin. `face_texture` gives a face's own pixels at any such position, for moving a face to
+somewhere else. They only cover the face itself, from hairline to chin, and only faces with a
+mesh; `meshed(face)` says whether a slot has one, so an effect can fall back on `u_faces`.
 
 ## Testing
 

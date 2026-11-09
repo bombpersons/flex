@@ -1,6 +1,7 @@
 name = "Hall of Faces"
 description = "Each face sprouts a turning ring of copies of itself, in colours it should not be."
 faces = true
+mesh = true
 audio = true
 
 [[settings]]

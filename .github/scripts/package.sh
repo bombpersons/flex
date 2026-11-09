@@ -81,6 +81,8 @@ done
 
 cp "$ROOT/crates/flex-web/web/vendor/jassub/LICENSE.txt" "$DIR/licenses/jassub-LICENSE.txt"
 cp "$ROOT/crates/flex-depth/src/yunet.LICENSE" "$DIR/licenses/yunet-LICENSE.txt"
+cp "$ROOT/crates/flex-depth/src/face_mesh.LICENSE" "$DIR/licenses/face-mesh-LICENSE.txt"
+cp "$ROOT/crates/flex-depth/src/head_angle.LICENSE" "$DIR/licenses/head-angle-LICENSE.txt"
 JASSUB_VERSION=$(sed -n 's/^JASSUB \([0-9.]*\).*/\1/p' "$ROOT/crates/flex-web/web/vendor/jassub/README.txt")
 
 cp "$EXE" "$DIR/flex.exe"
@@ -141,6 +143,14 @@ libmpv (libmpv-2.dll), mpv commit $MPV_COMMIT
 YuNet (built into flex.exe; finds faces for video effects)
   License: MIT (licenses/yunet-LICENSE.txt).
   Source: https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
+
+MediaPipe Face Mesh V2 (built into flex.exe; a detailed mesh of a face for video effects)
+  License: Apache 2.0 (licenses/face-mesh-LICENSE.txt).
+  Source: https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker
+
+Head pose network (built into flex.exe; which way heads point for video effects)
+  License: MIT (licenses/head-angle-LICENSE.txt).
+  Source: https://github.com/yakhyo/head-pose-estimation
 
 JASSUB $JASSUB_VERSION (built into flex.exe; draws subtitles in the web UI's player)
   JASSUB itself: MIT (licenses/jassub-LICENSE.txt). Its WebAssembly contains libass

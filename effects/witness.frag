@@ -26,14 +26,33 @@ float oval(vec2 p, vec2 centre, Face f, vec2 half_size) {
     return 1.0 - smoothstep(0.7, 1.0, length(vec2(dot(rel, f.across), dot(rel, f.up)) / half_size));
 }
 
+// Skin with the features smoothed away: an average of a few bare patches, nearest counting most,
+// which keeps the way the light falls across the face.
+vec3 bare_skin(int face, vec2 a) {
+    vec2 patches[6] = vec2[6](vec2(0.5, 0.78), vec2(0.3, 0.8), vec2(0.7, 0.8), vec2(0.2, 0.45), vec2(0.8, 0.45), vec2(0.5, 0.16));
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    for (int n = 0; n < 6; n++) {
+        float weight = 1.0 / (dot(a - patches[n], a - patches[n]) + 0.02);
+        sum += face_texture(face, patches[n]).rgb * weight;
+        total += weight;
+    }
+    return sum / total;
+}
+
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
+    if (s_style > 2.5) {
+        float on = on_face(uv);
+        if (on > 0.0) c = mix(c, bare_skin(max(face_there(uv), 0), face_uv(uv)), on);
+    }
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     vec2 p = uv * aspect;
     float scale = s_size / 100.0;
     for (int i = 0; i < u_face_count; i++) {
         float seen = u_face_seen[i];
         if (seen <= 0.0) continue;
+        if (s_style > 2.5 && meshed(i)) continue;
         Face f = face_frame(i, aspect);
         if (s_style < 0.5) {
             vec2 rel = p - f.eyes;

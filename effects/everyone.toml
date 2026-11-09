@@ -1,4 +1,5 @@
 name = "Everyone Is Them"
 description = "The biggest face in the shot gets pasted onto everybody else."
 faces = true
+mesh = true
 

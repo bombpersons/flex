@@ -54,16 +54,25 @@ vec4 effect(vec2 uv) {
     float heat = smoothstep(0.1, 0.9, u_level);
     float over = smoothstep(s_boil / 100.0, s_boil / 100.0 + 0.3, u_level);
     vec3 steam_light = vec3(0.0);
+    // With a mesh, only skin goes red, and the cheeks stay on the cheeks as the head turns.
+    float skin = skin_at(uv) + nose_at(uv);
+    if (skin > 0.0) {
+        vec2 a = face_uv(uv);
+        vec2 cheek = vec2(abs(a.x - 0.5) - 0.225, a.y - 0.46) / vec2(0.14, 0.1);
+        float amount = s_blush / 100.0 * skin;
+        c = mix(c, c * vec3(1.35, 0.55, 0.5), heat * amount);
+        c = mix(c, vec3(0.95, 0.15, 0.2) * (0.5 + dot(c, vec3(0.33))), (1.0 - smoothstep(0.3, 1.0, length(cheek))) * (0.3 + 0.7 * heat) * amount * 0.8);
+    }
     for (int i = 0; i < u_face_count; i++) {
         float seen = u_face_seen[i];
         if (seen <= 0.0) continue;
         Face f = face_frame(i, aspect);
         vec2 mid = 0.5 * (f.eyes + f.mouth);
         float amount = s_blush / 100.0 * seen;
-        c = mix(c, c * vec3(1.35, 0.55, 0.5), oval(p, mid, f, vec2(f.spread * 1.2, f.height * 1.45)) * heat * amount);
+        if (!meshed(i)) c = mix(c, c * vec3(1.35, 0.55, 0.5), oval(p, mid, f, vec2(f.spread * 1.2, f.height * 1.45)) * heat * amount);
         for (int e = -1; e <= 1; e += 2) {
             vec2 cheek = f.eyes - f.up * f.height * 0.55 + f.across * float(e) * f.spread * 0.62;
-            c = mix(c, vec3(0.95, 0.15, 0.2), oval(p, cheek, f, vec2(f.spread * 0.36, f.spread * 0.24)) * (0.3 + 0.7 * heat) * amount * 0.8);
+            if (!meshed(i)) c = mix(c, vec3(0.95, 0.15, 0.2), oval(p, cheek, f, vec2(f.spread * 0.36, f.spread * 0.24)) * (0.3 + 0.7 * heat) * amount * 0.8);
             if (over <= 0.0) continue;
             vec2 ear = f.eyes + f.across * float(e) * f.spread * 1.1;
             vec2 rel = p - ear;

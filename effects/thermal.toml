@@ -3,6 +3,7 @@ description = "Predator-style heat colours, with people and faces burning hottes
 depth = true
 segment = true
 faces = true
+mesh = true
 audio = true
 
 [[settings]]

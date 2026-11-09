@@ -26,6 +26,15 @@ float oval(vec2 p, vec2 centre, Face f, vec2 half_size) {
     return 1.0 - smoothstep(0.7, 1.0, length(vec2(dot(rel, f.across), dot(rel, f.up)) / half_size));
 }
 
+// Follows the mesh, so eyes land on eyes and the face turns the way the one it's on is turned.
+vec3 copied_on_mesh(vec3 c, vec2 uv, int to, int from, float seen, vec3 match) {
+    if (face_there(uv) != to) return c;
+    vec2 a = face_uv(uv);
+    vec4 skin = face_texture(from, a);
+    float feather = 1.0 - smoothstep(0.82, 0.98, length((a - vec2(0.5, 0.47)) / vec2(0.5, 0.45)));
+    return mix(c, skin.rgb * match, on_face(uv) * skin.a * feather * seen);
+}
+
 vec3 copied(vec3 c, vec2 p, Face to, Face from, float seen, vec2 aspect) {
     vec2 to_mid = 0.5 * (to.eyes + to.mouth), from_mid = 0.5 * (from.eyes + from.mouth);
     float amount = oval(p, to_mid, to, vec2(to.spread * 1.3, to.height * 1.5)) * seen;
@@ -52,7 +61,14 @@ vec4 effect(vec2 uv) {
     if (biggest < 0) return vec4(c, 1.0);
     Face them = face_frame(biggest, aspect);
     for (int i = 0; i < u_face_count; i++) {
-        if (i != biggest && u_face_seen[i] > 0.02) c = copied(c, p, face_frame(i, aspect), them, min(u_face_seen[i], u_face_seen[biggest]), aspect);
+        if (i == biggest || u_face_seen[i] <= 0.02) continue;
+        float seen = min(u_face_seen[i], u_face_seen[biggest]);
+        if (meshed(i) && meshed(biggest)) {
+            float light = dot(face_texture(i, vec2(0.5, 0.78)).rgb, vec3(0.33)) / max(dot(face_texture(biggest, vec2(0.5, 0.78)).rgb, vec3(0.33)), 0.02);
+            c = copied_on_mesh(c, uv, i, biggest, seen, vec3(clamp(light, 0.6, 1.6)));
+        } else {
+            c = copied(c, p, face_frame(i, aspect), them, seen, aspect);
+        }
     }
     return vec4(c, 1.0);
 }

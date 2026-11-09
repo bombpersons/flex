@@ -39,6 +39,10 @@ pub struct Manifest {
     /// the GPU.
     #[serde(default)]
     pub faces: bool,
+    /// As well as `faces`, look closer at them: a 478-point mesh (`mesh_point`), how open eyes
+    /// and mouths are (`u_face_open`) and which way heads point (`u_face_turn`).
+    #[serde(default)]
+    pub mesh: bool,
     /// Keep the last second or so of frames for `history_at`.
     #[serde(default)]
     pub history: bool,
@@ -74,7 +78,7 @@ fn yes() -> bool {
 
 impl Default for Manifest {
     fn default() -> Self {
-        Self { name: String::new(), description: String::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, history: false, flow: false, plate: false, cuts: false, stats: false, scale: 1.0, shuffle: true, settings: Vec::new() }
+        Self { name: String::new(), description: String::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scale: 1.0, shuffle: true, settings: Vec::new() }
     }
 }
 
@@ -171,6 +175,7 @@ pub struct Needs {
     pub depth: bool,
     pub segment: bool,
     pub faces: bool,
+    pub mesh: bool,
     pub history: bool,
     pub flow: bool,
     pub plate: bool,
@@ -563,13 +568,14 @@ impl Effects {
             let id = Some(e.id.as_str());
             self.on && (id == self.chosen.as_deref() || id == fading || (self.shuffle.on && self.in_shuffle(&e.id)))
         });
-        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, history: false, flow: false, plate: false, cuts: false, stats: false, scale: 0.25 };
+        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scale: 0.25 };
         for e in counted {
             let m = &e.manifest;
             needs.audio |= m.audio;
             needs.depth |= m.depth || m.segment || m.plate;
             needs.segment |= m.segment || m.plate;
-            needs.faces |= m.faces;
+            needs.faces |= m.faces || m.mesh;
+            needs.mesh |= m.mesh;
             needs.history |= m.history;
             needs.flow |= m.flow;
             needs.plate |= m.plate;

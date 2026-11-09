@@ -29,6 +29,13 @@ vec4 effect(vec2 uv) {
             float mask = (1.0 - smoothstep(0.8, 1.0, d)) * u_face_seen[i];
             if (mask > 0.0) {
                 vec3 copy = texture(u_video, (centre + turned / 0.8) / aspect).rgb;
+                if (meshed(i)) {
+                    // Cut out along the edge of the face, like a mask on a stick.
+                    vec2 at_face = turned / max(radius * 1.7, vec2(1e-4)) + vec2(0.5, 0.47);
+                    vec4 skin = face_texture(i, clamp(at_face, 0.0, 1.0));
+                    copy = skin.rgb;
+                    mask = skin.a * u_face_seen[i];
+                }
                 c = mix(c, hue(copy, a + u_time * 0.5) * 1.15, mask);
             }
         }

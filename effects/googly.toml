@@ -1,6 +1,7 @@
 name = "Googly Eyes"
 description = "Everyone has plastic googly eyes, with pupils that roll around and bounce as they move."
 faces = true
+mesh = true
 audio = true
 feedback = true
 

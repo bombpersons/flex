@@ -1,0 +1,16 @@
+name = "Drive-In"
+description = "Everyone's skin is a screen showing the film, including the faces in the film, on and on forever."
+mesh = true
+feedback = true
+audio = true
+
+[[settings]]
+key = "bright"
+label = "Picture"
+type = "number"
+detail = "How much the screen covers up the skin"
+default = 85
+min = 20
+max = 100
+step = 5
+unit = "%"

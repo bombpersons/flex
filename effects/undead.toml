@@ -2,6 +2,7 @@ name = "Night of the Living"
 description = "People turn grey-green with hollow eyes, under a flickering light."
 segment = true
 faces = true
+mesh = true
 audio = true
 
 [[settings]]

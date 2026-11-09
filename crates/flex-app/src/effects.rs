@@ -414,6 +414,76 @@ uniform int u_face_count;
 uniform vec4 u_faces[MAX_FACES];
 uniform vec2 u_face_points[MAX_FACES * 5];
 uniform float u_face_seen[MAX_FACES];
+// With mesh = true. The direction a head points: x to the right of the picture, y up, z towards
+// the viewer, and w 1 if it's known. How open the person's right eye, left eye and mouth are,
+// from 0 to 1. How much of a mesh a face has (0 for faces side-on), and its 478 points: x, y on
+// screen and z, smaller nearer, in picture widths.
+uniform vec4 u_face_turn[MAX_FACES];
+uniform vec3 u_face_open[MAX_FACES];
+uniform float u_face_mesh[MAX_FACES];
+uniform highp sampler2D u_mesh;
+vec3 mesh_point(int face, int n) {
+    return texelFetch(u_mesh, ivec2(n, face), 0).xyz;
+}
+// With mesh = true, what's at any point on screen. How much of a face is there, and where that
+// is on the face: x from 0 at the picture-left edge of the face to 1, y from the chin up to the
+// forehead, the same spot on every face whichever way it's turned. Which face is there, or -1.
+uniform highp sampler2D u_face_map;
+uniform sampler2D u_face_parts;
+uniform sampler2D u_face_parts2;
+uniform sampler2D u_face_atlas;
+uniform float u_has_face_map;
+float on_face(vec2 uv) {
+    return texture(u_face_map, uv).a * u_has_face_map;
+}
+vec2 face_uv(vec2 uv) {
+    vec4 m = texture(u_face_map, uv);
+    return m.xy / max(m.a, 1e-4);
+}
+int face_there(vec2 uv) {
+    vec4 m = texelFetch(u_face_map, ivec2(uv * vec2(textureSize(u_face_map, 0))), 0);
+    return m.a * u_has_face_map > 0.01 ? int(m.z * 8.0 + 0.5) - 1 : -1;
+}
+float skin_at(vec2 uv) { return texture(u_face_parts, uv).r * u_has_face_map; }
+float lips_at(vec2 uv) { return texture(u_face_parts, uv).g * u_has_face_map; }
+float nose_at(vec2 uv) { return texture(u_face_parts, uv).b * u_has_face_map; }
+float brows_at(vec2 uv) { return texture(u_face_parts, uv).a * u_has_face_map; }
+float eye_at(vec2 uv) { return texture(u_face_parts2, uv).r * u_has_face_map; }
+float iris_at(vec2 uv) { return texture(u_face_parts2, uv).g * u_has_face_map; }
+float mouth_at(vec2 uv) { return texture(u_face_parts2, uv).b * u_has_face_map; }
+// A face's own pixels at a position on it (as face_uv gives), from the frame on screen, so a face
+// can be drawn somewhere else. The alpha is 0 outside the face.
+vec4 face_texture(int face, vec2 at) {
+    return texture(u_face_atlas, (vec2(float(face % 4), float(face / 4)) + at * 0.96 + 0.02) / vec2(4.0, 2.0));
+}
+// Whether a face has a mesh worth using, and the middle of its right (0) or left (1) iris.
+bool meshed(int face) {
+    return u_face_mesh[face] > 0.5;
+}
+vec2 iris_of(int face, int eye) {
+    return mesh_point(face, eye == 0 ? 468 : 473).xy;
+}
+// How far a head tilts to the side, anticlockwise, in radians, from the line between its eyes.
+float face_roll(int face) {
+    vec2 across = u_face_points[face * 5 + 1] - u_face_points[face * 5];
+    return atan(across.y * u_resolution.y, across.x * u_resolution.x);
+}
+// Roughly where hair is, with mesh = true and segment = true: the person above and around each
+// face, leaving out the face itself. It knows nothing of individual strands.
+float hair_at(vec2 uv) {
+    float cap = 0.0;
+    for (int i = 0; i < u_face_count; i++) {
+        vec2 size = max(u_faces[i].zw - u_faces[i].xy, vec2(1e-4));
+        vec2 left = u_face_points[i * 5 + 1], right = u_face_points[i * 5];
+        vec2 across = left - right;
+        vec2 up = normalize(vec2(-across.y, across.x) + vec2(0.0, 1e-5));
+        vec2 from = 0.5 * (left + right) + up * size.y * 0.25;
+        float above = dot(uv - from, up);
+        vec2 p = (uv - from) / (size * vec2(0.85, 0.9));
+        cap = max(cap, u_face_seen[i] * smoothstep(-size.y * 0.1, size.y * 0.05, above) * (1.0 - smoothstep(0.8, 1.1, length(p))));
+    }
+    return cap * person_at(uv) * (1.0 - on_face(uv));
+}
 vec2 face_point(int face, int point) {
     return u_face_points[face * 5 + point];
 }
@@ -657,6 +727,11 @@ impl Renderer {
             };
             let (depth_texture, mask_texture) = if frame.depth.is_some() { self.depth.map_for(pts) } else { (None, None) };
             let faces = if frame.faces.is_some() { self.faces.uniforms(pts, rect) } else { FaceUniforms::default() };
+            if frame.needs.mesh {
+                self.faces.upload_mesh(gl, pts, rect);
+            }
+
+            let has_face_map = frame.needs.mesh && self.faces.draw_map(gl, version.version_declaration(), version.is_embedded(), video_texture, size, &faces);
 
             let painted_at = Instant::now();
             let dt = self.last_paint.map_or(1.0 / 60.0, |t| painted_at.duration_since(t).as_secs_f32()).min(0.25);
@@ -710,6 +785,13 @@ impl Renderer {
             gl.bind_texture(glow::TEXTURE_2D, flow);
             gl.active_texture(glow::TEXTURE7);
             gl.bind_texture(glow::TEXTURE_2D, plate);
+            gl.active_texture(glow::TEXTURE8);
+            gl.bind_texture(glow::TEXTURE_2D, if frame.needs.mesh { self.faces.mesh_texture } else { None });
+            let map_textures = self.faces.map.as_ref().filter(|_| has_face_map).map(|m| m.textures());
+            for (i, unit) in [glow::TEXTURE9, glow::TEXTURE10, glow::TEXTURE11, glow::TEXTURE12].into_iter().enumerate() {
+                gl.active_texture(unit);
+                gl.bind_texture(glow::TEXTURE_2D, map_textures.map(|t| t[i]));
+            }
             let given = Given {
                 dt,
                 since_cut: if frame.needs.cuts { self.cuts.found.since(pts) } else { None },
@@ -724,6 +806,7 @@ impl Renderer {
                 ground: self.depth.ground,
                 has_masks: mask_texture.is_some() && self.depth.has_masks,
                 faces: &faces,
+                has_face_map,
             };
 
             // The effects, each at its working size.
@@ -756,7 +839,7 @@ impl Renderer {
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
             gl.bind_texture(glow::TEXTURE_2D, None);
-            for unit in [glow::TEXTURE1, glow::TEXTURE2, glow::TEXTURE3, glow::TEXTURE4, glow::TEXTURE6, glow::TEXTURE7] {
+            for unit in [glow::TEXTURE1, glow::TEXTURE2, glow::TEXTURE3, glow::TEXTURE4, glow::TEXTURE6, glow::TEXTURE7, glow::TEXTURE8, glow::TEXTURE9, glow::TEXTURE10, glow::TEXTURE11, glow::TEXTURE12] {
                 gl.active_texture(unit);
                 gl.bind_texture(glow::TEXTURE_2D, None);
             }
@@ -858,6 +941,7 @@ struct Given<'a> {
     ground: [f32; 4],
     has_masks: bool,
     faces: &'a FaceUniforms,
+    has_face_map: bool,
 }
 
 impl Slot {
@@ -998,6 +1082,14 @@ impl Slot {
             gl.uniform_4_f32_slice(at("u_faces").as_ref(), &faces.boxes);
             gl.uniform_2_f32_slice(at("u_face_points").as_ref(), &faces.points);
             gl.uniform_1_f32_slice(at("u_face_seen").as_ref(), &faces.seen);
+            gl.uniform_4_f32_slice(at("u_face_turn").as_ref(), &faces.turn);
+            gl.uniform_3_f32_slice(at("u_face_open").as_ref(), &faces.open);
+            gl.uniform_1_f32_slice(at("u_face_mesh").as_ref(), &faces.mesh);
+            gl.uniform_1_i32(at("u_mesh").as_ref(), 8);
+            for (i, name) in ["u_face_map", "u_face_parts", "u_face_parts2", "u_face_atlas"].into_iter().enumerate() {
+                gl.uniform_1_i32(at(name).as_ref(), 9 + i as i32);
+            }
+            gl.uniform_1_f32(at("u_has_face_map").as_ref(), if given.has_face_map { 1.0 } else { 0.0 });
             for (name, value) in &effect.uniforms {
                 gl.uniform_1_f32(at(name).as_ref(), *value);
             }
@@ -1116,11 +1208,15 @@ struct FaceUniforms {
     boxes: [f32; crate::faces::MAX_FACES * 4],
     points: [f32; crate::faces::MAX_FACES * 10],
     seen: [f32; crate::faces::MAX_FACES],
+    turn: [f32; crate::faces::MAX_FACES * 4],
+    open: [f32; crate::faces::MAX_FACES * 3],
+    mesh: [f32; crate::faces::MAX_FACES],
 }
 
 impl Default for FaceUniforms {
     fn default() -> Self {
-        Self { count: 0, boxes: [0.0; crate::faces::MAX_FACES * 4], points: [0.0; crate::faces::MAX_FACES * 10], seen: [0.0; crate::faces::MAX_FACES] }
+        use crate::faces::MAX_FACES;
+        Self { count: 0, boxes: [0.0; MAX_FACES * 4], points: [0.0; MAX_FACES * 10], seen: [0.0; MAX_FACES], turn: [0.0; MAX_FACES * 4], open: [0.0; MAX_FACES * 3], mesh: [0.0; MAX_FACES] }
     }
 }
 
@@ -1381,8 +1477,15 @@ impl DepthGl {
 #[derive(Default)]
 struct FaceGl {
     objects: Option<(Target, glow::Buffer)>,
+    /// How many times the detector's size `objects` are.
+    scale: usize,
     failed: bool,
     pending: Option<(Fence, (f32, f32))>,
+    /// Each face's mesh, a row each, for `u_mesh`.
+    mesh_texture: Option<glow::Texture>,
+    /// That mesh drawn into a map of the picture.
+    map: Option<crate::face_map::FaceMap>,
+    map_failed: bool,
     /// The position of the last frame sent, and of the one being read back.
     last_time: Option<f32>,
     pending_time: f32,
@@ -1580,9 +1683,20 @@ fn faces_between(reports: &VecDeque<crate::faces::Report>, time: f32) -> crate::
     for (out, (a, b)) in out.iter_mut().zip(before.slots.iter().zip(&after.slots)) {
         *out = match (a, b) {
             (Some(a), Some(b)) => {
+                use crate::faces::{HAS_MESH, HAS_TURN, MESH_AT, TURN_AT};
                 let mut mixed = *a;
-                for (v, b) in mixed.coords.iter_mut().zip(b.coords) {
-                    *v += (b - *v) * along;
+                for (n, (v, to)) in mixed.coords.iter_mut().zip(b.coords).enumerate() {
+                    // A part only one side has isn't blended with the other's nothing.
+                    let (from_has, to_has) = match n {
+                        n if (MESH_AT..TURN_AT).contains(&n) => (a.coords[HAS_MESH] > 0.0, b.coords[HAS_MESH] > 0.0),
+                        n if (TURN_AT..HAS_MESH).contains(&n) => (a.coords[HAS_TURN] > 0.0, b.coords[HAS_TURN] > 0.0),
+                        _ => (true, true),
+                    };
+                    match (from_has, to_has) {
+                        (false, true) => *v = to,
+                        (true, false) => {}
+                        _ => *v += (to - *v) * along,
+                    }
                 }
                 mixed.seen += (b.seen - a.seen) * along;
                 Some(mixed)
@@ -1599,16 +1713,21 @@ impl FaceGl {
     /// smooth playback time.
     #[allow(clippy::too_many_arguments)]
     unsafe fn update(&mut self, gl: &glow::Context, link: &crate::faces::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
-        use crate::faces::{HEIGHT, WIDTH};
         unsafe {
             if self.failed {
                 return;
             }
+            let scale = link.scale();
+            if self.scale != scale {
+                self.free_capture(gl);
+                self.scale = scale;
+            }
+            let (width, height) = (crate::faces::WIDTH * scale, crate::faces::HEIGHT * scale);
             if self.objects.is_none() {
-                let made = create_target(gl, (WIDTH as i32, HEIGHT as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|capture| {
+                let made = create_target(gl, (width as i32, height as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|capture| {
                     let pbo = gl.create_buffer()?;
                     gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
-                    gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (WIDTH * HEIGHT * 4) as i32, glow::STREAM_READ);
+                    gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (width * height * 4) as i32, glow::STREAM_READ);
                     gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
                     Ok((capture, pbo))
                 });
@@ -1622,7 +1741,7 @@ impl FaceGl {
                 }
             }
             let Some((capture, pbo)) = self.objects.as_ref() else { return };
-            let bytes = WIDTH * HEIGHT * 4;
+            let bytes = width * height * 4;
             if let Some((Fence(fence), filled)) = self.pending {
                 match gl.client_wait_sync(fence, 0, 0) {
                     glow::TIMEOUT_EXPIRED => {}
@@ -1633,7 +1752,7 @@ impl FaceGl {
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
                             let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
                             if !ptr.is_null() {
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), filled, self.pending_time);
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), scale, filled, self.pending_time);
                                 gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
                             }
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -1668,22 +1787,22 @@ impl FaceGl {
                 // at the top of the capture.
                 let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
                 let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
-                let scale = (WIDTH as f32 / (x1 - x0) as f32).min(HEIGHT as f32 / (y1 - y0) as f32);
-                let (w, h) = ((((x1 - x0) as f32 * scale) as i32).clamp(1, WIDTH as i32), (((y1 - y0) as f32 * scale) as i32).clamp(1, HEIGHT as i32));
+                let fit = (width as f32 / (x1 - x0) as f32).min(height as f32 / (y1 - y0) as f32);
+                let (w, h) = ((((x1 - x0) as f32 * fit) as i32).clamp(1, width as i32), (((y1 - y0) as f32 * fit) as i32).clamp(1, height as i32));
                 gl.disable(glow::SCISSOR_TEST);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(capture.fbo));
                 gl.clear_color(0.0, 0.0, 0.0, 1.0);
                 gl.clear(glow::COLOR_BUFFER_BIT);
                 gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
                 gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(capture.fbo));
-                gl.blit_framebuffer(x0, y0, x1, y1, 0, HEIGHT as i32 - h, w, HEIGHT as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                gl.blit_framebuffer(x0, y0, x1, y1, 0, height as i32 - h, w, height as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
                 gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(capture.fbo));
                 gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
                 gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-                gl.read_pixels(0, 0, WIDTH as i32, HEIGHT as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
+                gl.read_pixels(0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
                 gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
                 if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                    self.pending = Some((Fence(fence), (w as f32 / WIDTH as f32, h as f32 / HEIGHT as f32)));
+                    self.pending = Some((Fence(fence), (w as f32 / width as f32, h as f32 / height as f32)));
                 }
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
@@ -1704,12 +1823,72 @@ impl FaceGl {
                 out.points[(i * 5 + p) * 2 + 1] = y(face.coords[5 + p * 2]);
             }
             out.seen[i] = face.seen;
+            use crate::faces::{HAS_MESH, HAS_TURN, OPEN_AT, TURN_AT};
+            let known = face.coords[HAS_TURN];
+            let forward = &face.coords[TURN_AT..TURN_AT + 3];
+            let length = forward.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
+            out.turn[i * 4..i * 4 + 4].copy_from_slice(&[forward[0] / length, forward[1] / length, forward[2] / length, known]);
+            out.open[i * 3..i * 3 + 3].copy_from_slice(&face.coords[OPEN_AT..OPEN_AT + 3]);
+            out.mesh[i] = face.coords[HAS_MESH];
             out.count = i as i32 + 1;
         }
         out
     }
 
-    unsafe fn release(&mut self, gl: &glow::Context) {
+    /// Puts the meshes for the frame at `time` where `mesh_point` finds them.
+    unsafe fn upload_mesh(&mut self, gl: &glow::Context, time: f32, rect: [f32; 4]) {
+        use crate::faces::{MAX_FACES, MESH_AT, MESH_POINTS};
+        unsafe {
+            if self.mesh_texture.is_none() {
+                let Ok(texture) = gl.create_texture() else { return };
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA32F as i32, MESH_POINTS as i32, MAX_FACES as i32, 0, glow::RGBA, glow::FLOAT, glow::PixelUnpackData::Slice(None));
+                self.mesh_texture = Some(texture);
+            }
+            let mut data = vec![0.0f32; MESH_POINTS * MAX_FACES * 4];
+            for (i, face) in faces_between(&self.reports, time).iter().enumerate() {
+                let Some(face) = face else { continue };
+                for n in 0..MESH_POINTS {
+                    let p = &face.coords[MESH_AT + n * 3..MESH_AT + n * 3 + 3];
+                    let at = (i * MESH_POINTS + n) * 4;
+                    data[at] = rect[0] + p[0] * (rect[2] - rect[0]);
+                    data[at + 1] = rect[3] - p[1] * (rect[3] - rect[1]);
+                    data[at + 2] = p[2];
+                    data[at + 3] = 1.0;
+                }
+            }
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, self.mesh_texture);
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+            let bytes = std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 4);
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, MESH_POINTS as i32, MAX_FACES as i32, glow::RGBA, glow::FLOAT, glow::PixelUnpackData::Slice(Some(bytes)));
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
+    /// Draws the faces in `shown` into the map, returning whether there is one.
+    unsafe fn draw_map(&mut self, gl: &glow::Context, version: &str, embedded: bool, video: glow::Texture, size: (i32, i32), shown: &FaceUniforms) -> bool {
+        unsafe {
+            let Some(mesh) = self.mesh_texture else { return false };
+            if self.map.is_none() && !self.map_failed {
+                match crate::face_map::FaceMap::new(gl, version, embedded) {
+                    Ok(map) => self.map = Some(map),
+                    Err(e) => {
+                        log::warn!("face map: {e}");
+                        self.map_failed = true;
+                    }
+                }
+            }
+            let Some(map) = &self.map else { return false };
+            let faces: Vec<(usize, f32)> = (0..shown.count as usize).map(|i| (i, shown.mesh[i] * shown.seen[i])).filter(|(_, fade)| *fade > 0.01).collect();
+            map.draw(gl, mesh, video, size.0 as f32 / size.1.max(1) as f32, &faces);
+            true
+        }
+    }
+
+    unsafe fn free_capture(&mut self, gl: &glow::Context) {
         unsafe {
             if let Some((Fence(fence), _)) = self.pending.take() {
                 gl.delete_sync(fence);
@@ -1719,6 +1898,19 @@ impl FaceGl {
                 gl.delete_texture(capture.texture);
                 gl.delete_buffer(pbo);
             }
+        }
+    }
+
+    unsafe fn release(&mut self, gl: &glow::Context) {
+        unsafe {
+            self.free_capture(gl);
+            if let Some(texture) = self.mesh_texture.take() {
+                gl.delete_texture(texture);
+            }
+            if let Some(map) = self.map.take() {
+                map.release(gl);
+            }
+            self.map_failed = false;
             self.last_time = None;
             self.reports.clear();
             self.arrived = 0;

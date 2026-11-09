@@ -2,6 +2,7 @@ name = "Love Beams"
 description = "Hearts stream out of everyone's eyes in the direction they're facing."
 depth = true
 faces = true
+mesh = true
 audio = true
 
 [[settings]]

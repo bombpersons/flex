@@ -57,6 +57,12 @@ vec4 effect(vec2 uv) {
         // Head-on it still has to stick out somewhere.
         aim.x += aim.x < 0.0 ? -0.35 : 0.35;
         vec2 d = normalize(f.across * aim.x + f.up * aim.y);
+        if (u_face_turn[i].w > 0.5) {
+            // Head-on it still has to stick out somewhere.
+            vec2 turn = u_face_turn[i].xy;
+            float side_on = length(turn);
+            d = normalize(turn + f.across * (turn.x * f.across.x + turn.y * f.across.y < 0.0 ? -0.35 : 0.35) * (1.0 - smoothstep(0.2, 0.5, side_on)));
+        }
         float length_now = f.height * min(0.2 + (t - born) * 0.18 * s_speed / 100.0, s_longest / 100.0);
 
         vec2 base = f.nose - d * f.spread * 0.1;

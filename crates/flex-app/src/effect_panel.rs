@@ -97,7 +97,7 @@ impl Section {
             Section::All => true,
             Section::Favourites => sh.effects.is_favourite(&effect.id),
             Section::People => m.segment || m.plate,
-            Section::Faces => m.faces,
+            Section::Faces => m.faces || m.mesh,
             Section::Depth => m.depth,
             Section::Audio => m.audio,
         }

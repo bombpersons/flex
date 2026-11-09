@@ -73,6 +73,15 @@ vec4 effect(vec2 uv) {
             float pupil = length((p - at) / radius - offset);
             eye = mix(eye, vec3(0.02), 1.0 - smoothstep(0.34, 0.38, pupil));
             eye += vec3(0.9) * (1.0 - smoothstep(0.08, 0.12, length((p - at) / radius - vec2(-0.32, 0.38))));
+            // Blinks are a skin-coloured lid coming down over the plastic.
+            if (meshed(i)) {
+                float open = e == 0 ? u_face_open[i].x : u_face_open[i].y;
+                float lid_at = mix(-1.05, 1.1, smoothstep(0.03, 0.45, open));
+                if (dot(p - at, f.up) / radius > lid_at) {
+                    vec3 skin = texture(u_video, (at + f.up * radius * 1.7) / aspect).rgb;
+                    eye = mix(skin, skin * 0.55, smoothstep(0.75, 1.0, d));
+                }
+            }
             c = mix(c, eye, 1.0 - smoothstep(1.0, 1.08, d));
         }
     }
