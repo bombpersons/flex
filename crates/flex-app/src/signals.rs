@@ -42,7 +42,7 @@ unsafe fn mipmapped(gl: &glow::Context, size: (i32, i32), filter: u32) -> Result
     }
 }
 
-unsafe fn delete_target(gl: &glow::Context, target: Target) {
+pub(crate) unsafe fn delete_target(gl: &glow::Context, target: Target) {
     unsafe {
         gl.delete_framebuffer(target.fbo);
         gl.delete_texture(target.texture);

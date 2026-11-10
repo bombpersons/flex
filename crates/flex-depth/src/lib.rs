@@ -12,6 +12,7 @@
 //! Output is relative inverse depth ("disparity"): bigger is nearer, in no fixed units.
 
 pub mod face;
+pub mod flow;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -139,6 +140,7 @@ fn read_safetensors(bytes: &[u8]) -> Result<Tensors> {
         let values = match dtype {
             "F32" => raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect(),
             "U8" => raw.iter().map(|b| f32::from(*b)).collect(),
+            "F16" => raw.as_chunks::<2>().0.iter().map(|b| face::from_f16(u16::from_le_bytes(*b))).collect(),
             other => bail!("{name}: {other} tensors aren't supported"),
         };
         out.insert(name.clone(), (shape, values));

@@ -13,6 +13,7 @@ mod effect_panel;
 mod effects;
 mod face_map;
 mod faces;
+mod flow;
 mod ground;
 mod images;
 mod input;

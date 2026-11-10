@@ -86,6 +86,7 @@ pub struct Renderer {
     bars: crate::bars::BarGl,
     words: Option<(Target, (i32, i32))>,
     faces: FaceGl,
+    motion: NetFlowGl,
     cuts: CutGl,
     history: HistoryGl,
     flow: FlowGl,
@@ -123,6 +124,8 @@ pub struct Frame {
     pub depth: Option<crate::depth::Link>,
     /// The face worker, when the effect asked for faces.
     pub faces: Option<crate::faces::Link>,
+    /// The movement worker, when the effect asked for movement.
+    pub motion: Option<crate::flow::Link>,
     /// Subtitles are to be kept out of the effect and laid on top of it.
     pub subtitles: bool,
 }
@@ -796,7 +799,8 @@ impl Renderer {
             gl.blit_framebuffer(x0, y0, x0 + size.0, y0 + size.1, 0, 0, size.0, size.1, glow::COLOR_BUFFER_BIT, glow::NEAREST);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             let video = &o.cropped;
-            if frame.depth.is_some() || frame.faces.is_some() {
+            let holding = frame.depth.is_some() || frame.faces.is_some() || frame.motion.is_some();
+            if holding {
                 self.held.push(gl, video, size, frame.pts);
                 if let Some((words, _)) = &self.words {
                     self.held_words.push(gl, words, window, frame.pts);
@@ -816,17 +820,22 @@ impl Renderer {
                 Some(link) => self.faces.update(gl, link, source, size, rect, source_time, frame.video_time),
                 None => self.faces.delay = 0.0,
             }
+            match &frame.motion {
+                Some(link) => self.motion.update(gl, link, source, size, rect, source_time, frame.video_time),
+                None => self.motion.delay = 0.0,
+            }
             if frame.find_cuts {
                 self.cuts.update(gl, source, size, rect, source_time);
             }
-            // The picture is held back to the frame depth and faces have caught up with.
-            let (video_texture, pts) = if frame.depth.is_some() || frame.faces.is_some() {
-                self.held.pick(frame.video_time - self.depth.delay.max(self.faces.delay)).unwrap_or((video.texture, frame.pts))
+            // The picture is held back to the frame the networks have caught up with.
+            let held_back = self.held_back();
+            let (video_texture, pts) = if holding {
+                self.held.pick(frame.video_time - held_back).unwrap_or((video.texture, frame.pts))
             } else {
                 (video.texture, frame.pts)
             };
             let words_texture = self.words.as_ref().map(|(words, _)| {
-                self.held_words.pick(frame.video_time - self.depth.delay.max(self.faces.delay)).map_or(words.texture, |w| w.0)
+                self.held_words.pick(frame.video_time - held_back).map_or(words.texture, |w| w.0)
             });
             let (depth_texture, mask_texture) = if frame.depth.is_some() { self.depth.map_for(pts) } else { (None, None) };
             let faces = if frame.faces.is_some() { self.faces.uniforms(pts, rect) } else { FaceUniforms::default() };
@@ -847,7 +856,9 @@ impl Renderer {
             if let Some(at) = self.cuts.fresh.take() {
                 self.flow.zero_at(gl, at);
             }
-            if frame.needs.flow {
+            // Block matching only until the network's going, or if it can't.
+            let network_flow = frame.motion.is_some().then(|| self.motion.at(pts)).flatten();
+            if frame.needs.flow && network_flow.is_none() {
                 self.flow.update(gl, decl, &vertex, version.is_embedded(), vao, source, size, rect, source_time);
             }
             if frame.needs.plate && let Some(people) = mask_texture.filter(|_| self.depth.has_masks) {
@@ -880,7 +891,7 @@ impl Renderer {
             gl.active_texture(glow::TEXTURE4);
             gl.bind_texture(glow::TEXTURE_2D, mask_texture);
             let history = if frame.needs.history { self.history.texture() } else { None };
-            let flow = if frame.needs.flow { self.flow.at(pts) } else { None };
+            let flow = if frame.needs.flow { network_flow.or_else(|| self.flow.at(pts)) } else { None };
             let plate = if frame.needs.plate { self.plate.texture() } else { None };
             gl.active_texture(glow::TEXTURE5);
             gl.bind_texture(glow::TEXTURE_2D_ARRAY, history);
@@ -983,6 +994,7 @@ impl Renderer {
             self.cuts.release(gl);
             self.history.release(gl);
             self.flow.release(gl);
+            self.motion.release(gl);
             self.plate.release(gl);
             self.last_paint = None;
             if let Some(vao) = self.vao.take() {
@@ -993,7 +1005,7 @@ impl Renderer {
 
     /// How far behind the picture is being held (seconds), which the sound has to match.
     pub fn held_back(&self) -> f32 {
-        self.depth.delay.max(self.faces.delay)
+        self.depth.delay.max(self.faces.delay).max(self.motion.delay)
     }
 
     /// Whether a scene cut has reached `shown` in the video since this was last asked.
@@ -1614,6 +1626,154 @@ struct FaceGl {
     late: f32,
     /// How far the picture is being held back to match (seconds).
     delay: f32,
+}
+
+/// How many frames' movement are kept, and the furthest (seconds) a frame's can be used from.
+const MOTION_KEPT: usize = 12;
+const MOTION_REACH: f32 = 0.25;
+/// Extra hold for movement, as `late` is an average.
+const MOTION_SPARE: f32 = 0.02;
+
+/// Gets frames to the movement worker, and what it finds back into textures for effects.
+#[derive(Default)]
+struct NetFlowGl {
+    objects: Option<(Target, glow::Buffer)>,
+    failed: bool,
+    pending: Option<Fence>,
+    pending_time: f32,
+    last_time: Option<f32>,
+    /// A texture of movement for each frame, with the frame's position once there's something in it.
+    kept: Vec<(Target, Option<f32>)>,
+    next: usize,
+    arrived: u32,
+    late: f32,
+    delay: f32,
+}
+
+impl NetFlowGl {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::flow::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
+        use crate::flow::{FLOW_HEIGHT, FLOW_WIDTH, HEIGHT, WIDTH};
+        unsafe {
+            if self.failed {
+                return;
+            }
+            if self.objects.is_none() {
+                let float = [(glow::RGBA16F, glow::HALF_FLOAT)];
+                let made = create_target(gl, (WIDTH as i32, HEIGHT as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|capture| {
+                    let pbo = gl.create_buffer()?;
+                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
+                    gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (WIDTH * HEIGHT * 4) as i32, glow::STREAM_READ);
+                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                    let mut kept = Vec::with_capacity(MOTION_KEPT);
+                    for _ in 0..MOTION_KEPT {
+                        kept.push((create_target(gl, (FLOW_WIDTH as i32, FLOW_HEIGHT as i32), &float)?, None));
+                    }
+                    Ok((capture, pbo, kept))
+                });
+                match made {
+                    Ok((capture, pbo, kept)) => {
+                        self.objects = Some((capture, pbo));
+                        self.kept = kept;
+                    }
+                    Err(e) => {
+                        log::warn!("flow: {e}");
+                        self.failed = true;
+                        return;
+                    }
+                }
+            }
+            let Some((capture, pbo)) = self.objects.as_ref() else { return };
+            let bytes = WIDTH * HEIGHT * 4;
+            if let Some(Fence(fence)) = self.pending {
+                match gl.client_wait_sync(fence, 0, 0) {
+                    glow::TIMEOUT_EXPIRED => {}
+                    status => {
+                        gl.delete_sync(fence);
+                        self.pending = None;
+                        if status != glow::WAIT_FAILED {
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
+                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
+                            if !ptr.is_null() {
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), self.pending_time);
+                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                            }
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                        }
+                    }
+                }
+            }
+            for report in link.take_reports() {
+                let late = clock - report.time;
+                // Outside this, it's a seek and says nothing about how long the network takes.
+                if (0.0..0.5).contains(&late) {
+                    self.arrived += 1;
+                    self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
+                    if self.arrived >= HOLD_AFTER_MAPS {
+                        self.delay = next_delay(self.delay, self.late + MOTION_SPARE);
+                    }
+                }
+                // Going backwards: what's kept is from somewhere else.
+                if self.kept.iter().any(|(_, t)| t.is_some_and(|t| t > report.time)) {
+                    self.kept.iter_mut().for_each(|k| k.1 = None);
+                }
+                let texels = crate::flow::texels(report.flow.as_deref());
+                let slot = self.next;
+                self.next = (slot + 1) % MOTION_KEPT;
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.kept[slot].0.texture));
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                let data: &[u8] = std::slice::from_raw_parts(texels.as_ptr().cast(), texels.len() * 4);
+                gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, FLOW_WIDTH as i32, FLOW_HEIGHT as i32, glow::RGBA, glow::FLOAT, glow::PixelUnpackData::Slice(Some(data)));
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                self.kept[slot].1 = Some(report.time);
+            }
+            if self.pending.is_none() && link.ready_for_frame() && self.last_time != Some(time) {
+                self.last_time = Some(time);
+                self.pending_time = time;
+                // The picture without black bars, squeezed to fill it, as flow is in fractions
+                // of the picture. In GL's rows, as everything else here.
+                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
+                let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
+                gl.disable(glow::SCISSOR_TEST);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(capture.fbo));
+                gl.blit_framebuffer(x0, y0, x1, y1, 0, 0, WIDTH as i32, HEIGHT as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(capture.fbo));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+                gl.read_pixels(0, 0, WIDTH as i32, HEIGHT as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+                    self.pending = Some(Fence(fence));
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+        }
+    }
+
+    /// The movement worked out for the frame nearest `time`, if it's near enough.
+    fn at(&self, time: f32) -> Option<glow::Texture> {
+        let nearest = self.kept.iter().filter_map(|(target, t)| t.map(|t| (target, (t - time).abs()))).min_by(|a, b| a.1.total_cmp(&b.1))?;
+        (nearest.1 <= MOTION_REACH).then_some(nearest.0.texture)
+    }
+
+    unsafe fn release(&mut self, gl: &glow::Context) {
+        unsafe {
+            if let Some((capture, pbo)) = self.objects.take() {
+                crate::signals::delete_target(gl, capture);
+                gl.delete_buffer(pbo);
+            }
+            for (target, _) in self.kept.drain(..) {
+                crate::signals::delete_target(gl, target);
+            }
+            if let Some(Fence(fence)) = self.pending.take() {
+                gl.delete_sync(fence);
+            }
+        }
+        self.last_time = None;
+        self.delay = 0.0;
+        self.arrived = 0;
+    }
 }
 
 /// The tiny picture compared from frame to frame to find cuts.

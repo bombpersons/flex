@@ -304,7 +304,7 @@ impl Link {
 }
 
 /// RGBA with its rows bottom-up, as read back from GL, to RGB with them top-down.
-fn top_down(rgba: &[u8], width: usize, height: usize, rgb: &mut [u8]) {
+pub(crate) fn top_down(rgba: &[u8], width: usize, height: usize, rgb: &mut [u8]) {
     for y in 0..height {
         let src = &rgba[(height - 1 - y) * width * 4..][..width * 4];
         for (x, px) in src.as_chunks::<4>().0.iter().enumerate() {
@@ -524,13 +524,13 @@ impl Closer {
 
 /// Spots a sudden change in a small grey picture.
 #[derive(Default)]
-struct CutWatch {
+pub(crate) struct CutWatch {
     last: Vec<u8>,
     usual: f32,
 }
 
 impl CutWatch {
-    fn is_cut(&mut self, now: &[u8]) -> bool {
+    pub(crate) fn is_cut(&mut self, now: &[u8]) -> bool {
         let mut cut = false;
         if self.last.len() == now.len() && !now.is_empty() {
             let total: u32 = self.last.iter().zip(now).map(|(a, b)| u32::from(a.abs_diff(*b))).sum();

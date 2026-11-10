@@ -81,6 +81,7 @@ done
 
 cp "$ROOT/crates/flex-web/web/vendor/jassub/LICENSE.txt" "$DIR/licenses/jassub-LICENSE.txt"
 cp "$ROOT/crates/flex-depth/src/yunet.LICENSE" "$DIR/licenses/yunet-LICENSE.txt"
+cp "$ROOT/crates/flex-depth/src/flow.LICENSE" "$DIR/licenses/neuflow-LICENSE.txt"
 cp "$ROOT/crates/flex-depth/src/face_mesh.LICENSE" "$DIR/licenses/face-mesh-LICENSE.txt"
 cp "$ROOT/crates/flex-depth/src/head_angle.LICENSE" "$DIR/licenses/head-angle-LICENSE.txt"
 JASSUB_VERSION=$(sed -n 's/^JASSUB \([0-9.]*\).*/\1/p' "$ROOT/crates/flex-web/web/vendor/jassub/README.txt")
@@ -139,6 +140,10 @@ libmpv (libmpv-2.dll), mpv commit $MPV_COMMIT
   Source: https://github.com/mpv-player/mpv/tree/$MPV_COMMIT
     (build scripts and the versions of its dependencies:
     https://github.com/$MPV_BUILDS)
+
+NeuFlow v2 (built into flex.exe; finds how the picture moves for video effects)
+  License: Apache 2.0 (licenses/neuflow-LICENSE.txt).
+  Source: https://github.com/neufieldrobotics/NeuFlow_v2
 
 YuNet (built into flex.exe; finds faces for video effects)
   License: MIT (licenses/yunet-LICENSE.txt).

@@ -222,7 +222,7 @@ don't declare them yourself:
 | `float u_dt` | seconds since the last frame was drawn |
 | `float u_cut`, `u_since_cut` | 1 on a scene cut, fading to 0 in about half a second, and seconds since the last one, for the frame on screen (with `cuts = true`) |
 | `vec3 history_at(vec2 uv, float seconds)` | a function: the picture that many seconds ago, up to about one, at half size (with `history = true`) |
-| `vec2 flow_at(vec2 uv)` | a function: how a point is moving, in screen widths and heights a second (with `flow = true`) |
+| `vec2 flow_at(vec2 uv)` | a function: how a point is moving, in screen widths and heights a second (with `flow = true`). Comes from a small network once it has started, and from block matching before that or if it can't run |
 | `vec3 plate_at(vec2 uv)`, `float plate_known(vec2 uv)` | functions: the room with people taken out, and how much of that point has really been seen since the last cut rather than filled in from around it (with `plate = true`) |
 | `float u_brightness`, `u_colourfulness`, `u_warmth`, `vec3 u_palette[4]`, `float u_palette_share[4]` | the look of the picture: 0–1, 0–1, -1 (blue) to 1 (orange), its four main colours, and how much of the picture each covers (with `stats = true`). Colours keep their slots as they change |
 | `vec3 u_light` | with `stats = true`: where the brightest part of the picture is, x and y from 0 to 1 across the picture, and in z how much it stands out as one place |

@@ -93,7 +93,7 @@ fn name<'a>(op: &'a serde_json::Value, key: &str) -> Result<&'a str> {
 }
 
 /// A half-precision float as a full one.
-fn from_f16(bits: u16) -> f32 {
+pub(crate) fn from_f16(bits: u16) -> f32 {
     let sign = u32::from(bits >> 15) << 31;
     let exponent = u32::from(bits >> 10) & 0x1f;
     let fraction = u32::from(bits) & 0x3ff;
