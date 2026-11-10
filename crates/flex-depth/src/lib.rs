@@ -13,6 +13,7 @@
 
 pub mod face;
 pub mod flow;
+pub mod track;
 
 use std::collections::HashMap;
 use std::path::Path;
