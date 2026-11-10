@@ -478,6 +478,7 @@ impl Player {
             if let Some(motion) = &frame.motion {
                 lines.push(format!("Effect motion: {}", motion.status().describe()));
             }
+            lines.extend(crate::gpu::describe());
         }
         if let Some(light) = light {
             let [r, g, b] = light.zones[0];
@@ -702,7 +703,7 @@ impl Player {
                     sh.motion.clone()
                 });
                 let fading = sh.effects.fading();
-                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts() || needs.cuts || needs.flow || needs.stats || needs.plate, needs, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces, motion, subtitles: self.effect_inputs.subtitles() })
+                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts() || needs.cuts || needs.flow || needs.stats || needs.plate || needs.depth || needs.faces, needs, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces, motion, subtitles: self.effect_inputs.subtitles() })
             }
             _ => {
                 self.effect_inputs.stop(&self.mpv);

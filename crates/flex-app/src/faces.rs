@@ -66,11 +66,6 @@ const FADE: f64 = 0.15;
 /// looks only one detection either side, to keep the picture from being held back further.
 const WEIGHTS: [f32; 3] = [3.0, 2.0, 1.0];
 const DETAILED_REACH: usize = 2;
-/// A new shot changes the brightness (0–255) this much on average, and this many times as much
-/// as the frames before it changed, which rules out fast action. The change can be small: dark
-/// films cut from one dark shot to another.
-const CUT: f32 = 10.0;
-const CUT_OVER_USUAL: f32 = 4.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -78,8 +73,11 @@ pub enum Status {
     Starting,
     Ready {
         adapter: String,
-        /// How long the last detection took, and how many faces are showing.
+        /// How long the last detection took all told, how much of that went on the meshes and
+        /// on which way heads point, and how many faces are showing.
         ms: f32,
+        mesh: f32,
+        head: f32,
         faces: usize,
     },
     Failed(String),
@@ -90,7 +88,8 @@ impl Status {
         match self {
             Status::Off => "off".into(),
             Status::Starting => "starting…".into(),
-            Status::Ready { adapter, ms, faces } => format!("{faces} found, {ms:.0} ms a frame on {adapter}"),
+            Status::Ready { adapter, ms, mesh, head, faces } if *mesh + *head > 0.0 => format!("{faces} found, {ms:.0} ms a frame (mesh {mesh:.0}, head {head:.0}) on {adapter}"),
+            Status::Ready { adapter, ms, faces, .. } => format!("{faces} found, {ms:.0} ms a frame on {adapter}"),
             Status::Failed(e) => format!("⚠ {e}"),
         }
     }
@@ -125,6 +124,8 @@ struct Input {
     filled: (f32, f32),
     /// The frame's position in the video (seconds).
     time: f32,
+    /// There's been a scene cut since the last one handed over.
+    cut: bool,
 }
 
 struct State {
@@ -191,8 +192,8 @@ impl Link {
 
     /// Hands over a frame: RGBA, bottom row first, `scale` times `WIDTH` × `HEIGHT`, with the
     /// picture filling `filled` of it from the top left. `time` is its position in the video.
-    pub fn submit(&self, rgba: Vec<u8>, scale: usize, filled: (f32, f32), time: f32) {
-        self.lock().input = Some(Input { rgba, scale, filled, time });
+    pub fn submit(&self, rgba: Vec<u8>, scale: usize, filled: (f32, f32), time: f32, cut: bool) {
+        self.lock().input = Some(Input { rgba, scale, filled, time, cut });
         self.0.1.notify_all();
     }
 
@@ -220,14 +221,13 @@ impl Link {
             }
         };
         log::info!("faces: running on {}", face.adapter());
-        self.lock().status = Status::Ready { adapter: face.adapter().to_owned(), ms: 0.0, faces: 0 };
+        self.lock().status = Status::Ready { adapter: face.adapter().to_owned(), ms: 0.0, mesh: 0.0, head: 0.0, faces: 0 };
 
         let start = Instant::now();
         let mut tracker = Tracker::default();
         let mut closer = Closer::default();
         let mut rgb = vec![0u8; WIDTH * HEIGHT * 3];
         let mut large = Vec::new();
-        let mut cuts = CutWatch::default();
         let mut last_time: Option<f32> = None;
         let mut after_cut = true;
         loop {
@@ -253,9 +253,8 @@ impl Link {
             } else {
                 top_down(&input.rgba, WIDTH, HEIGHT, &mut rgb);
             }
-            let gray: Vec<u8> = rgb.as_chunks::<3>().0.iter().step_by(16).map(|p| p[1]).collect();
             let seeked = last_time.is_some_and(|t| input.time < t || input.time > t + 1.0);
-            if cuts.is_cut(&gray) | seeked || tracker.detailed != detailed {
+            if input.cut || seeked || tracker.detailed != detailed {
                 self.publish(tracker.finish());
                 tracker = Tracker { detailed, ..Default::default() };
                 closer = Closer::default();
@@ -264,6 +263,7 @@ impl Link {
             last_time = Some(input.time);
 
             let started = Instant::now();
+            let turn = crate::gpu::turn(crate::gpu::Net::Faces);
             let found = face.run(&rgb).and_then(|found| {
                 let mut coords: Vec<[f32; COORDS]> = found.iter().map(|d| coords(d, input.filled)).collect();
                 if detailed {
@@ -281,15 +281,17 @@ impl Link {
                     break;
                 }
             };
-            let ms = started.elapsed().as_secs_f32() * 1000.0;
+            let ms = turn.ms();
+            drop(turn);
             let report = tracker.update(&found, start.elapsed().as_secs_f64(), input.time).map(|mut report| {
                 report.after_cut = std::mem::take(&mut after_cut);
                 report
             });
             self.publish(report);
-            self.lock().status = Status::Ready { adapter: face.adapter().to_owned(), ms, faces: tracker.showing() };
+            self.lock().status = Status::Ready { adapter: face.adapter().to_owned(), ms, mesh: closer.mesh_ms, head: closer.head_ms, faces: tracker.showing() };
             let per_run = if detailed { DETAILED_INTERVAL_PER_RUN } else { INTERVAL_PER_RUN };
-            std::thread::sleep(MIN_INTERVAL.max(Duration::from_secs_f32(ms * per_run / 1000.0)).saturating_sub(started.elapsed()));
+            let own = MIN_INTERVAL.max(Duration::from_secs_f32(ms * per_run / 1000.0));
+            std::thread::sleep(crate::gpu::rest(crate::gpu::Net::Faces, own).saturating_sub(started.elapsed()));
             self.lock().busy = false;
         }
         drop(face);
@@ -448,6 +450,9 @@ fn same_detection(a: &Detection, b: &Detection) -> f32 {
 struct Closer {
     last: Vec<Seen>,
     detection: u64,
+    /// How long the last look spent on meshes and on heads (ms).
+    mesh_ms: f32,
+    head_ms: f32,
 }
 
 /// How many detections between one head being looked at and the next.
@@ -458,6 +463,8 @@ impl Closer {
     /// `DETAIL_SCALE` times the detector's size.
     fn look(&mut self, face: &mut Face, large: &[u8], found: &[Detection], filled: (f32, f32), out: &mut [[f32; COORDS]]) -> anyhow::Result<()> {
         self.detection += 1;
+        self.mesh_ms = 0.0;
+        self.head_ms = 0.0;
         let scale = DETAIL_SCALE as f32;
         let (width, height) = (WIDTH * DETAIL_SCALE, HEIGHT * DETAIL_SCALE);
         let across = (filled.0 * width as f32).max(1.0);
@@ -478,9 +485,12 @@ impl Closer {
             let before = self.last.iter().map(|s| (same_detection(&s.detection, &d), s)).filter(|(amount, _)| *amount > 0.3).max_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, s)| *s);
             // Where it was last time, moved along with what was found in this frame.
             let moved = before.and_then(|b| b.roi.map(|roi| Roi { x: roi.x + d.x + d.width / 2.0 - b.detection.x - b.detection.width / 2.0, y: roi.y + d.y + d.height / 2.0 - b.detection.y - b.detection.height / 2.0, ..roi }));
+            let mesh_ms = &mut self.mesh_ms;
             let mut run = |roi: Roi| -> anyhow::Result<(flex_depth::face::Mesh, Vec<[f32; 3]>)> {
                 resample(large, width, height, MESH_SIZE, roi.side / MESH_SIZE as f32, &mut square, |u, v| roi.place(u, v, MESH_SIZE));
+                let timer = Instant::now();
                 let mesh = face.mesh(&square)?;
+                *mesh_ms += timer.elapsed().as_secs_f32() * 1000.0;
                 let placed = mesh.points.iter().map(|p| { let [x, y] = roi.place(p[0], p[1], MESH_SIZE); [x, y, p[2] * roi.side / MESH_SIZE as f32] }).collect();
                 Ok((mesh, placed))
             };
@@ -511,7 +521,10 @@ impl Closer {
             let mut square = vec![0u8; HEAD_SIZE * HEAD_SIZE * 3];
             let (kx, ky) = (d.width / HEAD_SIZE as f32, d.height / HEAD_SIZE as f32);
             resample(large, width, height, HEAD_SIZE, kx.max(ky), &mut square, |u, v| [d.x + u * kx, d.y + v * ky]);
-            if let Some(forward) = facing(&face.head(&square)?) {
+            let timer = Instant::now();
+            let turned = face.head(&square)?;
+            self.head_ms += timer.elapsed().as_secs_f32() * 1000.0;
+            if let Some(forward) = facing(&turned) {
                 let c = &mut out[order[n]];
                 c[TURN_AT..TURN_AT + 3].copy_from_slice(&forward);
                 c[HAS_TURN] = 1.0;
@@ -519,28 +532,6 @@ impl Closer {
         }
         self.last = seen;
         Ok(())
-    }
-}
-
-/// Spots a sudden change in a small grey picture.
-#[derive(Default)]
-pub(crate) struct CutWatch {
-    last: Vec<u8>,
-    usual: f32,
-}
-
-impl CutWatch {
-    pub(crate) fn is_cut(&mut self, now: &[u8]) -> bool {
-        let mut cut = false;
-        if self.last.len() == now.len() && !now.is_empty() {
-            let total: u32 = self.last.iter().zip(now).map(|(a, b)| u32::from(a.abs_diff(*b))).sum();
-            let change = total as f32 / now.len() as f32;
-            cut = change > CUT && change > self.usual * CUT_OVER_USUAL;
-            self.usual += (change - self.usual) * 0.25;
-        }
-        self.last.clear();
-        self.last.extend_from_slice(now);
-        cut
     }
 }
 
@@ -919,16 +910,5 @@ mod tests {
         let mut to = [0u8; 3];
         halve(&[0, 0, 0, 40, 40, 40, 80, 80, 80, 200, 200, 200], 2, 2, &mut to);
         assert_eq!(to, [80, 80, 80]);
-    }
-
-    #[test]
-    fn a_change_is_a_cut_only_if_its_sudden() {
-        let mut w = CutWatch::default();
-        assert!(!w.is_cut(&[20, 20, 20]), "nothing to compare with yet");
-        assert!(w.is_cut(&[40, 40, 40]), "a small jump after stillness: dark films cut like this");
-        let mut w = CutWatch::default();
-        let frames = [[0u8, 0, 0], [30, 30, 30], [60, 60, 60], [90, 90, 90], [120, 120, 120]];
-        let cuts: Vec<bool> = frames.iter().map(|f| w.is_cut(f)).collect();
-        assert_eq!(&cuts[2..], [false, false, false], "fast action isn't a cut once it's underway");
     }
 }

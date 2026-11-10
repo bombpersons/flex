@@ -42,8 +42,6 @@ const MOVEMENT: f32 = 0.04;
 const AROUND: usize = 7;
 /// How quickly the range used to scale depth to 0–1 follows the picture.
 const RANGE_FOLLOW: f32 = 0.2;
-/// The average change between depth maps, each scaled by its own range, that means a new shot.
-const CUT: f32 = 0.18;
 /// At most this often, to leave the GPU time for the video (~30 depth maps a second, so a
 /// film's every frame gets one if the GPU can manage it).
 const MIN_INTERVAL: Duration = Duration::from_millis(33);
@@ -95,8 +93,9 @@ pub struct DepthMap {
 struct State {
     status: Status,
     running: bool,
-    /// A frame waiting: RGBA, bottom row first (as read back from GL), `WIDTH` × `HEIGHT`.
-    input: Option<(Vec<u8>, f32)>,
+    /// A frame waiting: RGBA, bottom row first (as read back from GL), `WIDTH` × `HEIGHT`, its
+    /// position, and whether there's been a scene cut since the last one handed over.
+    input: Option<(Vec<u8>, f32, bool)>,
     busy: bool,
     output: Option<Arc<DepthMap>>,
     last_wanted: Instant,
@@ -219,10 +218,6 @@ fn scaled_rgb(src: &[u8], (sw, sh): (usize, usize), (dw, dh): (usize, usize)) ->
     out
 }
 
-fn mean_change(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(a, b)| (a - b).abs()).sum::<f32>() / a.len().max(1) as f32
-}
-
 /// `values` averaged over a square reaching `radius` pixels each way (fewer at the edges).
 fn averaged(values: &[f32], (w, h): (usize, usize), radius: usize) -> Vec<f32> {
     let line = |src: &[f32], dst: &mut [f32], len: usize, step: usize| {
@@ -314,9 +309,10 @@ impl Link {
         matches!(state.status, Status::Ready { .. }) && state.input.is_none()
     }
 
-    /// Hands over a frame (RGBA, bottom row first, `WIDTH` × `HEIGHT`) and its position.
-    pub fn submit(&self, rgba: Vec<u8>, time: f32) {
-        self.lock().input = Some((rgba, time));
+    /// Hands over a frame (RGBA, bottom row first, `WIDTH` × `HEIGHT`), its position, and whether
+    /// there's been a scene cut since the last frame handed over.
+    pub fn submit(&self, rgba: Vec<u8>, time: f32, cut: bool) {
+        self.lock().input = Some((rgba, time, cut));
         self.0.1.notify_all();
     }
 
@@ -361,7 +357,6 @@ impl Link {
 
         let mut previous: Option<Vec<f32>> = None;
         let mut previous_masks: Option<[Vec<f32>; MASKS]> = None;
-        let mut last_own: Option<Vec<f32>> = None;
         let mut range: Option<(f32, f32)> = None;
         let mut ground = Ground::default();
         let mut serial = 0;
@@ -380,7 +375,7 @@ impl Link {
                     state = self.0.1.wait_timeout(state, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
                 }
             };
-            let Some((rgba, time)) = input else { break };
+            let Some((rgba, time, cut)) = input else { break };
             // GL's rows run bottom-up; the model's top-down.
             for y in 0..HEIGHT {
                 let src = &rgba[(HEIGHT - 1 - y) * WIDTH * 4..][..WIDTH * 4];
@@ -390,9 +385,11 @@ impl Link {
             }
             let started = Instant::now();
             let size = depth.size();
+            let turn = crate::gpu::turn(crate::gpu::Net::Depth);
             let result = if size == (WIDTH, HEIGHT) { depth.run(&rgb) } else { depth.run(&scaled_rgb(&rgb, (WIDTH, HEIGHT), size)) };
             let result = result.and_then(|raw| Ok((raw, if with_masks { Some(depth.masks()?) } else { None })));
-            let ms = started.elapsed().as_secs_f32() * 1000.0;
+            let ms = turn.ms();
+            drop(turn);
             let (raw, planes) = match result {
                 Ok((raw, planes)) if size == (WIDTH, HEIGHT) => (raw, planes),
                 Ok((raw, planes)) => (scaled(&raw, size, (WIDTH, HEIGHT)), planes),
@@ -407,16 +404,13 @@ impl Link {
             // Scaled to 0–1 by a range that follows the picture's smoothly (so it doesn't
             // pump), blended with the last map, and flipped back to bottom-up.
             let (lo, hi) = raw.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-            let own_scale = 1.0 / (hi - lo).max(1e-6);
-            let own: Vec<f32> = raw.iter().map(|v| (v - lo) * own_scale).collect();
             // A new shot has nothing to do with the last one: start again from this picture.
-            if last_own.as_ref().is_some_and(|last| mean_change(&own, last) > CUT) {
+            if cut {
                 previous = None;
                 previous_masks = None;
                 range = None;
                 ground.forget();
             }
-            last_own = Some(own);
             let (lo, hi) = match range {
                 Some((l, h)) => (l + (lo - l) * RANGE_FOLLOW, h + (hi - h) * RANGE_FOLLOW),
                 None => (lo, hi),
@@ -452,7 +446,7 @@ impl Link {
                 state.status = Status::Ready { adapter: depth.adapter().to_owned(), ms, size, masks: with_masks };
             }
             // Still "busy" while waiting, so no frame is read back in the meantime.
-            std::thread::sleep(MIN_INTERVAL.saturating_sub(started.elapsed()));
+            std::thread::sleep(crate::gpu::rest(crate::gpu::Net::Depth, MIN_INTERVAL).saturating_sub(started.elapsed()));
             let moved = pace.update(ms, Instant::now());
             let masks_wanted = self.lock().masks_wanted;
             if moved.is_some() || masks_wanted != with_masks {
@@ -568,11 +562,5 @@ mod tests {
         let bytes = mask_bytes(&mask_planes(&planes, (WIDTH, HEIGHT)));
         assert_eq!(&bytes[(HEIGHT - 1) * WIDTH * 4..][..4], &[255, 0, 0, 255]);
         assert_eq!(&bytes[..4], &[0, 0, 0, 255]);
-    }
-
-    #[test]
-    fn a_new_shot_is_a_big_average_change() {
-        assert!(mean_change(&[0.1, 0.9], &[0.9, 0.1]) > CUT);
-        assert!(mean_change(&[0.5, 0.52], &[0.5, 0.5]) < CUT);
     }
 }

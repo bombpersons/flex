@@ -461,6 +461,7 @@ pub struct Flow {
     /// Which picture was last filled in, if the next can be compared with it.
     last: Option<usize>,
     adapter: String,
+    _gpu: super::Gpu,
     #[cfg(test)]
     shared: Shared,
 }
@@ -559,19 +560,14 @@ impl Flow {
             rest(ops, &shared, &tails, pictures[i], pictures[1 - i]);
         }
 
-        let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).map_err(|e| anyhow::anyhow!("no GPU adapter: {e}"))?;
+        let gpu = super::Gpu::shared()?;
+        let (device, queue) = (gpu.0.device.clone(), gpu.0.queue.clone());
         let bytes = u64::from(memory.end) * 4;
         let weight_bytes = wt.data.len() as u64 * 4;
         let needed = bytes.max(weight_bytes);
-        let most = adapter.limits();
-        if needed > most.max_storage_buffer_binding_size as u64 {
-            anyhow::bail!("the GPU allows {} MB buffers; flow needs {} MB", most.max_storage_buffer_binding_size >> 20, needed >> 20);
+        if needed > gpu.0.most_buffer {
+            anyhow::bail!("the GPU allows {} MB buffers; flow needs {} MB", gpu.0.most_buffer >> 20, needed >> 20);
         }
-        let mut limits = wgpu::Limits::default();
-        limits.max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size.max(needed);
-        limits.max_buffer_size = limits.max_buffer_size.max(needed);
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("flex-flow"), required_limits: limits, ..Default::default() })).map_err(|e| anyhow::anyhow!("GPU device: {e}"))?;
         let storage = |label, size: u64, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
         let w = storage("weights", weight_bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
         queue.write_buffer(&w, 0, bytemuck::cast_slice(&wt.data));
@@ -636,7 +632,7 @@ impl Flow {
         let (c, d) = (lay_out(c), lay_out(d));
         queue.write_buffer(&params, 0, &slots);
         let flow = shared.block8 + (AT_FLOW * PIXELS8) as u32;
-        Ok(Self { device, queue, pipelines, mem, bind, readback, first: [a, b], second: [c, d], pictures, flow, last: None, adapter: adapter.get_info().name, #[cfg(test)] shared })
+        Ok(Self { device, queue, pipelines, mem, bind, readback, first: [a, b], second: [c, d], pictures, flow, last: None, adapter: gpu.0.adapter.clone(), _gpu: gpu, #[cfg(test)] shared })
     }
 
     pub fn adapter(&self) -> &str {

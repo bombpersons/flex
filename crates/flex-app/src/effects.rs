@@ -812,20 +812,21 @@ impl Renderer {
             // The networks look at the kept copy of a frame, however many paints later they get
             // to it, so what they find is about exactly the picture that will be drawn.
             let (source, source_time) = self.held.newest().unwrap_or((video.fbo, frame.pts));
+            // First: what the networks are told about cuts comes from this having seen the frame.
+            if frame.find_cuts {
+                self.cuts.update(gl, source, size, rect, source_time);
+            }
             match &frame.depth {
-                Some(link) => self.depth.update(gl, link, source, size, rect, source_time, frame.video_time),
+                Some(link) => self.depth.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
                 None => self.depth.delay = 0.0,
             }
             match &frame.faces {
-                Some(link) => self.faces.update(gl, link, source, size, rect, source_time, frame.video_time),
+                Some(link) => self.faces.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
                 None => self.faces.delay = 0.0,
             }
             match &frame.motion {
-                Some(link) => self.motion.update(gl, link, source, size, rect, source_time, frame.video_time),
+                Some(link) => self.motion.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
                 None => self.motion.delay = 0.0,
-            }
-            if frame.find_cuts {
-                self.cuts.update(gl, source, size, rect, source_time);
             }
             // The picture is held back to the frame the networks have caught up with.
             let held_back = self.held_back();
@@ -1471,6 +1472,8 @@ struct DepthGl {
     /// Which of `maps` the next depth map goes in.
     next_map: usize,
     /// The position of the frame being read back.
+    /// The position of the last frame handed to the worker.
+    handed: Option<f32>,
     pending_time: f32,
     /// How late depth maps arrive after their frame (seconds), on average.
     late: f32,
@@ -1490,7 +1493,7 @@ impl DepthGl {
     /// reads back this frame if the worker's free. `time` is the frame's position and `clock`
     /// the smooth playback time.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::depth::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
+    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::depth::Link, cuts: &CutGl, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
         use crate::depth::{HEIGHT, WIDTH};
         unsafe {
             if self.failed {
@@ -1508,7 +1511,7 @@ impl DepthGl {
             }
             let Some(o) = self.gl.as_mut() else { return };
             let bytes = WIDTH * HEIGHT * 4;
-            if let Some(Fence(fence)) = self.pending {
+            if let Some(Fence(fence)) = self.pending.filter(|_| cuts.has_seen(self.pending_time)) {
                 match gl.client_wait_sync(fence, 0, 0) {
                     glow::TIMEOUT_EXPIRED => {}
                     status => {
@@ -1518,7 +1521,9 @@ impl DepthGl {
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(o.pbo));
                             let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
                             if !ptr.is_null() {
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), self.pending_time);
+                                let cut = cuts.reset_between(self.handed, self.pending_time);
+                                self.handed = Some(self.pending_time);
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), self.pending_time, cut);
                                 gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
                             }
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -1619,6 +1624,8 @@ struct FaceGl {
     /// The position of the last frame sent, and of the one being read back.
     last_time: Option<f32>,
     pending_time: f32,
+    /// The position of the last frame handed to the worker.
+    handed: Option<f32>,
     /// What's come in lately, oldest first.
     reports: VecDeque<crate::faces::Report>,
     arrived: u32,
@@ -1642,6 +1649,8 @@ struct NetFlowGl {
     pending: Option<Fence>,
     pending_time: f32,
     last_time: Option<f32>,
+    /// The position of the last frame handed to the worker.
+    handed: Option<f32>,
     /// A texture of movement for each frame, with the frame's position once there's something in it.
     kept: Vec<(Target, Option<f32>)>,
     next: usize,
@@ -1652,7 +1661,7 @@ struct NetFlowGl {
 
 impl NetFlowGl {
     #[allow(clippy::too_many_arguments)]
-    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::flow::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
+    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::flow::Link, cuts: &CutGl, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
         use crate::flow::{FLOW_HEIGHT, FLOW_WIDTH, HEIGHT, WIDTH};
         unsafe {
             if self.failed {
@@ -1685,7 +1694,7 @@ impl NetFlowGl {
             }
             let Some((capture, pbo)) = self.objects.as_ref() else { return };
             let bytes = WIDTH * HEIGHT * 4;
-            if let Some(Fence(fence)) = self.pending {
+            if let Some(Fence(fence)) = self.pending.filter(|_| cuts.has_seen(self.pending_time)) {
                 match gl.client_wait_sync(fence, 0, 0) {
                     glow::TIMEOUT_EXPIRED => {}
                     status => {
@@ -1695,7 +1704,9 @@ impl NetFlowGl {
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
                             let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
                             if !ptr.is_null() {
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), self.pending_time);
+                                let cut = cuts.reset_between(self.handed, self.pending_time);
+                                self.handed = Some(self.pending_time);
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), self.pending_time, cut);
                                 gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
                             }
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -1784,6 +1795,8 @@ const CUT_HALFWAY: (i32, i32) = (128, 72);
 /// as the frames before it changed, which rules out fast action.
 const CUT_CHANGE: f32 = 20.0;
 const CUT_OVER_USUAL: f32 = 4.0;
+/// A change this big is enough for the networks to start again.
+const RESET_CHANGE: f32 = 10.0;
 
 /// Spots a sudden change in the picture.
 #[derive(Default)]
@@ -1792,19 +1805,23 @@ struct CutFinder {
     last_time: f32,
     usual: f32,
     was_cut: bool,
+    was_reset: bool,
 }
 
 impl CutFinder {
-    /// `rgba` is this frame's tiny picture, from `time` in the video.
-    fn is_cut(&mut self, rgba: &[u8], time: f32) -> bool {
+    /// `rgba` is this frame's tiny picture, from `time` in the video. Says whether it's a cut,
+    /// and whether the networks should start again, which also goes for the smaller changes
+    /// dark films cut with: wrongly forgetting a frame costs them little.
+    fn look(&mut self, rgba: &[u8], time: f32) -> (bool, bool) {
         // A seek: not the film cutting.
         let continues = self.last.len() == rgba.len() && time >= self.last_time && time < self.last_time + 1.0;
-        let mut cut = false;
+        let (mut cut, mut reset) = (false, false);
         if continues {
             let change: u32 = self.last.as_chunks::<4>().0.iter().zip(rgba.as_chunks::<4>().0).map(|(a, b)| (0..3).map(|c| u32::from(a[c].abs_diff(b[c]))).sum::<u32>()).sum();
             let change = change as f32 / (rgba.len() / 4 * 3) as f32;
             cut = !self.was_cut && change > CUT_CHANGE && change > self.usual * CUT_OVER_USUAL;
-            if !cut {
+            reset = !self.was_reset && change > RESET_CHANGE && change > self.usual * CUT_OVER_USUAL;
+            if !cut && !reset {
                 self.usual += (change - self.usual) * 0.25;
             }
         } else {
@@ -1814,7 +1831,8 @@ impl CutFinder {
         self.last.extend_from_slice(rgba);
         self.last_time = time;
         self.was_cut = cut;
-        cut
+        self.was_reset = reset;
+        (cut, reset)
     }
 }
 
@@ -1831,12 +1849,25 @@ struct CutGl {
     /// Cuts found lately, and one not dealt with yet.
     found: Cuts,
     fresh: Option<f32>,
+    /// Those, and the smaller changes the networks start again at too.
+    resets: Cuts,
     /// What the picture was like when last looked at.
     stats: Stats,
     seen_at: Option<f32>,
 }
 
 impl CutGl {
+    /// Whether this has seen the frame at `time` yet, so a network can be told about it.
+    fn has_seen(&self, time: f32) -> bool {
+        self.failed || self.objects.is_none() || self.seen_at.is_some_and(|seen| seen >= time)
+    }
+
+    /// Whether the networks should start again at the frame at `time`, having last been given
+    /// the one at `after`.
+    fn reset_between(&self, after: Option<f32>, time: f32) -> bool {
+        after.is_some_and(|after| self.resets.between(after, time))
+    }
+
     unsafe fn update(&mut self, gl: &glow::Context, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32) {
         let bytes = (CUT_SIZE.0 * CUT_SIZE.1 * 4) as usize;
         let rgba8 = [(glow::RGBA8, glow::UNSIGNED_BYTE)];
@@ -1876,13 +1907,18 @@ impl CutGl {
                                 let tiny = std::slice::from_raw_parts(ptr, bytes);
                                 if self.seen_at.is_some_and(|last| at < last || at > last + 1.0) {
                                     self.found.clear();
+                                    self.resets.clear();
                                 }
                                 self.seen_at = Some(at);
-                                if self.finder.is_cut(tiny, at) {
+                                let (cut, reset) = self.finder.look(tiny, at);
+                                if cut {
                                     log::debug!("scene cut at {at:.3}");
                                     self.due = Some(at);
                                     self.found.add(at);
                                     self.fresh = Some(at);
+                                }
+                                if reset || cut {
+                                    self.resets.add(at);
                                 }
                                 self.stats = self.stats.measure(tiny);
                                 gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
@@ -1933,6 +1969,7 @@ impl CutGl {
         self.finder = CutFinder::default();
         self.due = None;
         self.found.clear();
+        self.resets.clear();
         self.fresh = None;
         self.seen_at = None;
     }
@@ -1990,7 +2027,7 @@ impl FaceGl {
     /// back this frame if the worker's free. `time` is the frame's position and `clock` the
     /// smooth playback time.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::faces::Link, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
+    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::faces::Link, cuts: &CutGl, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
         unsafe {
             if self.failed {
                 return;
@@ -2020,7 +2057,7 @@ impl FaceGl {
             }
             let Some((capture, pbo)) = self.objects.as_ref() else { return };
             let bytes = width * height * 4;
-            if let Some((Fence(fence), filled)) = self.pending {
+            if let Some((Fence(fence), filled)) = self.pending.filter(|_| cuts.has_seen(self.pending_time)) {
                 match gl.client_wait_sync(fence, 0, 0) {
                     glow::TIMEOUT_EXPIRED => {}
                     status => {
@@ -2030,7 +2067,9 @@ impl FaceGl {
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
                             let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
                             if !ptr.is_null() {
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), scale, filled, self.pending_time);
+                                let cut = cuts.reset_between(self.handed, self.pending_time);
+                                self.handed = Some(self.pending_time);
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), scale, filled, self.pending_time, cut);
                                 gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
                             }
                             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -2301,18 +2340,27 @@ mod hold_tests {
     fn a_sudden_change_is_a_cut_but_steady_action_and_seeks_are_not() {
         let frame = |v: u8| vec![v; 64];
         let mut f = CutFinder::default();
-        assert!(!f.is_cut(&frame(50), 0.0), "nothing to compare with");
-        assert!(!f.is_cut(&frame(52), 0.04));
-        assert!(f.is_cut(&frame(150), 0.08));
-        assert!(!f.is_cut(&frame(151), 0.12));
-        assert!(!f.is_cut(&frame(250), 5.0), "a seek");
+        assert!(!f.look(&frame(50), 0.0).0, "nothing to compare with");
+        assert!(!f.look(&frame(52), 0.04).0);
+        assert!(f.look(&frame(150), 0.08).0);
+        assert!(!f.look(&frame(151), 0.12).0);
+        assert!(!f.look(&frame(250), 5.0).0, "a seek");
         // Everything changing a lot, frame after frame.
         let mut f = CutFinder::default();
         let mut cuts = 0;
         for i in 0..60 {
-            cuts += u32::from(f.is_cut(&frame(if i % 2 == 0 { 40 } else { 80 }), i as f32 * 0.04));
+            cuts += u32::from(f.look(&frame(if i % 2 == 0 { 40 } else { 80 }), i as f32 * 0.04).0);
         }
         assert!(cuts <= 1, "{cuts}");
+    }
+
+    #[test]
+    fn the_networks_start_again_at_smaller_changes_than_effects_call_a_cut() {
+        let frame = |v: u8| vec![v; 64];
+        let mut f = CutFinder::default();
+        f.look(&frame(20), 0.0);
+        f.look(&frame(20), 0.04);
+        assert_eq!(f.look(&frame(35), 0.08), (false, true), "dark films cut like this");
     }
 
     #[test]

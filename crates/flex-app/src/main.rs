@@ -14,6 +14,7 @@ mod effects;
 mod face_map;
 mod faces;
 mod flow;
+mod gpu;
 mod ground;
 mod images;
 mod input;

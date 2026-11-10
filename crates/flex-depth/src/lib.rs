@@ -16,8 +16,52 @@ pub mod flow;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context, Result, bail};
+
+struct SharedGpu {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    adapter: String,
+    most_buffer: u64,
+}
+
+/// The one GPU device all the networks use, made when the first one wants it and freed with
+/// the last.
+#[derive(Clone)]
+pub struct Gpu(Arc<SharedGpu>);
+
+static SHARED_GPU: Mutex<Weak<SharedGpu>> = Mutex::new(Weak::new());
+
+impl Gpu {
+    pub fn shared() -> Result<Self> {
+        let mut shared = SHARED_GPU.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(gpu) = shared.upgrade() {
+            return Ok(Self(gpu));
+        }
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        }))
+        .map_err(|e| anyhow::anyhow!("no GPU adapter: {e}"))?;
+        let most = adapter.limits();
+        let most_buffer = (most.max_storage_buffer_binding_size as u64).min(1 << 30);
+        let mut limits = wgpu::Limits::default();
+        limits.max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size.max(most_buffer as _);
+        limits.max_buffer_size = limits.max_buffer_size.max(most_buffer as _);
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("flex-networks"),
+            required_limits: limits,
+            ..Default::default()
+        }))
+        .map_err(|e| anyhow::anyhow!("GPU device: {e}"))?;
+        let gpu = Arc::new(SharedGpu { device, queue, adapter: adapter.get_info().name, most_buffer });
+        *shared = Arc::downgrade(&gpu);
+        Ok(Self(gpu))
+    }
+}
 
 /// The model this is a port of, and the version of its weights it was checked against.
 pub const MODEL: &str = "depth-anything/Depth-Anything-V2-Small-hf";
@@ -539,6 +583,7 @@ pub struct Depth {
     /// Whether the masks are worked out too.
     with_masks: bool,
     adapter: String,
+    _gpu: Gpu,
 }
 
 impl Depth {
@@ -778,28 +823,14 @@ impl Depth {
         }
 
         // The GPU.
-        let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .map_err(|e| anyhow::anyhow!("no GPU adapter: {e}"))?;
+        let gpu = Gpu::shared()?;
+        let (device, queue) = (gpu.0.device.clone(), gpu.0.queue.clone());
         let w_bytes = up.data.len() as u64 * 4;
         let mem_bytes = s.end as u64 * 4;
         let needed = w_bytes.max(mem_bytes);
-        let mut limits = wgpu::Limits::default();
-        let most = adapter.limits();
-        if needed > most.max_storage_buffer_binding_size as u64 {
-            bail!("the GPU allows {} MB buffers; depth needs {} MB", most.max_storage_buffer_binding_size >> 20, needed >> 20);
+        if needed > gpu.0.most_buffer {
+            bail!("the GPU allows {} MB buffers; depth needs {} MB", gpu.0.most_buffer >> 20, needed >> 20);
         }
-        limits.max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size.max(needed);
-        limits.max_buffer_size = limits.max_buffer_size.max(needed);
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("flex-depth"),
-            required_limits: limits,
-            ..Default::default()
-        }))
-        .map_err(|e| anyhow::anyhow!("GPU device: {e}"))?;
 
         let storage = |label, size: u64, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
         let w = storage("weights", w_bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
@@ -869,7 +900,7 @@ impl Depth {
         }
         queue.write_buffer(&params, 0, &slots);
         drop(w); // the bind group keeps it
-        Ok(Self { device, queue, pipelines, mem, bind, readback, ops, s, grid: (gw, gh), with_masks, adapter: adapter.get_info().name })
+        Ok(Self { device, queue, pipelines, mem, bind, readback, ops, s, grid: (gw, gh), with_masks, adapter: gpu.0.adapter.clone(), _gpu: gpu })
     }
 
     /// The picture size it takes, in pixels.

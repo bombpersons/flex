@@ -71,6 +71,8 @@ struct Input {
     /// RGBA, bottom row first (as read back from GL), `WIDTH` × `HEIGHT`.
     rgba: Vec<u8>,
     time: f32,
+    /// There's been a scene cut since the last one handed over.
+    cut: bool,
 }
 
 struct State {
@@ -126,9 +128,10 @@ impl Link {
         matches!(state.status, Status::Ready { .. }) && state.input.is_none() && !state.busy
     }
 
-    /// Hands over a frame: RGBA, bottom row first, `WIDTH` × `HEIGHT`. `time` is its position.
-    pub fn submit(&self, rgba: Vec<u8>, time: f32) {
-        self.lock().input = Some(Input { rgba, time });
+    /// Hands over a frame: RGBA, bottom row first, `WIDTH` × `HEIGHT`. `time` is its position, and
+    /// `cut` says there's been a scene cut since the last frame handed over.
+    pub fn submit(&self, rgba: Vec<u8>, time: f32, cut: bool) {
+        self.lock().input = Some(Input { rgba, time, cut });
         self.0.1.notify_all();
     }
 
@@ -159,7 +162,6 @@ impl Link {
         self.lock().status = Status::Ready { adapter: net.adapter().to_owned(), ms: 0.0 };
 
         let mut rgb = vec![0u8; WIDTH * HEIGHT * 3];
-        let mut cuts = crate::faces::CutWatch::default();
         let mut last_time: Option<f32> = None;
         let mut ms = 0.0f32;
         loop {
@@ -179,12 +181,16 @@ impl Link {
             let Some(input) = input else { break };
             let started = Instant::now();
             crate::faces::top_down(&input.rgba, WIDTH, HEIGHT, &mut rgb);
-            let gray: Vec<u8> = rgb.as_chunks::<3>().0.iter().step_by(16).map(|p| p[1]).collect();
             let gap = last_time.map(|t| input.time - t).filter(|gap| (1e-4..LONGEST_GAP).contains(gap));
-            if cuts.is_cut(&gray) | gap.is_none() {
+            let gap = gap.filter(|_| !input.cut);
+            if gap.is_none() {
                 net.reset();
             }
-            let flow = match net.run(&rgb) {
+            let turn = crate::gpu::turn(crate::gpu::Net::Flow);
+            let flow = net.run(&rgb);
+            let run = turn.ms();
+            drop(turn);
+            let flow = match flow {
                 Ok(flow) => flow,
                 Err(e) => {
                     log::warn!("flow: {e:#}");
@@ -202,12 +208,12 @@ impl Link {
             });
             self.publish(Report { time: input.time, flow });
 
-            let run = started.elapsed().as_secs_f32() * 1000.0;
             ms = if ms == 0.0 { run } else { ms + (run - ms) * 0.1 };
             if let Status::Ready { ms: shown, .. } = &mut self.lock().status {
                 *shown = ms;
             }
-            std::thread::sleep(MIN_INTERVAL.max(Duration::from_secs_f32(ms * INTERVAL_PER_RUN / 1000.0)).saturating_sub(started.elapsed()));
+            let own = MIN_INTERVAL.max(Duration::from_secs_f32(ms * INTERVAL_PER_RUN / 1000.0));
+            std::thread::sleep(crate::gpu::rest(crate::gpu::Net::Flow, own).saturating_sub(started.elapsed()));
             self.lock().busy = false;
         }
         drop(net);

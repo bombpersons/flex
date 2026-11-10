@@ -116,15 +116,13 @@ struct Gpu {
     queue: wgpu::Queue,
     layout: wgpu::BindGroupLayout,
     pipelines: Vec<wgpu::ComputePipeline>,
+    _shared: super::Gpu,
 }
 
 impl Gpu {
     fn new() -> Result<(Self, String)> {
-        let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
-            .map_err(|e| anyhow::anyhow!("no GPU adapter: {e}"))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("flex-face"), ..Default::default() }))
-            .map_err(|e| anyhow::anyhow!("GPU device: {e}"))?;
+        let shared = super::Gpu::shared()?;
+        let (device, queue) = (shared.0.device.clone(), shared.0.queue.clone());
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None };
         let storage_entry = |read_only| wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -153,7 +151,8 @@ impl Gpu {
                 })
             })
             .collect();
-        Ok((Self { device, queue, layout, pipelines }, adapter.get_info().name))
+        let adapter = shared.0.adapter.clone();
+        Ok((Self { device, queue, layout, pipelines, _shared: shared }, adapter))
     }
 }
 
