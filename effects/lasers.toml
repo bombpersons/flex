@@ -1,5 +1,6 @@
 name = "Laser Eyes"
 description = "Everyone fires laser beams from their eyes, the way they're facing, flaring on the beat."
+suits = ["close"]
 depth = true
 faces = true
 mesh = true

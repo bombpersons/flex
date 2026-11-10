@@ -1,5 +1,6 @@
 name = "Warp Speed"
 description = "The distance streaks into hyperspace while whoever's up close stays still."
+suits = ["wide"]
 depth = true
 audio = true
 

@@ -1,5 +1,6 @@
 name = "Oil on Water"
 description = "Slow rainbow bands slide over the picture like petrol on a puddle, curling around people."
+suits = ["quiet"]
 segment = true
 audio = true
 

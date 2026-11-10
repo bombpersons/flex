@@ -1,5 +1,6 @@
 name = "Echoes"
 description = "Everything leaves a trail of coloured copies of where it was a moment ago."
+suits = ["action"]
 history = true
 audio = true
 

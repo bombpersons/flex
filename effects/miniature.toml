@@ -1,5 +1,6 @@
 name = "Tiny World"
 description = "Everything looks like a model railway: a thin slice in focus, and toy-bright colours."
+suits = ["wide"]
 depth = true
 
 [[settings]]

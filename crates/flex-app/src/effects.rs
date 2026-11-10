@@ -87,6 +87,7 @@ pub struct Renderer {
     words: Option<(Target, (i32, i32))>,
     faces: FaceGl,
     motion: NetFlowGl,
+    shots: crate::shot_type::Tracker,
     cuts: CutGl,
     history: HistoryGl,
     flow: FlowGl,
@@ -578,6 +579,14 @@ int who_at(vec2 uv) {
 // about half a second (with cuts = true). u_since_cut is huge until the first cut.
 uniform float u_cut;
 uniform float u_since_cut;
+// What sort of shot this is, and what's going on across the last few (with scene = true).
+// u_shot_size: 0 very wide to 1 extreme close-up. u_camera: pan, tilt, zoom and roll a second.
+// u_handheld: 0 to 1. u_pace: cuts a minute. u_scene: action, dialogue, quiet, montage, each 0 to 1.
+uniform float u_shot_size;
+uniform vec4 u_camera;
+uniform float u_handheld;
+uniform float u_pace;
+uniform vec4 u_scene;
 // The look of the picture (with stats = true). u_palette holds its main colours, each keeping its
 // slot as they change, and u_palette_share how much of the picture each covers.
 uniform float u_brightness;
@@ -840,6 +849,29 @@ impl Renderer {
             });
             let (depth_texture, mask_texture) = if frame.depth.is_some() { self.depth.map_for(pts) } else { (None, None) };
             let faces = if frame.faces.is_some() { self.faces.uniforms(pts, rect) } else { FaceUniforms::default() };
+            let clues = std::mem::take(&mut self.depth.clues);
+            let shot = if frame.needs.scene {
+                for (time, found) in clues {
+                    self.shots.add_clues(time, found);
+                }
+                let (height, wide) = ((rect[3] - rect[1]).max(1e-3), (rect[2] - rect[0]).max(1e-3));
+                let seen = (0..faces.count as usize).filter(|i| faces.seen[*i] >= 0.5);
+                let face = seen.clone().map(|i| crate::shot_type::Face { height: (faces.boxes[i * 4 + 3] - faces.boxes[i * 4 + 1]).abs() / height, x: ((faces.boxes[i * 4] + faces.boxes[i * 4 + 2]) * 0.5 - rect[0]) / wide }).max_by(|a, b| a.height.total_cmp(&b.height));
+                let fit = self.motion.fit.take();
+                self.shots.update(&crate::shot_type::Moment {
+                    time: pts,
+                    last_cut: self.cuts.found.since(pts).map(|since| pts - since),
+                    faces: seen.count() as u32,
+                    face,
+                    fit: fit.map(|f| f.0),
+                    speed: fit.map(|f| f.1),
+                    level: frame.audio.as_ref().map(|a| a.level),
+                    beat: frame.audio.as_ref().is_some_and(|a| a.beat > 0.5),
+                });
+                self.shots.reading()
+            } else {
+                crate::shot_type::Reading::default()
+            };
             if frame.needs.mesh {
                 self.faces.upload_mesh(gl, pts, rect);
             }
@@ -922,6 +954,7 @@ impl Renderer {
                 has_masks: mask_texture.is_some() && self.depth.has_masks,
                 faces: &faces,
                 has_face_map,
+                shot,
             };
 
             // The effects, each at its working size.
@@ -1010,6 +1043,12 @@ impl Renderer {
     }
 
     /// Whether a scene cut has reached `shown` in the video since this was last asked.
+    /// What's known of the shot on the screen, for choosing an effect to suit it.
+    pub fn shot_hint(&self) -> flex_core::effects::ShotHint {
+        let r = self.shots.reading();
+        flex_core::effects::ShotHint { size: r.knows_size.then_some(r.size), scene: r.knows_scene.then_some(r.scene) }
+    }
+
     pub fn cut_shown(&mut self, shown: f32) -> bool {
         self.cuts.due.take_if(|at| *at <= shown).is_some()
     }
@@ -1068,6 +1107,7 @@ struct Given<'a> {
     rect: [f32; 4],
     video_time: f32,
     audio: Option<&'a Features>,
+    shot: crate::shot_type::Reading,
     has_depth: bool,
     ground: [f32; 4],
     has_masks: bool,
@@ -1178,6 +1218,11 @@ impl Slot {
             gl.uniform_1_f32(at("u_video_time").as_ref(), given.video_time);
             gl.uniform_1_f32(at("u_dt").as_ref(), given.dt);
             gl.uniform_1_f32(at("u_since_cut").as_ref(), given.since_cut.unwrap_or(1e6));
+            gl.uniform_1_f32(at("u_shot_size").as_ref(), given.shot.size);
+            gl.uniform_4_f32_slice(at("u_camera").as_ref(), &given.shot.camera);
+            gl.uniform_1_f32(at("u_handheld").as_ref(), given.shot.handheld);
+            gl.uniform_1_f32(at("u_pace").as_ref(), given.shot.pace);
+            gl.uniform_4_f32_slice(at("u_scene").as_ref(), &given.shot.scene);
             gl.uniform_1_f32(at("u_cut").as_ref(), given.since_cut.map_or(0.0, |s| (-s * 6.0).exp()));
             gl.uniform_1_i32(at("u_history").as_ref(), 5);
             let spot = given.history.unwrap_or_default();
@@ -1466,6 +1511,8 @@ struct DepthGl {
     has_masks: bool,
     /// Where the ground is, from the newest depth map.
     ground: [f32; 4],
+    /// New clues to the shot, and the positions they're from.
+    clues: Vec<(f32, crate::shot_type::Clues)>,
     /// The newest depth map, and how many have arrived.
     serial: u64,
     arrived: u32,
@@ -1531,9 +1578,13 @@ impl DepthGl {
                     }
                 }
             }
-            if let Some(map) = link.latest().filter(|m| m.serial != self.serial) {
-                let slot = self.next_map;
-                self.next_map = (slot + 1) % o.maps.len();
+            for map in link.take_maps() {
+                // A map carried to a frame may be followed by a better one of that frame.
+                let same = o.maps.iter().position(|(_, at)| *at == Some(map.time));
+                let slot = same.unwrap_or(self.next_map);
+                if same.is_none() {
+                    self.next_map = (slot + 1) % o.maps.len();
+                }
                 gl.bind_texture(glow::TEXTURE_2D, Some(o.maps[slot].0));
                 gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
                 let data: &[u8] = std::slice::from_raw_parts(map.values.as_ptr().cast(), map.values.len() * 4);
@@ -1547,10 +1598,13 @@ impl DepthGl {
                 gl.bind_texture(glow::TEXTURE_2D, None);
                 self.serial = map.serial;
                 self.ground = map.ground;
+                if let Some(clues) = map.clues {
+                    self.clues.push((map.time, clues));
+                }
                 o.maps[slot].1 = Some(map.time);
                 let late = clock - map.time;
                 // Outside this, it's a seek and says nothing about how long depth takes.
-                if (0.0..0.5).contains(&late) {
+                if !map.ahead && (0.0..0.5).contains(&late) {
                     self.arrived += 1;
                     self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
                     if self.arrived >= HOLD_AFTER_MAPS {
@@ -1558,7 +1612,7 @@ impl DepthGl {
                     }
                 }
             }
-            if self.pending.is_none() && link.ready_for_frame() && self.last_time != Some(time) {
+            if self.pending.is_none() && link.ready_for_frame(cuts.reset_between(self.handed, time)) && self.last_time != Some(time) {
                 self.last_time = Some(time);
                 self.pending_time = time;
                 // Just the picture, without black bars.
@@ -1657,6 +1711,8 @@ struct NetFlowGl {
     arrived: u32,
     late: f32,
     delay: f32,
+    /// What the newest movement says about the camera, and how fast things are going in it.
+    fit: Option<(crate::shot_type::Fit, f32)>,
 }
 
 impl NetFlowGl {
@@ -1727,6 +1783,10 @@ impl NetFlowGl {
                 // Going backwards: what's kept is from somewhere else.
                 if self.kept.iter().any(|(_, t)| t.is_some_and(|t| t > report.time)) {
                     self.kept.iter_mut().for_each(|k| k.1 = None);
+                }
+                if let Some(flow) = &report.flow {
+                    let aspect = (rect[2] - rect[0]) * size.0 as f32 / ((rect[3] - rect[1]) * size.1 as f32).max(1.0);
+                    self.fit = Some((crate::shot_type::fit(flow, (FLOW_WIDTH, FLOW_HEIGHT), aspect), crate::depth::fast_speed(flow)));
                 }
                 let texels = crate::flow::texels(report.flow.as_deref());
                 let slot = self.next;

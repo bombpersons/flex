@@ -1,5 +1,6 @@
 name = "Perfect Symmetry"
 description = "Each face is one half mirrored, which is much more unsettling than you'd think."
+suits = ["close"]
 faces = true
 mesh = true
 

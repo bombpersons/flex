@@ -1,5 +1,6 @@
 name = "Datamosh"
 description = "Frames smear into each other as if the file had been corrupted, and the beat knocks chunks of it clean."
+suits = ["action"]
 flow = true
 depth = true
 feedback = true

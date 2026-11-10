@@ -1,5 +1,6 @@
 name = "Big Heads"
 description = "Everyone's head swells up on top of a normal-sized body."
+suits = ["close"]
 faces = true
 audio = true
 

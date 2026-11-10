@@ -1,5 +1,6 @@
 name = "Cyborg"
 description = "Half of every face is torn away to show the machine underneath: steel plates, running circuits and a red eye."
+suits = ["close"]
 mesh = true
 audio = true
 

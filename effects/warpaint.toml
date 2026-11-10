@@ -1,5 +1,6 @@
 name = "War Paint"
 description = "Glowing tribal markings painted on every face, stuck to the skin whichever way it turns, flaring on the beat."
+suits = ["close"]
 mesh = true
 audio = true
 

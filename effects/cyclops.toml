@@ -1,5 +1,6 @@
 name = "Cyclops"
 description = "Everyone's eyes merge into one big eye in the middle of their face."
+suits = ["close"]
 faces = true
 audio = true
 

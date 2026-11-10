@@ -1,5 +1,6 @@
 name = "Wax Museum"
 description = "Faces soften like candle wax and run slowly down people's necks."
+suits = ["close", "quiet"]
 faces = true
 
 [[settings]]

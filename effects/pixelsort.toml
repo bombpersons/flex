@@ -1,5 +1,6 @@
 name = "Pixel Sort Waterfall"
 description = "Bright pixels pour down the screen in streams and pool at the bottom."
+suits = ["action"]
 depth = true
 feedback = true
 audio = true

@@ -1,5 +1,6 @@
 name = "Torchlight"
 description = "A dark room with a torch beam sweeping around it, picking out shapes by their distance and surface."
+suits = ["wide"]
 depth = true
 audio = true
 

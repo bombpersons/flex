@@ -1,5 +1,6 @@
 name = "Puppet Jaw"
 description = "Everyone's jaw drops open and flaps in time with the sound, like a cut-out puppet."
+suits = ["close", "dialogue"]
 faces = true
 mesh = true
 audio = true

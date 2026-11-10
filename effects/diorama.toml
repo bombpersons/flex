@@ -1,5 +1,6 @@
 name = "Diorama"
 description = "Moves the camera inside the shot: the picture becomes layers that drift apart, a dolly-zoom, or red and cyan 3D"
+suits = ["wide"]
 audio = true
 depth = true
 

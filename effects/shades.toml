@@ -1,5 +1,6 @@
 name = "Deal With It"
 description = "Pixel sunglasses drop out of the sky and land on every face."
+suits = ["close"]
 faces = true
 audio = true
 feedback = true

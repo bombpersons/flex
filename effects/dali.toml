@@ -1,5 +1,6 @@
 name = "Melting Clocks"
 description = "Anything with an edge droops over it and drips down what's behind, like a Dali painting, under a golden sky."
+suits = ["quiet"]
 depth = true
 segment = true
 

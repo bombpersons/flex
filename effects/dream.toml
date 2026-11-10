@@ -1,5 +1,6 @@
 name = "Dream"
 description = "A DeepDream-like effect: the picture swirls, blossoms and sprouts detail as it feeds back on itself"
+suits = ["quiet"]
 depth = true
 feedback = true
 audio = true

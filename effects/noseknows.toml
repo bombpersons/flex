@@ -1,5 +1,6 @@
 name = "Follow Your Nose"
 description = "A beam of light comes out of everyone's nose and goes wherever their head is pointing, even when they're side-on."
+suits = ["close"]
 mesh = true
 
 [[settings]]

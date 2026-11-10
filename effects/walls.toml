@@ -1,5 +1,6 @@
 name = "Breathing Walls"
 description = "The room is inside something alive: the walls swell and sink with each breath, buckling into wet folds and throbbing veins, while the people carry on."
+suits = ["wide"]
 segment = true
 depth = true
 plate = true

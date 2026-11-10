@@ -15,6 +15,7 @@ mod face_map;
 mod faces;
 mod flow;
 mod gpu;
+mod shot_type;
 mod ground;
 mod images;
 mod input;

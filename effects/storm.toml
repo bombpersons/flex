@@ -1,5 +1,6 @@
 name = "Thunderstorm"
 description = "Rain sheets down through the scene behind whatever's close, lit by lightning that catches the distance first."
+suits = ["wide"]
 depth = true
 audio = true
 

@@ -4,7 +4,7 @@
 //! without forgetting it; its settings are kept per effect. Shuffle swaps the chosen effect
 //! at random, fading from one to the next.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use flex_plugin::Settings;
@@ -58,6 +58,14 @@ pub struct Manifest {
     /// Measure the picture's palette and brightness.
     #[serde(default)]
     pub stats: bool,
+    /// The kinds of shot or scene this suits, out of `SUITS`: with shuffle at scene cuts, it comes
+    /// up more often in those and less often otherwise.
+    #[serde(default)]
+    pub suits: Vec<String>,
+    /// Work out what sort of shot this is and what's going on across the last few (`u_shot_size`,
+    /// `u_camera`, `u_handheld`, `u_pace`, `u_scene`). Runs depth, masks, faces and the sound.
+    #[serde(default)]
+    pub scene: bool,
     /// Size to work at, relative to the screen (0.25–1): lower is lighter on the GPU.
     #[serde(default = "full")]
     pub scale: f32,
@@ -78,7 +86,7 @@ fn yes() -> bool {
 
 impl Default for Manifest {
     fn default() -> Self {
-        Self { name: String::new(), description: String::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scale: 1.0, shuffle: true, settings: Vec::new() }
+        Self { name: String::new(), description: String::new(), suits: Vec::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, scale: 1.0, shuffle: true, settings: Vec::new() }
     }
 }
 
@@ -181,8 +189,62 @@ pub struct Needs {
     pub plate: bool,
     pub cuts: bool,
     pub stats: bool,
+    pub scene: bool,
     /// The largest size any of them works at (0.25–1).
     pub scale: f32,
+}
+
+/// What a manifest's `suits` can have in it.
+pub const SUITS: [&str; 5] = ["close", "wide", "action", "dialogue", "quiet"];
+/// How much of the shuffle (one in this many) stays out for having had a turn lately.
+const RECENT_SHARE: usize = 3;
+/// How likely an effect is, against 1 for one that doesn't say what it suits: this much if
+/// it doesn't suit the shot at all, and this much more if it fits perfectly.
+const LEAST_WEIGHT: f32 = 0.25;
+const MOST_EXTRA_WEIGHT: f32 = 2.75;
+
+/// What a shot's like, as far as is known.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShotHint {
+    /// 0 very wide to 1 extreme close-up.
+    pub size: Option<f32>,
+    /// Action, dialogue, quiet and montage, each 0 to 1.
+    pub scene: Option<[f32; 4]>,
+}
+
+fn smooth(from: f32, to: f32, x: f32) -> f32 {
+    let t = ((x - from) / (to - from)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// How much a kind of shot fits `hint`, from 0 to 1, if that's known.
+fn suit_match(suit: &str, hint: ShotHint) -> Option<f32> {
+    let score = |i: usize| hint.scene.map(|s| smooth(0.25, 0.7, s[i]));
+    match suit {
+        "close" => hint.size.map(|s| smooth(0.5, 0.75, s)),
+        "wide" => hint.size.map(|s| 1.0 - smooth(0.25, 0.45, s)),
+        "action" => score(0),
+        "dialogue" => score(1),
+        "quiet" => score(2),
+        _ => None,
+    }
+}
+
+/// How likely an effect that suits `suits` is for a shot like `hint`.
+fn suit_weight(suits: &[String], hint: ShotHint) -> f32 {
+    suits.iter().filter_map(|s| suit_match(s, hint)).reduce(f32::max).map_or(1.0, |fits| LEAST_WEIGHT + MOST_EXTRA_WEIGHT * fits)
+}
+
+/// Which of `weights` a roll from 0 to 1 lands on, each as likely as its weight.
+fn weighted_pick(weights: &[f32], roll: f32) -> Option<usize> {
+    let mut left = roll * weights.iter().sum::<f32>();
+    for (i, weight) in weights.iter().enumerate() {
+        left -= weight;
+        if left < 0.0 {
+            return Some(i);
+        }
+    }
+    weights.len().checked_sub(1)
 }
 
 /// Effects taking turns at random.
@@ -198,6 +260,8 @@ pub struct Shuffle {
     /// Change where the shot changes, once the shortest turn is up, instead of at a random
     /// moment. After the longest turn it changes anyway.
     pub at_cuts: bool,
+    /// At scene cuts, favour effects that suit the new shot.
+    pub by_shot: bool,
     /// How far each effect's settings are moved at random whenever it comes up, in percent:
     /// 0 leaves them alone, 100 can land anywhere in their range.
     pub randomise: f32,
@@ -205,7 +269,7 @@ pub struct Shuffle {
 
 impl Default for Shuffle {
     fn default() -> Self {
-        Self { on: false, shortest: 20.0, longest: 60.0, fade: 4.0, at_cuts: false, randomise: 0.0 }
+        Self { on: false, shortest: 20.0, longest: 60.0, fade: 4.0, at_cuts: false, by_shot: true, randomise: 0.0 }
     }
 }
 
@@ -269,6 +333,8 @@ pub struct Effects {
     fading: Option<Fading>,
     /// What shuffle hasn't played yet this time round.
     turns: Vec<String>,
+    /// The latest turns, oldest first, which `next_suiting` leaves out.
+    recent: VecDeque<String>,
     random: u64,
     drift: Drift,
     /// How far along drifting is, which only moves while playing.
@@ -490,7 +556,7 @@ impl Effects {
         if self.until_next > 0.0 && !broken {
             return;
         }
-        self.change_turn(!broken);
+        self.change_turn(!broken, None);
     }
 
     /// Picks this turn's settings for an effect, each somewhere between how it's been set and
@@ -527,9 +593,33 @@ impl Effects {
         self.rolled.insert(id.to_owned(), rolled);
     }
 
-    fn change_turn(&mut self, may_fade: bool) {
+    /// The next effect for a shot like `hint`: any of them, but mostly ones that suit it, and
+    /// none that has had a turn lately.
+    fn next_suiting(&mut self, hint: ShotHint) -> Option<String> {
+        let chosen = self.chosen.clone();
+        let (recent, effects) = (&self.recent, &self.effects);
+        let pool: Vec<(&str, f32)> = effects
+            .iter()
+            .filter(|e| self.in_shuffle(&e.id) && Some(&e.id) != chosen.as_ref() && !recent.contains(&e.id))
+            .map(|e| (e.id.as_str(), suit_weight(&e.manifest.suits, hint)))
+            .collect();
+        let weights: Vec<f32> = pool.iter().map(|p| p.1).collect();
+        let pool: Vec<String> = pool.into_iter().map(|p| p.0.to_owned()).collect();
+        let roll = self.roll();
+        let picked = weighted_pick(&weights, roll).map(|i| pool[i].clone())?;
+        log::debug!("shuffle: {picked} for size {:?}, scene {:?}", hint.size, hint.scene);
+        self.turns.retain(|id| *id != picked);
+        Some(picked)
+    }
+
+    fn change_turn(&mut self, may_fade: bool, hint: Option<ShotHint>) {
         self.wait();
-        let Some(next) = self.next_turn() else { return };
+        let Some(next) = hint.and_then(|hint| self.next_suiting(hint)).or_else(|| self.next_turn()) else { return };
+        let most_recent = self.effects.iter().filter(|e| self.in_shuffle(&e.id)).count() / RECENT_SHARE;
+        self.recent.push_back(next.clone());
+        while self.recent.len() > most_recent {
+            self.recent.pop_front();
+        }
         self.rolled.retain(|id, _| Some(id) == self.chosen.as_ref());
         self.roll_settings(&next);
         let from = self.chosen.replace(next);
@@ -542,13 +632,14 @@ impl Effects {
         self.on && self.shuffle.on && self.shuffle.at_cuts
     }
 
-    /// The shot has just changed: moves to the next effect if this one has had its turn.
-    pub fn scene_changed(&mut self) {
+    /// The shot has just changed to one like `hint`: moves to the next effect if this one has
+    /// had its turn.
+    pub fn scene_changed(&mut self, hint: ShotHint) {
         let shortest = self.shuffle.shortest.min(self.shuffle.longest);
         if !self.wants_cuts() || self.turn < shortest {
             return;
         }
-        self.change_turn(true);
+        self.change_turn(true, self.shuffle.by_shot.then_some(hint));
     }
 
     /// The effect fading out, and how far `active` has faded in over it (0–1), during a fade.
@@ -568,19 +659,22 @@ impl Effects {
             let id = Some(e.id.as_str());
             self.on && (id == self.chosen.as_deref() || id == fading || (self.shuffle.on && self.in_shuffle(&e.id)))
         });
-        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scale: 0.25 };
+        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, scale: 0.25 };
         for e in counted {
             let m = &e.manifest;
-            needs.audio |= m.audio;
-            needs.depth |= m.depth || m.segment || m.plate;
-            needs.segment |= m.segment || m.plate;
-            needs.faces |= m.faces || m.mesh;
+            // Shuffle needs to know about the shot to choose an effect that suits it.
+            let scene = m.scene || (self.wants_cuts() && self.shuffle.by_shot && !m.suits.is_empty());
+            needs.audio |= m.audio || scene;
+            needs.depth |= m.depth || m.segment || m.plate || scene;
+            needs.segment |= m.segment || m.plate || scene;
+            needs.faces |= m.faces || m.mesh || scene;
             needs.mesh |= m.mesh;
             needs.history |= m.history;
             needs.flow |= m.flow;
             needs.plate |= m.plate;
-            needs.cuts |= m.cuts;
+            needs.cuts |= m.cuts || scene;
             needs.stats |= m.stats;
+            needs.scene |= scene;
             needs.scale = needs.scale.max(usable_scale(m.scale));
         }
         needs
@@ -708,6 +802,47 @@ fn usable_scale(scale: f32) -> f32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn effects_only_say_they_suit_kinds_of_shot_that_exist() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../effects");
+        let mut found = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                let manifest: Manifest = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                found += manifest.suits.len();
+                assert!(manifest.suits.iter().all(|s| SUITS.contains(&s.as_str())), "{path:?}");
+            }
+        }
+        assert!(found > 0);
+    }
+
+    #[test]
+    fn shuffle_saved_before_there_was_a_choice_goes_by_the_shot() {
+        let saved: Shuffle = serde_json::from_str(r#"{"on":true,"at_cuts":true}"#).unwrap();
+        assert!(saved.by_shot);
+    }
+
+    #[test]
+    fn shots_favour_the_effects_that_suit_them() {
+        let close = vec!["close".to_owned()];
+        let wide = vec!["wide".to_owned()];
+        let hint = ShotHint { size: Some(0.8), scene: None };
+        assert!(suit_weight(&close, hint) > 2.5);
+        assert!(suit_weight(&wide, hint) < 0.3);
+        assert_eq!(suit_weight(&[], hint), 1.0);
+        // Nothing known: as likely as any other.
+        assert_eq!(suit_weight(&close, ShotHint::default()), 1.0);
+    }
+
+    #[test]
+    fn a_pick_goes_by_weight() {
+        assert_eq!(weighted_pick(&[1.0, 3.0], 0.2), Some(0));
+        assert_eq!(weighted_pick(&[1.0, 3.0], 0.3), Some(1));
+        assert_eq!(weighted_pick(&[1.0, 3.0], 1.0), Some(1));
+        assert_eq!(weighted_pick(&[], 0.5), None);
+    }
+
     fn write(dir: &Path, name: &str, text: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(name), text).unwrap();
@@ -779,7 +914,7 @@ mod tests {
         let mut effects = Effects::new(&dirs, &db);
         assert!(!effects.needs().audio, "nothing's on");
 
-        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, randomise: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, by_shot: false, randomise: 0.0 }, &db);
         let first = effects.chosen().expect("shuffle starts one").id.clone();
         let needs = effects.needs();
         assert_eq!((needs.audio, needs.depth, needs.faces, needs.scale), (true, true, false, 1.0), "all that it might pick");
@@ -816,13 +951,13 @@ mod tests {
         assert!(effects.fading().is_none());
 
         // At cuts: not before the shortest turn, and only when asked to.
-        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 30.0, fade: 2.0, at_cuts: true, randomise: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 30.0, fade: 2.0, at_cuts: true, by_shot: false, randomise: 0.0 }, &db);
         let before = effects.chosen().unwrap().id.clone();
         effects.step(9.0, true);
-        effects.scene_changed();
+        effects.scene_changed(ShotHint::default());
         assert_eq!(effects.chosen().unwrap().id, before, "too soon");
         effects.step(2.0, true);
-        effects.scene_changed();
+        effects.scene_changed(ShotHint::default());
         assert_ne!(effects.chosen().unwrap().id, before);
         assert_eq!(effects.fading().unwrap().0.id, before, "fades there too");
         let at_cut = effects.chosen().unwrap().id.clone();
@@ -831,23 +966,23 @@ mod tests {
         effects.step(2.0, true);
         assert_ne!(effects.chosen().unwrap().id, at_cut);
         // A fade of 0 switches at once, whichever way it's changing.
-        effects.set_shuffle(Shuffle { on: true, shortest: 1.0, longest: 30.0, fade: 0.0, at_cuts: true, randomise: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 1.0, longest: 30.0, fade: 0.0, at_cuts: true, by_shot: false, randomise: 0.0 }, &db);
         effects.step(2.0, true);
         let sharp = effects.chosen().unwrap().id.clone();
-        effects.scene_changed();
+        effects.scene_changed(ShotHint::default());
         assert_ne!(effects.chosen().unwrap().id, sharp);
         assert!(effects.fading().is_none());
-        effects.set_shuffle(Shuffle { on: true, shortest: 5.0, longest: 5.0, fade: 0.0, at_cuts: false, randomise: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 5.0, longest: 5.0, fade: 0.0, at_cuts: false, by_shot: false, randomise: 0.0 }, &db);
         let sharp = effects.chosen().unwrap().id.clone();
         effects.step(6.0, true);
         assert_ne!(effects.chosen().unwrap().id, sharp);
         assert!(effects.fading().is_none());
-        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, randomise: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, by_shot: false, randomise: 0.0 }, &db);
         effects.step(2.0, false);
         effects.step(11.0, true);
         let moved = effects.chosen().unwrap().id.clone();
         effects.step(2.5, true);
-        effects.scene_changed();
+        effects.scene_changed(ShotHint::default());
         assert_eq!(effects.chosen().unwrap().id, moved, "cuts are ignored unless asked for");
 
         // Choosing one stops any fade; both are kept.
@@ -909,7 +1044,7 @@ mod tests {
         let dirs = [root.clone()];
         let mut effects = Effects::new(&dirs, &db);
         effects.choose(Some("one"), &db);
-        let on = Shuffle { on: true, shortest: 1.0, longest: 1.0, fade: 0.0, at_cuts: false, randomise: 100.0 };
+        let on = Shuffle { on: true, shortest: 1.0, longest: 1.0, fade: 0.0, at_cuts: false, by_shot: false, randomise: 100.0 };
         effects.set_shuffle(on, &db);
 
         let mut seen = std::collections::HashSet::new();

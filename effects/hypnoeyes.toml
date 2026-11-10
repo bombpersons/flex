@@ -1,5 +1,6 @@
 name = "Hypno Eyes"
 description = "Everyone's eyes turn into spinning hypnotic spirals."
+suits = ["close"]
 faces = true
 mesh = true
 audio = true

@@ -1,5 +1,6 @@
 name = "Face Swap Roulette"
 description = "Everyone's faces swap places, and swap again every few seconds."
+suits = ["close", "dialogue"]
 faces = true
 mesh = true
 

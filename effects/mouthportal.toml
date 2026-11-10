@@ -1,5 +1,6 @@
 name = "Mouth Portal"
 description = "Open mouths are holes into a swirling galaxy, the wider the mouth the brighter it shines out."
+suits = ["close", "dialogue"]
 mesh = true
 audio = true
 

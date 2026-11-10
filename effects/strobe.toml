@@ -1,5 +1,6 @@
 name = "Strobe Sculpture"
 description = "On every beat people leave a frozen, glowing statue of themselves that slowly fades."
+suits = ["action"]
 segment = true
 audio = true
 feedback = true

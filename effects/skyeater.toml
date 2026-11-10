@@ -1,5 +1,6 @@
 name = "Sky Eater"
 description = "The sky opens into a spiral that endlessly swallows the rest of the film."
+suits = ["wide"]
 segment = true
 audio = true
 

@@ -1,5 +1,6 @@
 name = "Long Face"
 description = "Faces stretch like toffee, chins sagging further with the bass."
+suits = ["close"]
 faces = true
 audio = true
 

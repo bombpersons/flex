@@ -1,5 +1,6 @@
 name = "Point Cloud"
 description = "The scene becomes millions of floating dots in 3D, while the camera drifts around them."
+suits = ["wide"]
 depth = true
 audio = true
 

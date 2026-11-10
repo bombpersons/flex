@@ -1,5 +1,6 @@
 name = "Film Mountains"
 description = "The picture turned into a landscape you fly over: close things are peaks, far things are valleys."
+suits = ["wide"]
 depth = true
 audio = true
 scale = 0.75

@@ -1,5 +1,6 @@
 name = "Beyond the Veil"
 description = "Past a shimmering line in the distance, the world turns into something else."
+suits = ["wide"]
 depth = true
 audio = true
 

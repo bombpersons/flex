@@ -1,5 +1,6 @@
 name = "Melting People"
 description = "People sag and drip downwards, running off in streams that pool at the bottom of the picture."
+suits = ["quiet"]
 segment = true
 feedback = true
 audio = true

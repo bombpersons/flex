@@ -1,5 +1,6 @@
 name = "Pinocchio"
 description = "Noses grow for as long as a shot lasts, then snap back at the cut."
+suits = ["close"]
 faces = true
 mesh = true
 feedback = true

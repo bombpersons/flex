@@ -16,6 +16,13 @@ const IDLE: Duration = Duration::from_secs(20);
 /// for the picture too.
 const MIN_INTERVAL: Duration = Duration::from_millis(10);
 const INTERVAL_PER_RUN: f32 = 1.3;
+/// The least time between frames when depth is being carried along the movement: every second
+/// frame of a film, leaving the GPU room for depth.
+const CARRYING_INTERVAL: Duration = Duration::from_millis(66);
+/// Slower than this on average (ms), after the first few runs, and depth isn't carried along the
+/// movement: this GPU is better off running depth on every frame by itself.
+const TOO_SLOW_TO_CARRY: f32 = 70.0;
+const RUNS_BEFORE_JUDGING: u32 = 30;
 /// Reports waiting for the player to collect them.
 const MOST_WAITING: usize = 16;
 /// A gap this long (seconds) between frames isn't movement.
@@ -82,6 +89,9 @@ struct State {
     busy: bool,
     reports: VecDeque<Report>,
     last_wanted: Instant,
+    /// The depth worker to tell about the movement too, if it's carrying its maps along it.
+    carrying: Option<crate::depth::Link>,
+    too_slow_to_carry: bool,
 }
 
 /// Shared between the UI, the paint callback and the worker.
@@ -90,7 +100,7 @@ pub struct Link(Arc<(Mutex<State>, Condvar)>);
 
 impl Default for Link {
     fn default() -> Self {
-        let state = State { status: Status::Off, running: false, input: None, busy: false, reports: VecDeque::new(), last_wanted: Instant::now() };
+        let state = State { status: Status::Off, running: false, input: None, busy: false, reports: VecDeque::new(), last_wanted: Instant::now(), carrying: None, too_slow_to_carry: false };
         Self(Arc::new((Mutex::new(state), Condvar::new())))
     }
 }
@@ -100,10 +110,12 @@ impl Link {
         self.0.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// An effect wants movement: starts the worker if it isn't running. Call every frame.
-    pub fn wanted(&self) {
+    /// An effect wants movement: starts the worker if it isn't running. `carrying` is the depth
+    /// worker, if it should carry its maps along the movement. Call every frame.
+    pub fn wanted(&self, carrying: Option<crate::depth::Link>) {
         let mut state = self.lock();
         state.last_wanted = Instant::now();
+        state.carrying = carrying;
         if state.running || matches!(state.status, Status::Failed(_)) {
             return;
         }
@@ -120,6 +132,12 @@ impl Link {
 
     pub fn status(&self) -> Status {
         self.lock().status.clone()
+    }
+
+    /// Whether depth can be carried along the movement on this GPU.
+    pub fn can_carry(&self) -> bool {
+        let state = self.lock();
+        !state.too_slow_to_carry && !matches!(state.status, Status::Failed(_))
     }
 
     /// Whether the worker would take a frame now.
@@ -142,6 +160,9 @@ impl Link {
 
     fn publish(&self, report: Report) {
         let mut state = self.lock();
+        if let Some(depth) = &state.carrying {
+            depth.carry(Report { time: report.time, flow: report.flow.clone() });
+        }
         state.reports.push_back(report);
         let extra = state.reports.len().saturating_sub(MOST_WAITING);
         state.reports.drain(..extra);
@@ -164,6 +185,7 @@ impl Link {
         let mut rgb = vec![0u8; WIDTH * HEIGHT * 3];
         let mut last_time: Option<f32> = None;
         let mut ms = 0.0f32;
+        let mut runs = 0;
         loop {
             let input = {
                 let mut state = self.lock();
@@ -209,10 +231,19 @@ impl Link {
             self.publish(Report { time: input.time, flow });
 
             ms = if ms == 0.0 { run } else { ms + (run - ms) * 0.1 };
-            if let Status::Ready { ms: shown, .. } = &mut self.lock().status {
-                *shown = ms;
+            runs += 1;
+            {
+                let mut state = self.lock();
+                if let Status::Ready { ms: shown, .. } = &mut state.status {
+                    *shown = ms;
+                }
+                if runs >= RUNS_BEFORE_JUDGING && ms > TOO_SLOW_TO_CARRY && !state.too_slow_to_carry {
+                    log::info!("flow: {ms:.0} ms a frame, too slow to carry depth along");
+                    state.too_slow_to_carry = true;
+                }
             }
-            let own = MIN_INTERVAL.max(Duration::from_secs_f32(ms * INTERVAL_PER_RUN / 1000.0));
+            let least = if self.lock().carrying.is_some() { CARRYING_INTERVAL } else { MIN_INTERVAL };
+            let own = least.max(Duration::from_secs_f32(ms * INTERVAL_PER_RUN / 1000.0));
             std::thread::sleep(crate::gpu::rest(crate::gpu::Net::Flow, own).saturating_sub(started.elapsed()));
             self.lock().busy = false;
         }

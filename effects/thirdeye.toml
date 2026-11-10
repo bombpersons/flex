@@ -1,5 +1,6 @@
 name = "Third Eye"
 description = "Everyone grows a real eye in the middle of their forehead, which opens up on the beat and lights the room."
+suits = ["close"]
 faces = true
 mesh = true
 audio = true

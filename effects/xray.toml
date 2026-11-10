@@ -1,5 +1,6 @@
 name = "X-Ray"
 description = "A scanner sweeps across the picture, and wherever it passes, faces turn into grinning skulls."
+suits = ["close"]
 mesh = true
 audio = true
 

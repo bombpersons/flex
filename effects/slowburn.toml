@@ -1,5 +1,6 @@
 name = "Slow Burn"
 description = "The picture gets stranger the longer a shot goes on, and every cut snaps it back."
+suits = ["quiet"]
 cuts = true
 audio = true
 

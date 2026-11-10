@@ -1,5 +1,6 @@
 name = "Clown Car"
 description = "White greasepaint on the skin, a big red smile, diamond eyes and a red nose that swells on the beat."
+suits = ["close"]
 faces = true
 mesh = true
 audio = true

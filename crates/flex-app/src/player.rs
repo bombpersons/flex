@@ -70,6 +70,8 @@ pub struct Player {
     effect_inputs: crate::effects::Inputs,
     /// What mpv's audio-delay is set to, to match the picture being held back for depth.
     audio_held: f32,
+    /// A new shot reached the screen on the last frame, so Shuffle can see what it's like now.
+    shot_due: bool,
     /// Hold OK: choosing the effect and changing its settings while the video plays.
     effect_panel: Option<EffectPanel>,
     /// For the history: when this session started, the furthest position recorded, whether
@@ -153,6 +155,7 @@ impl Player {
             position: None,
             effect_inputs: Default::default(),
             audio_held: 0.0,
+            shot_due: false,
             effect_panel: None,
             session_start: crate::shared::now_unix(),
             recorded: None,
@@ -479,6 +482,9 @@ impl Player {
                 lines.push(format!("Effect motion: {}", motion.status().describe()));
             }
             lines.extend(crate::gpu::describe());
+            if frame.needs.scene {
+                lines.extend(crate::shot_type::describe());
+            }
         }
         if let Some(light) = light {
             let [r, g, b] = light.zones[0];
@@ -673,10 +679,14 @@ impl Player {
         let clock = sh.effects.active().is_some().then(|| self.effect_inputs.tick(&self.mpv, sh.effects.needs().audio));
         // Changing as the new shot reaches the screen, which, with the picture held back, is
         // a little after the cut was found.
+        if std::mem::take(&mut self.shot_due) {
+            let hint = effects.lock().unwrap_or_else(|e| e.into_inner()).shot_hint();
+            sh.effects.scene_changed(hint);
+        }
         if let Some((video_time, _)) = &clock
             && effects.lock().unwrap_or_else(|e| e.into_inner()).cut_shown(video_time - held)
         {
-            sh.effects.scene_changed();
+            self.shot_due = true;
         }
         let effect = sh.effects.active();
         if let Some(effect) = &effect {
@@ -690,16 +700,19 @@ impl Player {
             (Some(effect), Some((video_time, audio))) => {
                 let needs = sh.effects.needs();
                 let pts = self.mpv.get_f64("time-pos").map_or(video_time, |p| p as f32);
+                // Depth is carried along the movement, which runs for that even if the effect
+                // doesn't use it, as long as the GPU can manage.
+                let carried = needs.depth && sh.motion.can_carry();
                 let depth = needs.depth.then(|| {
-                    sh.depth.wanted(needs.segment);
+                    sh.depth.wanted(needs.segment, carried);
                     sh.depth.clone()
                 });
                 let faces = needs.faces.then(|| {
                     sh.faces.wanted(needs.mesh);
                     sh.faces.clone()
                 });
-                let motion = needs.flow.then(|| {
-                    sh.motion.wanted();
+                let motion = (needs.flow || carried).then(|| {
+                    sh.motion.wanted(carried.then(|| sh.depth.clone()));
                     sh.motion.clone()
                 });
                 let fading = sh.effects.fading();

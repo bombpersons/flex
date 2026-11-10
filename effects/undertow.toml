@@ -1,5 +1,6 @@
 name = "Undertow"
 description = "The background melts and pours away in colour while whoever's up close stays solid"
+suits = ["quiet"]
 feedback = true
 audio = true
 depth = true

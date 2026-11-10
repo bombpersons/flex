@@ -1,5 +1,6 @@
 name = "Spotlight"
 description = "Faces stay as they are while everything around them melts and dims."
+suits = ["close"]
 depth = true
 faces = true
 audio = true

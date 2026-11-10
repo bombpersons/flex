@@ -1,5 +1,6 @@
 name = "Melt"
 description = "A trippy video effect: a turning kaleidoscope with colour-shifting trails"
+suits = ["quiet"]
 depth = true
 feedback = true
 audio = true

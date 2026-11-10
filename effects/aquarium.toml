@@ -1,5 +1,6 @@
 name = "Aquarium"
 description = "The room really floods: a water surface lying level with the floor or table that wraps around people and furniture, with reflections, wakes, caustics, fish, and bubbles from people's mouths."
+suits = ["wide"]
 depth = true
 segment = true
 faces = true

@@ -1,5 +1,6 @@
 name = "Kaleidoface"
 description = "A kaleidoscope with someone's nose at the middle, which follows them around the screen."
+suits = ["close"]
 faces = true
 audio = true
 

@@ -1,5 +1,6 @@
 name = "Lidar Sweep"
 description = "A dark scene revealed by sweeps of laser light travelling away from the camera."
+suits = ["wide"]
 depth = true
 audio = true
 

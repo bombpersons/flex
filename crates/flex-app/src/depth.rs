@@ -5,12 +5,14 @@
 //! The model (99 MB) is downloaded into the data folder the first time it's needed. The
 //! thread stops, freeing the GPU memory, once nothing has asked for depth for a while.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use flex_depth::Depth;
 
+use crate::flow::{FLOW_HEIGHT, FLOW_WIDTH, Report};
 use crate::ground::Ground;
 
 /// The sizes the model can run at, in patches of 14 pixels, biggest first: all about 16:9. Below
@@ -45,6 +47,24 @@ const RANGE_FOLLOW: f32 = 0.2;
 /// At most this often, to leave the GPU time for the video (~30 depth maps a second, so a
 /// film's every frame gets one if the GPU can manage it).
 const MIN_INTERVAL: Duration = Duration::from_millis(33);
+/// With movement to carry them along, depth and masks come from the model less often: starting
+/// at this size, this often (every fourth frame of a film), or at once after a cut. That leaves
+/// each run longer, so the limits for moving between sizes are higher.
+const CARRIED_LEVEL: usize = 1;
+const CARRIED_TOO_SLOW: f32 = 75.0;
+const CARRIED_ROOM: f32 = 55.0;
+const CARRIED_INTERVAL: Duration = Duration::from_millis(150);
+/// Carrying is worst when things move fast, or the last run found it had gone wrong, and then
+/// the model runs this often (every second frame). Fast is the speed nine tenths of the picture
+/// is under, in fractions of the picture a second; gone wrong is how much depth (0–1) differed
+/// on average. Both were chosen on film: about the worst tenth of moments.
+const CARRIED_SOON: Duration = Duration::from_millis(70);
+const CARRIED_FAST: f32 = 0.86;
+const CARRIED_WRONG: f32 = 0.118;
+/// The most (seconds) a map is carried by one report of movement.
+const CARRIED_REACH: f32 = 0.5;
+/// Maps waiting for the player to collect them.
+const MOST_MAPS: usize = 6;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -60,6 +80,8 @@ pub enum Status {
         size: (usize, usize),
         /// Whether people, walls and sky are being found too.
         masks: bool,
+        /// Whether maps are being carried along the movement between runs.
+        carried: bool,
     },
     Failed(String),
 }
@@ -70,7 +92,7 @@ impl Status {
             Status::Off => "off".into(),
             Status::Starting => "starting…".into(),
             Status::Downloading(p) => format!("downloading the depth model ({p}%)…"),
-            Status::Ready { adapter, ms, size, masks } => format!("{ms:.0} ms a frame at {}×{}{} on {adapter}", size.0, size.1, if *masks { " with masks" } else { "" }),
+            Status::Ready { adapter, ms, size, masks, carried } => format!("{ms:.0} ms a frame at {}×{}{}{} on {adapter}", size.0, size.1, if *masks { " with masks" } else { "" }, if *carried { ", carried by movement" } else { "" }),
             Status::Failed(e) => format!("⚠ {e}"),
         }
     }
@@ -88,6 +110,10 @@ pub struct DepthMap {
     pub masks: Option<Vec<u8>>,
     /// Where the ground is, as `ground::Ground::update` gives it.
     pub ground: [f32; 4],
+    /// A guess at a frame that hasn't been seen yet, carried on along the last movement.
+    pub ahead: bool,
+    /// What can be told about the shot, when the model's just looked at the picture.
+    pub clues: Option<crate::shot_type::Clues>,
 }
 
 struct State {
@@ -97,10 +123,18 @@ struct State {
     /// position, and whether there's been a scene cut since the last one handed over.
     input: Option<(Vec<u8>, f32, bool)>,
     busy: bool,
-    output: Option<Arc<DepthMap>>,
+    /// Maps not collected yet, oldest first.
+    output: VecDeque<Arc<DepthMap>>,
     last_wanted: Instant,
     /// Whether an effect wants people, walls and sky as well as depth.
     masks_wanted: bool,
+    /// Whether to carry maps along the movement, and what's come in of it.
+    carried: bool,
+    moves: VecDeque<Report>,
+    /// When carrying: when the model last started, and no frame before this unless there's been
+    /// a cut.
+    last_run: Option<Instant>,
+    not_before: Option<Instant>,
     /// Into `LEVELS`, kept so the next video starts at the size that worked for this one.
     level: usize,
 }
@@ -123,19 +157,21 @@ impl Pace {
         Self { level, average: None, changed: now, retry: None }
     }
 
-    /// A map took `ms`. Returns the level to move to, if it's time to move.
-    fn update(&mut self, ms: f32, now: Instant) -> Option<usize> {
+    /// A map took `ms`, with maps `carried` along the movement or not. Returns the level to move
+    /// to, if it's time to move.
+    fn update(&mut self, ms: f32, now: Instant, carried: bool) -> Option<usize> {
+        let (too_slow, room) = if carried { (CARRIED_TOO_SLOW, CARRIED_ROOM) } else { (TOO_SLOW, ROOM) };
         let average = self.average.map_or(ms, |a| a + (ms - a) * PACE_FOLLOW);
         self.average = Some(average);
         if now.duration_since(self.changed) < SETTLE {
             return None;
         }
         let at = |level| average * tokens(level) / tokens(self.level);
-        let level = if average > TOO_SLOW && self.level + 1 < LEVELS.len() {
+        let level = if average > too_slow && self.level + 1 < LEVELS.len() {
             // Straight to the size that should be fast enough, or the smallest.
             self.retry = Some(now + RETRY);
-            (self.level + 1..LEVELS.len()).find(|l| at(*l) <= TOO_SLOW).unwrap_or(LEVELS.len() - 1)
-        } else if self.level > 0 && at(self.level - 1) <= ROOM && self.retry.is_none_or(|t| now >= t) {
+            (self.level + 1..LEVELS.len()).find(|l| at(*l) <= too_slow).unwrap_or(LEVELS.len() - 1)
+        } else if self.level > 0 && at(self.level - 1) <= room && self.retry.is_none_or(|t| now >= t) {
             self.level - 1
         } else {
             return None;
@@ -258,13 +294,160 @@ fn settle(values: &mut [f32], previous: &[f32], size: (usize, usize)) {
     }
 }
 
+/// `plane` (`WIDTH` × `HEIGHT`) after `seconds` of movement, the movement being x and y in
+/// fractions of the picture a second at that size, all rows from the top.
+fn carried(plane: &[f32], flow: &[Vec<f32>; 2], seconds: f32) -> Vec<f32> {
+    let (w, h) = (WIDTH as f32, HEIGHT as f32);
+    let mut out = Vec::with_capacity(plane.len());
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let at = y * WIDTH + x;
+            // What's here now was back along the movement.
+            let from_x = (x as f32 - flow[0][at] * seconds * w).clamp(0.0, w - 1.0);
+            let from_y = (y as f32 - flow[1][at] * seconds * h).clamp(0.0, h - 1.0);
+            let (x0, y0) = (from_x as usize, from_y as usize);
+            let (x1, y1) = ((x0 + 1).min(WIDTH - 1), (y0 + 1).min(HEIGHT - 1));
+            let (tx, ty) = (from_x - x0 as f32, from_y - y0 as f32);
+            let (r0, r1) = (&plane[y0 * WIDTH..][..WIDTH], &plane[y1 * WIDTH..][..WIDTH]);
+            let top = r0[x0] + (r0[x1] - r0[x0]) * tx;
+            let bottom = r1[x0] + (r1[x1] - r1[x0]) * tx;
+            out.push(top + (bottom - top) * ty);
+        }
+    }
+    out
+}
+
+/// What's known of the picture at one moment, rows from the top.
+struct Picture {
+    depth: Vec<f32>,
+    masks: Option<[Vec<f32>; MASKS]>,
+    time: f32,
+}
+
+impl Picture {
+    fn moved(&self, flow: &[Vec<f32>; 2], seconds: f32) -> Picture {
+        Picture {
+            depth: carried(&self.depth, flow, seconds),
+            masks: self.masks.as_ref().map(|masks| std::array::from_fn(|c| carried(&masks[c], flow, seconds))),
+            time: self.time + seconds,
+        }
+    }
+}
+
+/// The worker's latest picture, and how it's kept up with the movement between runs of the model.
+#[derive(Default)]
+struct Carrier {
+    picture: Option<Picture>,
+    /// The latest movement, at `WIDTH` × `HEIGHT`, while it follows on from what came before.
+    flow: Option<[Vec<f32>; 2]>,
+    last_report: Option<f32>,
+    /// How fast things are moving, and how wrong the carried map was at the last run, this shot.
+    fast: f32,
+    wrong: f32,
+    serial: u64,
+    ground: [f32; 4],
+}
+
+/// The speed nine tenths of the picture is under, from planes of x then y.
+pub fn fast_speed(flow: &[f32]) -> f32 {
+    let (x, y) = flow.split_at(flow.len() / 2);
+    let mut speeds: Vec<f32> = x.iter().zip(y).map(|(x, y)| x.hypot(*y)).collect();
+    let at = speeds.len() * 9 / 10;
+    *speeds.select_nth_unstable_by(at, f32::total_cmp).1
+}
+
+impl Carrier {
+    /// How long there should be between runs of the model, by how carrying is going.
+    fn interval(&self) -> Duration {
+        if self.fast > CARRIED_FAST || self.wrong > CARRIED_WRONG { CARRIED_SOON } else { CARRIED_INTERVAL }
+    }
+
+    /// A new shot: nothing about the last one applies.
+    fn cut(&mut self) {
+        self.picture = None;
+        self.fast = 0.0;
+        self.wrong = 0.0;
+    }
+
+    fn map(&mut self, picture: &Picture, ahead: bool) -> DepthMap {
+        self.serial += 1;
+        DepthMap {
+            // GL's rows run bottom-up.
+            values: picture.depth.chunks(WIDTH).rev().flatten().copied().collect(),
+            serial: self.serial,
+            time: picture.time,
+            masks: picture.masks.as_ref().map(mask_bytes),
+            ground: self.ground,
+            ahead,
+            clues: None,
+        }
+    }
+
+    /// Takes in the movement in a new frame, and returns the maps that makes: that frame's, and
+    /// a guess at the one after it, which won't have movement of its own.
+    fn follow(&mut self, report: &Report) -> Vec<DepthMap> {
+        let gap = self.last_report.map(|t| report.time - t).filter(|gap| (1e-4..CARRIED_REACH).contains(gap));
+        self.last_report = Some(report.time);
+        let Some(flow) = &report.flow else {
+            self.flow = None;
+            self.fast = 0.0;
+            return Vec::new();
+        };
+        self.fast = fast_speed(flow);
+        let (from, size) = ((FLOW_WIDTH, FLOW_HEIGHT), FLOW_WIDTH * FLOW_HEIGHT);
+        let flow = [scaled(&flow[..size], from, (WIDTH, HEIGHT)), scaled(&flow[size..], from, (WIDTH, HEIGHT))];
+        let mut maps = Vec::new();
+        if let Some(picture) = self.picture.take() {
+            let seconds = report.time - picture.time;
+            if seconds <= 0.0 && seconds > -CARRIED_REACH {
+                self.picture = Some(picture);
+            } else if (0.0..CARRIED_REACH).contains(&seconds) {
+                let now = picture.moved(&flow, seconds);
+                maps.push(self.map(&now, false));
+                if let Some(gap) = gap {
+                    let next = now.moved(&flow, gap / 2.0);
+                    maps.push(self.map(&next, true));
+                }
+                self.picture = Some(now);
+            }
+        }
+        self.flow = Some(flow);
+        maps
+    }
+
+    /// Takes in what the model found: brought to the same moment as what's known already, and
+    /// settled against it. Returns the map that makes.
+    fn found(&mut self, mut now: Picture) -> DepthMap {
+        if let Some(mut before) = self.picture.take() {
+            let ahead = before.time - now.time;
+            if let Some(flow) = self.flow.as_ref().filter(|_| ahead.abs() < CARRIED_REACH) {
+                if ahead > 0.0 {
+                    now = now.moved(flow, ahead);
+                } else if ahead < 0.0 {
+                    before = before.moved(flow, -ahead);
+                }
+            }
+            self.wrong = now.depth.iter().zip(&before.depth).map(|(a, b)| (a - b).abs()).sum::<f32>() / now.depth.len() as f32;
+            settle(&mut now.depth, &before.depth, (WIDTH, HEIGHT));
+            if let (Some(masks), Some(old)) = (&mut now.masks, &before.masks) {
+                for (plane, old) in masks.iter_mut().zip(old) {
+                    settle(plane, old, (WIDTH, HEIGHT));
+                }
+            }
+        }
+        let map = self.map(&now, false);
+        self.picture = Some(now);
+        map
+    }
+}
+
 /// Shared between the UI, the paint callback and the worker.
 #[derive(Clone)]
 pub struct Link(Arc<(Mutex<State>, Condvar)>);
 
 impl Default for Link {
     fn default() -> Self {
-        let state = State { status: Status::Off, running: false, input: None, busy: false, output: None, last_wanted: Instant::now(), masks_wanted: false, level: 0 };
+        let state = State { status: Status::Off, running: false, input: None, busy: false, output: VecDeque::new(), last_wanted: Instant::now(), masks_wanted: false, carried: false, moves: VecDeque::new(), last_run: None, not_before: None, level: 0 };
         Self(Arc::new((Mutex::new(state), Condvar::new())))
     }
 }
@@ -279,11 +462,12 @@ impl Link {
     }
 
     /// An effect wants depth, and maybe `masks` too: starts the worker if it isn't running.
-    /// Call every frame.
-    pub fn wanted(&self, masks: bool) {
+    /// `carried` says the movement worker is to feed `carry`. Call every frame.
+    pub fn wanted(&self, masks: bool, carried: bool) {
         let mut state = self.lock();
         state.last_wanted = Instant::now();
         state.masks_wanted = masks;
+        state.carried = carried;
         if state.running || matches!(state.status, Status::Failed(_)) {
             return;
         }
@@ -302,11 +486,11 @@ impl Link {
         self.lock().status.clone()
     }
 
-    /// Whether the worker would take a frame now.
-    pub fn ready_for_frame(&self) -> bool {
+    /// Whether the worker would take a frame now. `cut`: there's been a scene cut since the last.
+    pub fn ready_for_frame(&self, cut: bool) -> bool {
         let state = self.lock();
         // Even while busy: read back now, the next frame is ready the moment this one's done.
-        matches!(state.status, Status::Ready { .. }) && state.input.is_none()
+        matches!(state.status, Status::Ready { .. }) && state.input.is_none() && (cut || state.not_before.is_none_or(|t| Instant::now() >= t))
     }
 
     /// Hands over a frame (RGBA, bottom row first, `WIDTH` × `HEIGHT`), its position, and whether
@@ -316,15 +500,49 @@ impl Link {
         self.0.1.notify_all();
     }
 
-    pub fn latest(&self) -> Option<Arc<DepthMap>> {
-        self.lock().output.clone()
+    /// The movement in another frame, to carry the maps along.
+    pub fn carry(&self, report: Report) {
+        let mut state = self.lock();
+        state.moves.push_back(report);
+        let extra = state.moves.len().saturating_sub(MOST_MAPS);
+        state.moves.drain(..extra);
+        self.0.1.notify_all();
+    }
+
+    /// The maps that have come in since the last call, oldest first.
+    pub fn take_maps(&self) -> Vec<Arc<DepthMap>> {
+        self.lock().output.drain(..).collect()
+    }
+
+    fn publish(&self, maps: impl IntoIterator<Item = DepthMap>) {
+        let mut state = self.lock();
+        state.output.extend(maps.into_iter().map(Arc::new));
+        let extra = state.output.len().saturating_sub(MOST_MAPS);
+        state.output.drain(..extra);
+    }
+
+    /// Carries the picture along whatever movement has come in.
+    fn catch_up(&self, carrier: &mut Carrier) {
+        let moves: Vec<Report> = self.lock().moves.drain(..).collect();
+        for report in &moves {
+            self.publish(carrier.follow(report));
+        }
+        if !moves.is_empty() {
+            self.plan_next_run(carrier);
+        }
+    }
+
+    /// When carrying, works out when the model should next run, from the last time it did.
+    fn plan_next_run(&self, carrier: &Carrier) {
+        let mut state = self.lock();
+        state.not_before = state.last_run.filter(|_| state.carried).map(|last| last + crate::gpu::rest(crate::gpu::Net::Depth, carrier.interval()));
     }
 
     fn work(&self) {
         let path = model_path();
         let (level, mut with_masks) = {
             let state = self.lock();
-            (state.level, state.masks_wanted)
+            (if state.carried { state.level.max(CARRIED_LEVEL) } else { state.level }, state.masks_wanted)
         };
         let mut pace = Pace::new(level, Instant::now());
         let result = (|| -> anyhow::Result<Depth> {
@@ -353,27 +571,30 @@ impl Link {
             }
         };
         log::info!("depth: running on {}", depth.adapter());
-        self.lock().status = Status::Ready { adapter: depth.adapter().to_owned(), ms: 0.0, size: depth.size(), masks: with_masks };
+        self.lock().status = Status::Ready { adapter: depth.adapter().to_owned(), ms: 0.0, size: depth.size(), masks: with_masks, carried: false };
 
-        let mut previous: Option<Vec<f32>> = None;
-        let mut previous_masks: Option<[Vec<f32>; MASKS]> = None;
+        let mut carrier = Carrier::default();
         let mut range: Option<(f32, f32)> = None;
         let mut ground = Ground::default();
-        let mut serial = 0;
         let mut rgb = vec![0u8; WIDTH * HEIGHT * 3];
         loop {
-            let input = {
+            let input = loop {
+                self.catch_up(&mut carrier);
                 let mut state = self.lock();
-                loop {
-                    if let Some(input) = state.input.take() {
-                        state.busy = true;
-                        break Some(input);
-                    }
-                    if state.last_wanted.elapsed() > IDLE {
-                        break None;
-                    }
-                    state = self.0.1.wait_timeout(state, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
+                if !state.moves.is_empty() {
+                    continue;
                 }
+                if let Some(input) = state.input.take() {
+                    state.busy = true;
+                    state.last_run = Some(Instant::now());
+                    drop(state);
+                    self.plan_next_run(&carrier);
+                    break Some(input);
+                }
+                if state.last_wanted.elapsed() > IDLE {
+                    break None;
+                }
+                let _ = self.0.1.wait_timeout(state, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner());
             };
             let Some((rgba, time, cut)) = input else { break };
             // GL's rows run bottom-up; the model's top-down.
@@ -406,8 +627,7 @@ impl Link {
             let (lo, hi) = raw.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
             // A new shot has nothing to do with the last one: start again from this picture.
             if cut {
-                previous = None;
-                previous_masks = None;
+                carrier.cut();
                 range = None;
                 ground.forget();
             }
@@ -417,44 +637,37 @@ impl Link {
             };
             range = Some((lo, hi));
             let scale = 1.0 / (hi - lo).max(1e-6);
-            let mut values = vec![0.0; WIDTH * HEIGHT];
-            for y in 0..HEIGHT {
-                for x in 0..WIDTH {
-                    values[(HEIGHT - 1 - y) * WIDTH + x] = ((raw[y * WIDTH + x] - lo) * scale).clamp(0.0, 1.0);
-                }
-            }
-            if let Some(prev) = &previous {
-                settle(&mut values, prev, (WIDTH, HEIGHT));
-            }
-            serial += 1;
-            previous = Some(values.clone());
-            let masks = planes.map(|planes| {
-                let mut now = mask_planes(&planes, size);
-                if let Some(before) = &previous_masks {
-                    for (plane, before) in now.iter_mut().zip(before) {
-                        settle(plane, before, (WIDTH, HEIGHT));
-                    }
-                }
-                let rgba = mask_bytes(&now);
-                previous_masks = Some(now);
-                rgba
-            });
-            let ground = ground.update(&values, masks.as_deref(), (WIDTH, HEIGHT));
-            {
+            let values: Vec<f32> = raw.iter().map(|v| ((v - lo) * scale).clamp(0.0, 1.0)).collect();
+            let masks = planes.map(|planes| mask_planes(&planes, size));
+            // What moved while the model was running, so its answer goes in beside the latest.
+            self.catch_up(&mut carrier);
+            let mut map = carrier.found(Picture { depth: values, masks, time });
+            map.ground = ground.update(&map.values, map.masks.as_deref(), (WIDTH, HEIGHT));
+            carrier.ground = map.ground;
+            map.clues = carrier.picture.as_ref().and_then(|p| p.masks.as_ref().map(|masks| crate::shot_type::Clues::of(&p.depth, &masks[0], &masks[2], &rgb, (WIDTH, HEIGHT))));
+            self.plan_next_run(&carrier);
+            let carried = {
                 let mut state = self.lock();
-                state.output = Some(Arc::new(DepthMap { values, serial, time, masks, ground }));
-                state.status = Status::Ready { adapter: depth.adapter().to_owned(), ms, size, masks: with_masks };
+                let carried = state.carried;
+                state.status = Status::Ready { adapter: depth.adapter().to_owned(), ms, size, masks: with_masks, carried };
+                carried
+            };
+            self.publish([map]);
+            // Still "busy" while waiting, so no frame is read back in the meantime. When carrying,
+            // the wait is `not_before`, as the movement needs following in the meantime.
+            if !carried {
+                std::thread::sleep(crate::gpu::rest(crate::gpu::Net::Depth, MIN_INTERVAL).saturating_sub(started.elapsed()));
             }
-            // Still "busy" while waiting, so no frame is read back in the meantime.
-            std::thread::sleep(crate::gpu::rest(crate::gpu::Net::Depth, MIN_INTERVAL).saturating_sub(started.elapsed()));
-            let moved = pace.update(ms, Instant::now());
+            let moved = pace.update(ms, Instant::now(), carried);
             let masks_wanted = self.lock().masks_wanted;
             if moved.is_some() || masks_wanted != with_masks {
                 let level = pace.level;
                 log::info!("depth: {ms:.0} ms a frame, running at {} × {} patches, masks {masks_wanted}", LEVELS[level].0, LEVELS[level].1);
                 self.lock().level = level;
                 with_masks = masks_wanted;
-                previous_masks = None;
+                if let Some(picture) = &mut carrier.picture {
+                    picture.masks = None;
+                }
                 // The old one goes first: a slow GPU may not have room for both.
                 drop(depth);
                 depth = match Depth::load(&path, LEVELS[level], with_masks) {
@@ -465,7 +678,7 @@ impl Link {
                         state.status = Status::Failed(format!("{e:#}"));
                         state.running = false;
                         state.busy = false;
-                        state.output = None;
+                        state.output.clear();
                         return;
                     }
                 };
@@ -476,7 +689,10 @@ impl Link {
         log::info!("depth: stopped");
         let mut state = self.lock();
         state.running = false;
-        state.output = None;
+        state.output.clear();
+        state.moves.clear();
+        state.last_run = None;
+        state.not_before = None;
         if matches!(state.status, Status::Ready { .. }) {
             state.status = Status::Off;
         }
@@ -513,6 +729,80 @@ mod tests {
         assert!((moved[500] - 0.8).abs() < 1e-5);
     }
 
+    /// A picture dark but for one bright pixel, and a report moving everything evenly.
+    fn dot(x: usize, y: usize, time: f32) -> Picture {
+        let mut depth = vec![0.0; WIDTH * HEIGHT];
+        depth[y * WIDTH + x] = 1.0;
+        Picture { depth, masks: None, time }
+    }
+
+    fn report(time: f32, vx: f32, vy: f32) -> Report {
+        let size = FLOW_WIDTH * FLOW_HEIGHT;
+        Report { time, flow: Some([vec![vx; size], vec![vy; size]].concat()) }
+    }
+
+    fn brightest(values: &[f32]) -> (usize, usize) {
+        let at = values.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        (at % WIDTH, at / WIDTH)
+    }
+
+    #[test]
+    fn maps_are_carried_the_way_things_move() {
+        let mut carrier = Carrier { picture: Some(dot(100, 200, 1.0)), last_report: Some(0.9), ..Default::default() };
+        // Across the picture in a second and down it twice, for a tenth of a second.
+        let (vx, vy) = (1.0, 2.0);
+        let maps = carrier.follow(&report(1.1, vx, vy));
+        let (w, h) = (WIDTH as f32, HEIGHT as f32);
+        let moved = ((100.0 + vx * 0.1 * w).round() as usize, (200.0 + vy * 0.1 * h).round() as usize);
+        assert_eq!(maps.len(), 2);
+        assert_eq!(brightest(&carrier.picture.as_ref().unwrap().depth), moved);
+        // What's published has GL's rows, bottom first.
+        assert_eq!(brightest(&maps[0].values), (moved.0, HEIGHT - 1 - moved.1));
+        assert!((maps[0].time - 1.1).abs() < 1e-4);
+        assert!(!maps[0].ahead);
+        // And half way on to the next one, as a guess.
+        assert!(maps[1].ahead);
+        assert!((maps[1].time - 1.2).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_model_runs_sooner_when_things_move_fast() {
+        let mut carrier = Carrier { last_report: Some(0.9), ..Default::default() };
+        carrier.follow(&report(1.0, 0.1, 0.0));
+        assert_eq!(carrier.interval(), CARRIED_INTERVAL);
+        carrier.follow(&report(1.1, CARRIED_FAST + 0.1, 0.0));
+        assert_eq!(carrier.interval(), CARRIED_SOON);
+        carrier.cut();
+        assert_eq!(carrier.interval(), CARRIED_INTERVAL);
+    }
+
+    #[test]
+    fn the_model_runs_sooner_when_the_carried_map_was_wrong() {
+        let mut carrier = Carrier { picture: Some(Picture { depth: vec![0.2; WIDTH * HEIGHT], masks: None, time: 1.0 }), ..Default::default() };
+        carrier.found(Picture { depth: vec![0.2 + CARRIED_WRONG + 0.05; WIDTH * HEIGHT], masks: None, time: 1.0 });
+        assert_eq!(carrier.interval(), CARRIED_SOON);
+    }
+
+    #[test]
+    fn a_new_shot_isnt_carried_but_the_picture_is_kept_for_its_cut() {
+        let mut carrier = Carrier { picture: Some(dot(10, 10, 1.0)), last_report: Some(0.9), ..Default::default() };
+        assert!(carrier.follow(&Report { time: 1.1, flow: None }).is_empty());
+        assert!(carrier.flow.is_none());
+        assert_eq!(brightest(&carrier.picture.unwrap().depth), (10, 10));
+    }
+
+    #[test]
+    fn a_found_map_is_brought_to_the_moment_of_the_carried_one() {
+        let mut carrier = Carrier::default();
+        carrier.follow(&report(1.0, 1.0, 0.0));
+        carrier.picture = Some(dot(100, 100, 1.1));
+        // Found for 0.1 s earlier: it should land on top of the dot, not behind it.
+        let x = 100 - (0.1 * WIDTH as f32).round() as usize;
+        let map = carrier.found(dot(x, 100, 1.0));
+        assert_eq!(brightest(&map.values), (100, HEIGHT - 1 - 100));
+        assert!((map.time - 1.1).abs() < 1e-4);
+    }
+
     #[test]
     fn scaling_keeps_flat_pictures_and_sizes() {
         let out = scaled(&vec![0.25; 28 * 14], (28, 14), (56, 21));
@@ -527,9 +817,9 @@ mod tests {
     fn pace_moves_down_to_a_size_that_fits_and_settles_first() {
         let now = Instant::now();
         let mut pace = Pace::new(0, now);
-        assert_eq!(pace.update(200.0, now + Duration::from_secs(1)), None);
+        assert_eq!(pace.update(200.0, now + Duration::from_secs(1), false), None);
         // 200 ms at the biggest size: only the smallest should come in under the limit.
-        assert_eq!(pace.update(200.0, now + SETTLE), Some(LEVELS.len() - 1));
+        assert_eq!(pace.update(200.0, now + SETTLE, false), Some(LEVELS.len() - 1));
         assert_eq!(pace.level, LEVELS.len() - 1);
     }
 
@@ -537,11 +827,20 @@ mod tests {
     fn pace_waits_before_retrying_a_size_that_was_too_slow() {
         let now = Instant::now();
         let mut pace = Pace::new(0, now);
-        assert_eq!(pace.update(TOO_SLOW + 1.0, now + SETTLE), Some(1));
+        assert_eq!(pace.update(TOO_SLOW + 1.0, now + SETTLE, false), Some(1));
         // Fast enough to go back up, by the estimate, but it only just failed.
         let t = now + SETTLE * 3;
-        assert_eq!(pace.update(10.0, t), None);
-        assert_eq!(pace.update(10.0, now + SETTLE + RETRY), Some(0));
+        assert_eq!(pace.update(10.0, t, false), None);
+        assert_eq!(pace.update(10.0, now + SETTLE + RETRY, false), Some(0));
+    }
+
+    #[test]
+    fn carried_maps_can_take_longer_as_they_come_less_often() {
+        let now = Instant::now();
+        let mut pace = Pace::new(CARRIED_LEVEL, now);
+        assert_eq!(pace.update(TOO_SLOW + 10.0, now + SETTLE, true), None);
+        let mut pace = Pace::new(CARRIED_LEVEL, now);
+        assert!(pace.update(CARRIED_TOO_SLOW + 10.0, now + SETTLE, true).is_some_and(|l| l > CARRIED_LEVEL));
     }
 
     #[test]
@@ -550,7 +849,7 @@ mod tests {
         let mut pace = Pace::new(1, now);
         // Fine here; the size above would be slower than ROOM.
         let ms = ROOM * tokens(1) / tokens(0) + 5.0;
-        assert_eq!(pace.update(ms, now + SETTLE), None);
+        assert_eq!(pace.update(ms, now + SETTLE, false), None);
     }
 
     #[test]

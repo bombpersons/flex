@@ -1,5 +1,6 @@
 name = "Moustache Everyone"
 description = "A curly handlebar moustache pinned under every nose, twirling on the beat."
+suits = ["close"]
 faces = true
 mesh = true
 audio = true

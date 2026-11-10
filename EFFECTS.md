@@ -251,7 +251,10 @@ flow = true                    # how things are moving; default false
 plate = true                   # the room behind people (runs the masks); default false
 cuts = true                    # scene cuts; default false
 stats = true                   # the picture's palette and brightness; default false
+scene = true                   # what sort of shot and scene this is; default false
 shuffle = false                # leave it out of shuffle unless someone adds it; default true
+suits = ["close", "dialogue"]  # with shuffle at scene cuts, come up more in these: close, wide,
+                               # action, dialogue, quiet, if Suit the shot is on; default none
 
 [[settings]]
 key = "speed"                  # becomes `uniform float s_speed;`
@@ -333,6 +336,17 @@ the same place on every face however it's turned. Painting in `face_uv` keeps th
 skin. `face_texture` gives a face's own pixels at any such position, for moving a face to
 somewhere else. They only cover the face itself, from hairline to chin, and only faces with a
 mesh; `meshed(face)` says whether a slot has one, so an effect can fall back on `u_faces`.
+
+### Shot and scene
+
+With `scene = true`, an effect is told what sort of shot it's in and what's been going on across
+the last few, worked out from depth, masks, faces, movement and the sound, so all of those run.
+`u_shot_size` goes from 0 (very wide) to 1 (extreme close-up). `u_camera` is pan, tilt, zoom and
+roll a second: turning right, turning up, the picture growing and turning clockwise. `u_handheld`
+goes from 0 to 1, `u_pace` is cuts a minute, and `u_scene` is action, dialogue, quiet and montage,
+each from 0 to 1. Scene scores only look backward, so they take a while to catch up with a new
+scene, and two people talking in one long take reads as quiet. The Shot and Scene effect shows
+them all, and F3 prints them.
 
 ### Black bars
 

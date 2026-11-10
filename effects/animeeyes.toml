@@ -1,5 +1,6 @@
 name = "Anime Eyes"
 description = "Everyone gets big drawn anime eyes, inked and shining, that blink when the real ones do, look where they look and sparkle on the beat."
+suits = ["close"]
 faces = true
 mesh = true
 audio = true

@@ -1,5 +1,6 @@
 name = "Motion Paint"
 description = "The film goes dark and only what's moving shows, painted in colours for each direction, leaving trails."
+suits = ["action"]
 flow = true
 feedback = true
 audio = true

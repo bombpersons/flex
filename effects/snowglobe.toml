@@ -1,5 +1,6 @@
 name = "Snow Globe"
 description = "Snow falls through the scene behind whatever's near, settles on things, and a beat shakes it all up."
+suits = ["wide"]
 depth = true
 audio = true
 feedback = true

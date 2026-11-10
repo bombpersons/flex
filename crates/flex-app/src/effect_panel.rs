@@ -41,6 +41,7 @@ enum Line {
     Power,
     Effect,
     Shuffle,
+    ByShot,
     Drift,
     DriftSpeed,
     Shortest,
@@ -331,7 +332,14 @@ pub struct EffectPanel {
 
 fn lines(page: &Page, sh: &Shared) -> Vec<Line> {
     match page {
-        Page::Shuffle => vec![Line::Shuffle, Line::Shortest, Line::Longest, Line::Fade, Line::Randomise],
+        Page::Shuffle => {
+            let mut lines = vec![Line::Shuffle];
+            if sh.effects.shuffle().at_cuts {
+                lines.push(Line::ByShot);
+            }
+            lines.extend([Line::Shortest, Line::Longest, Line::Fade, Line::Randomise]);
+            lines
+        }
         Page::Drift => vec![Line::Drift, Line::DriftSpeed],
         Page::Main | Page::Picker(_) => {
             let mut lines = vec![Line::Power, Line::Effect];
@@ -569,6 +577,7 @@ impl EffectPanel {
                 let mode = (shuffle_mode(shuffle) + direction as i64).rem_euclid(3);
                 set_shuffle(sh, Shuffle { on: mode > 0, at_cuts: mode == 2, ..shuffle });
             }
+            Line::ByShot => set_shuffle(sh, Shuffle { by_shot: !shuffle.by_shot, ..shuffle }),
             Line::Shortest => {
                 let shortest = timed(shuffle.shortest, TURN);
                 set_shuffle(sh, Shuffle { shortest, longest: shuffle.longest.max(shortest), ..shuffle });
@@ -637,6 +646,7 @@ impl EffectPanel {
             Line::Drift => ("Drift".into(), if drift.amount > 0.0 { format!("{}%", drift.amount) } else { "Off".into() }, timed(drift.amount, DRIFT)),
             Line::DriftSpeed => ("Drift speed".into(), format!("{}%", drift.speed), timed(drift.speed, DRIFT_SPEED)),
             Line::Shuffle => ("Shuffle".into(), ["Off", "Timed", "Scene cuts"][shuffle_mode(shuffle) as usize].into(), None),
+            Line::ByShot => ("Suit the shot".into(), (if shuffle.by_shot { "On" } else { "Off" }).into(), None),
             Line::Shortest => ("Shortest turn".into(), seconds(shuffle.shortest), timed(shuffle.shortest, TURN)),
             Line::Longest => ("Longest turn".into(), seconds(shuffle.longest), timed(shuffle.longest, TURN)),
             Line::Fade => ("Fade".into(), if shuffle.fade > 0.0 { seconds(shuffle.fade) } else { "Off".into() }, timed(shuffle.fade, FADE)),
@@ -680,6 +690,7 @@ impl EffectPanel {
                 1 => "Effects take turns, changing at random moments.".into(),
                 _ => "Effects take turns, changing on the frame the shot changes.".into(),
             },
+            Line::ByShot => "Mostly picks effects that suit each new shot: faces on close-ups, landscapes on wide shots. Off, any effect is as likely as any other.".into(),
             Line::Shortest | Line::Longest if sh.effects.shuffle().at_cuts => "Cuts are ignored until the shortest turn is up. After the longest it changes anyway.".into(),
             Line::Shortest | Line::Longest => "Each effect stays for a random time between these.".into(),
             Line::Fade => "How long one effect takes to fade into the next. Off switches instantly.".into(),

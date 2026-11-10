@@ -1,5 +1,6 @@
 name = "Giraffe Necks"
 description = "Heads rise up on long stretchy necks, swaying and bobbing to the music."
+suits = ["close"]
 faces = true
 audio = true
 

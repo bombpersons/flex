@@ -1,5 +1,6 @@
 name = "Colour Time Split"
 description = "Red, green and blue run at different moments, so anything that moves turns into a rainbow."
+suits = ["action"]
 depth = true
 feedback = true
 

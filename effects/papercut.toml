@@ -1,5 +1,6 @@
 name = "Paper Theatre"
 description = "The scene is cut into flat cardboard layers that sway on strings and cast shadows on each other."
+suits = ["wide"]
 depth = true
 audio = true
 

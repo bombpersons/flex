@@ -1,5 +1,6 @@
 name = "Tiny Heads"
 description = "Everyone's head shrinks to a pea on a full-sized body, and the room closes in around it."
+suits = ["close"]
 faces = true
 audio = true
 

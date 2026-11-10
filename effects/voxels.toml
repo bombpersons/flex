@@ -1,5 +1,6 @@
 name = "Voxel World"
 description = "The scene rebuilt from coloured blocks, standing taller the closer they are."
+suits = ["wide"]
 depth = true
 audio = true
 

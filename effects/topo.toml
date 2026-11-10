@@ -1,5 +1,6 @@
 name = "Topographic Map"
 description = "The scene turned into a contour map, with hills where things are close."
+suits = ["wide"]
 depth = true
 audio = true
 
