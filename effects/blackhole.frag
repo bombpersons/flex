@@ -180,10 +180,9 @@ vec4 effect(vec2 uv) {
     vec3 hole = vec3(hole_screen * hole_far, hole_far);
     vec3 to_hole = hole - surface;
     float away = length(to_hole);
-    float e = 0.006;
-    float nx = depth_at(uv + vec2(e / aspect.x, 0.0)) - depth_at(uv - vec2(e / aspect.x, 0.0));
-    float ny = depth_at(uv + vec2(0.0, e)) - depth_at(uv - vec2(0.0, e));
-    vec3 normal = normalize(vec3(nx * 14.0, ny * 14.0, -1.0));
+    // The surface's direction, with z into the picture as `surface` has it.
+    vec3 facing_us = normal_at(uv);
+    vec3 normal = vec3(facing_us.xy, -facing_us.z);
     float facing = max(dot(normal, to_hole / max(away, 1e-3)), 0.0);
     float size_of = radius * hole_far * 4.0;
     float falling = size_of * size_of / (away * away + size_of * size_of * 0.25);

@@ -205,7 +205,11 @@ don't declare them yourself:
 | `float depth_at(vec2 uv)` | a function: how near that point of the screen is, from 0 (far) to 1 (near) (with `depth = true`; 0 until the first depth map arrives) |
 | `vec4 u_ground` | with `depth = true`: the floor, a table or whatever else is flat and level, found from depth. At a point of the picture (0 to 1, y up) its depth is `dot(vec3(x, y, 1.0), u_ground.xyz)`, and `u_ground.w` is how sure that is, from 0 to 1 |
 | `sampler2D u_depth`, `float u_has_depth` | the depth map itself, covering the picture rather than the screen, and 1 once there is one |
+| `vec3 normal_at(vec2 uv)` | a function: which way the surface at that point of the screen faces, x to the right, y up and z towards the viewer, unit length (with `depth = true`). From MoGe-2 it has the shape of things in it: faces, arms, folds. From Depth Anything (or before the first map) it's worked out from depth's slopes, so shows outlines more than shape. Use it for lighting rather than slopes of `depth_at` |
+| `sampler2D u_normals`, `float u_has_normals` | the normals themselves (x, y and z from 0 to 1 for -1 to 1), covering the picture, and 1 when the depth network gives them |
 | `float person_at(vec2 uv)`, `wall_at`, `sky_at` | functions: how much of that point of the screen is a person, a wall or sky, from 0 to 1 (with `segment = true`; 0 until the first masks arrive). `vec4 masks_at(vec2 uv)` gives all three in r, g and b |
+| `float ground_at(vec2 uv)`, `ceiling_at`, `water_at`, `plant_at`, `window_at` | functions: how much of that point is ground (floors, roads, grass, sand, snow: anything underfoot), ceiling, water, plants and trees, or a window, from 0 to 1 (with `segment = true`, from MoGe-2's head; 0 without it, and `u_has_more_masks` says which) |
+| `float body_skin_at(vec2 uv)`, `clothes_at` | functions: how much of that point is a person's bare skin, or their clothes (with `segment = true`, from MoGe-2's head). With `hair_at` they add up to `person_at`. `skin_at` is the face's skin, from the face mesh |
 | `int u_face_count`, `vec4 u_faces[MAX_FACES]` | how far through the arrays to look, and each face's box on screen: x0, y0, x1, y1 (with `faces = true`) |
 | `float u_face_seen[MAX_FACES]` | 0 to 1, fading as a face comes and goes; multiply by it so faces don't pop. It's 0 for empty slots |
 | `vec2 face_point(int face, int point)` | where on the screen a face's point is: 0 right eye, 1 left eye, 2 nose, 3 right corner of the mouth, 4 left (the person's own right and left) |
@@ -216,7 +220,7 @@ don't declare them yourself:
 | `float on_face(vec2 uv)`, `vec2 face_uv(vec2 uv)`, `int face_there(vec2 uv)` | functions: how much of a face a point on screen is, from 0 to 1; where it is on the face (x 0 to 1 across it, y from the chin up, the same spot on every face whichever way it's turned); and which face it is, or -1 (with `mesh = true`) |
 | `float skin_at(vec2 uv)`, `lips_at`, `nose_at`, `brows_at`, `eye_at`, `iris_at`, `mouth_at` | functions: how much of a point on screen is that part of a face, from 0 to 1 (with `mesh = true`). `mouth_at` is the gap between the lips, `eye_at` the whole opening of the eye and `iris_at` the coloured part of it |
 | `vec4 face_texture(int face, vec2 at)` | a function: a face's pixels at a position on it (as `face_uv` gives), for drawing it somewhere else; alpha is 0 off the face (with `mesh = true`) |
-| `float hair_at(vec2 uv)` | a function: roughly where hair is: the person above and around each face (with `mesh = true` and `segment = true`). It knows nothing of individual strands |
+| `float hair_at(vec2 uv)` | a function: where hair is (with `segment = true`), from MoGe-2's head when it's running; otherwise, with `mesh = true` too, roughly, as the person above and around each face |
 | `float face_roll(int face)` | a function: how far a head tilts to the side, anticlockwise, in radians (with `faces = true`) |
 | `int who_at(vec2 uv)` | a function: which face a point of the picture belongs with, as an index into `u_faces`, or -1 (with `faces = true`). Use it with `person_at` to treat people separately |
 | `float u_dt` | seconds since the last frame was drawn |
@@ -289,10 +293,17 @@ don't max everything out for long.
 ### Depth
 
 With `depth = true`, Flex works out how far away everything in the picture is, using
-[Depth Anything V2 Small](https://github.com/DepthAnything/Depth-Anything-V2) (Apache-2.0)
-running on the GPU as compute shaders, built on the kernels from Maisy's
+[MoGe-2](https://github.com/microsoft/MoGe) ViT-S (MIT), which also says which way every
+surface faces, or [Depth Anything V2 Small](https://github.com/DepthAnything/Depth-Anything-V2)
+(Apache-2.0) where people, walls and sky are wanted and MoGe-2 can't give them yet. Both run on
+the GPU as compute shaders, built on the kernels from Maisy's
 [neurofield](https://github.com/bombpersons/neurofield). The first time an effect asks for
-it Flex downloads the model (99 MB) into its data folder.
+it Flex downloads the model (141 or 99 MB) into its data folder.
+
+Real people are thin next to the room they're in, so in depth from 0 to 1 across the whole
+picture a person is nearly flat: their shape is a few hundredths of the range, and the step
+to whatever's behind them is most of it. For anything lit or shaded, `normal_at` shows that
+shape where `depth_at` can't.
 
 Depth is relative rather than in real distances, and is worked out up to 30 times a second
 at 518 × 294, dropping to as little as 294 × 168 to keep each one under about 35 ms. It's

@@ -1,5 +1,6 @@
-// Relight: treats depth as a surface. Normals come from depth's slopes, so the picture can
-// be lit again from new positions (and shadows found by walking towards each light).
+// Relight: treats depth as a surface. Normals come from the depth network (or depth's slopes),
+// so the picture can be lit again from new positions (and shadows found by walking towards each
+// light).
 //
 // s_style: 0 coloured lights, 1 clay, 2 oil slick, 3 show the surface.
 
@@ -9,14 +10,10 @@ vec3 rainbow(float t) {
     return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
 }
 
-vec3 normal_at(vec2 uv) {
-    // Two texels of the depth map either way; any finer and its noise shows as bumps.
-    vec2 e = 2.0 * (u_video_rect.zw - u_video_rect.xy) / vec2(518.0, 294.0);
-    float dx = depth_at(uv + vec2(e.x, 0.0)) - depth_at(uv - vec2(e.x, 0.0));
-    float dy = depth_at(uv + vec2(0.0, e.y)) - depth_at(uv - vec2(0.0, e.y));
-    // Limited, or the jump in depth around everything's outline becomes a black line.
-    vec2 slope = clamp(vec2(dx, dy), -0.035, 0.035) * s_bump / 50.0;
-    return normalize(vec3(-slope, 0.06));
+// The surface's direction, with its tilt made more or less of by s_bump.
+vec3 bumped_normal(vec2 uv) {
+    vec3 n = normal_at(uv);
+    return normalize(vec3(n.xy * s_bump / 50.0, max(n.z, 0.02)));
 }
 
 float shadow(vec3 p, vec3 light, float aspect) {
@@ -38,7 +35,7 @@ vec4 effect(vec2 uv) {
     vec3 video = texture(u_video, uv).rgb;
     float d = depth_at(uv);
     float t = u_video_time * s_speed;
-    vec3 n = normal_at(uv);
+    vec3 n = bumped_normal(uv);
     if (s_style > 2.5) {
         return vec4(n * 0.5 + 0.5, 1.0);
     }

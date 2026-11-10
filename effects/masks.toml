@@ -1,4 +1,14 @@
 name = "Masks"
-description = "Shows what Flex can tell apart in the picture: people in red, walls in blue and sky in cyan. Handy when making an effect."
+description = "Shows what Flex can tell apart in the picture: people in red, walls in blue and sky in cyan, and (from MoGe-2) ground, ceiling, water, plants, windows, and people's skin, hair and clothes. Handy when making an effect."
 shuffle = false
 segment = true
+
+[[settings]]
+key = "show"
+label = "Show"
+type = "choice"
+default = "scene"
+options = [
+    { id = "scene", label = "What's where" },
+    { id = "people", label = "Skin, hair and clothes" },
+]

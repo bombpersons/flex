@@ -1,65 +1,16 @@
 
 // ---- NeuFlow v2 (flow.rs), added after depth.wgsl's kernels ------------------------------------
 
-const LEAKY: u32 = 32u;
-
 fn activate(v: f32, flags: u32) -> f32 {
     if ((flags & LEAKY) != 0u) { return select(v * 0.1, v, v >= 0.0); }
     if ((flags & GELU) != 0u) { return gelu(v); }
     return v;
 }
 
-// depth.wgsl's conv3x3 with stride 1 and the activations this network uses. In [k][m][n] at
-// a_off, weights [x0][k][3][3] at b_off, bias at bias_off (or NONE), out [x0][m][n] at c_off.
-@compute @workgroup_size(16, 16)
-fn flow_conv3(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wg: vec3<u32>) {
-    let co0 = wg.z * 8u;
-    let cout = p.x0;
-    let x = gid.x;
-    let y = gid.y;
-    let live = x < p.n && y < p.m;
-    let plane = p.m * p.n;
-    var acc0 = vec4<f32>(0.0);
-    var acc1 = vec4<f32>(0.0);
-    for (var c0 = 0u; c0 < p.k; c0 += 32u) {
-        let kc = min(32u, p.k - c0);
-        workgroupBarrier();
-        for (var e = li; e < kc * 9u * 8u; e += 256u) {
-            let o = e % 8u;
-            let ct = e / 8u;
-            let co = min(co0 + o, cout - 1u);
-            cw[ct * 8u + o] = select(0.0, w[p.b_off + co * p.k * 9u + c0 * 9u + ct], co0 + o < cout);
-        }
-        workgroupBarrier();
-        if (live) {
-            for (var ci = 0u; ci < kc; ci++) {
-                let src = p.a_off + (c0 + ci) * plane;
-                for (var tap = 0u; tap < 9u; tap++) {
-                    let yy = i32(y) + i32(tap / 3u) - 1;
-                    let xx = i32(x) + i32(tap % 3u) - 1;
-                    let inside = yy >= 0 && yy < i32(p.m) && xx >= 0 && xx < i32(p.n);
-                    let at = u32(clamp(yy, 0, i32(p.m) - 1)) * p.n + u32(clamp(xx, 0, i32(p.n) - 1));
-                    let v = select(0.0, mem[src + at], inside);
-                    let wi = (ci * 9u + tap) * 8u;
-                    acc0 += v * vec4<f32>(cw[wi], cw[wi + 1u], cw[wi + 2u], cw[wi + 3u]);
-                    acc1 += v * vec4<f32>(cw[wi + 4u], cw[wi + 5u], cw[wi + 6u], cw[wi + 7u]);
-                }
-            }
-        }
-    }
-    if (!live) { return; }
-    let outs = array<f32, 8>(acc0.x, acc0.y, acc0.z, acc0.w, acc1.x, acc1.y, acc1.z, acc1.w);
-    for (var o = 0u; o < 8u; o++) {
-        let co = co0 + o;
-        if (co >= cout) { break; }
-        mem[p.c_off + co * plane + y * p.n + x] = activate(outs[o] + bias(co), p.flags);
-    }
-}
-
 // Any other convolution, leaky ReLU after: in [k][m][n] at a_off, weights [x0][k][a_bs][a_bs] at
-// b_off, bias at bias_off, stride x1, padding a_rs, out [x0][b_bs][b_rs] at c_off. As flow_conv3:
-// each thread makes 8 output channels of one pixel, with the group's weights for as many input
-// channels as fit in workgroup memory at a time.
+// b_off, bias at bias_off, stride x1, padding a_rs, out [x0][b_bs][b_rs] at c_off. Each thread
+// makes 8 output channels of one pixel, with the group's weights for as many input channels as
+// fit in workgroup memory at a time.
 var<workgroup> cwide: array<f32, 4608>;
 
 @compute @workgroup_size(16, 16)
@@ -205,4 +156,39 @@ fn flow_expect(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     mem[p.c_off + row] = sx - f32(row % p.n);
     mem[p.c_off + plane + row] = sy - f32(row / p.n);
+}
+
+// A convolution's inputs laid out for a matrix multiply ("im2col"): for each input channel ci and
+// tap (ky, kx) of a size x size kernel, a row of what each output pixel sees there, zero outside.
+// In [k][m][n] at a_off, stride x1, padding a_rs, size a_bs, out [k * size * size][b_bs * b_rs] at
+// c_off.
+@compute @workgroup_size(64)
+fn flow_im2col(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let pixels = p.b_bs * p.b_rs;
+    let i = gid.y * 65535u * 64u + gid.x;
+    let taps = p.a_bs * p.a_bs;
+    if (i >= p.k * taps * pixels) { return; }
+    let row = i / pixels;
+    let px = i % pixels;
+    let ci = row / taps;
+    let tap = row % taps;
+    let yy = i32((px / p.b_rs) * p.x1 + tap / p.a_bs) - i32(p.a_rs);
+    let xx = i32((px % p.b_rs) * p.x1 + tap % p.a_bs) - i32(p.a_rs);
+    let inside = yy >= 0 && yy < i32(p.m) && xx >= 0 && xx < i32(p.n);
+    let at = p.a_off + ci * p.m * p.n + u32(clamp(yy, 0, i32(p.m) - 1)) * p.n + u32(clamp(xx, 0, i32(p.n) - 1));
+    mem[p.c_off + i] = select(0.0, mem[at], inside);
+}
+
+// The parts of a split sum added up, with the bias and activation: x0 parts of [k][m] at a_off,
+// one after the other, to [k][m] at c_off.
+@compute @workgroup_size(64)
+fn flow_sum(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.y * 65535u * 64u + gid.x;
+    let count = p.k * p.m;
+    if (i >= count) { return; }
+    var v = bias(i / p.m);
+    for (var part = 0u; part < p.x0; part++) {
+        v += mem[p.a_off + part * count + i];
+    }
+    mem[p.c_off + i] = activate(v, p.flags);
 }

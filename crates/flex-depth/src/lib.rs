@@ -12,6 +12,8 @@
 //! Output is relative inverse depth ("disparity"): bigger is nearer, in no fixed units.
 
 pub mod face;
+pub mod moge;
+mod torch_file;
 pub mod flow;
 pub mod track;
 
@@ -100,13 +102,16 @@ const ACCUMULATE: u32 = 2;
 const RELU: u32 = 4;
 const RELU_IN: u32 = 8;
 const B_MEM: u32 = 16;
+/// Edges repeated in a 3x3 convolution, pixel centres in a resize, and from the weights in a
+/// copy with ACCUMULATE (see depth.wgsl).
+const EDGE: u32 = 32;
 /// Bytes per uniform slot (wgpu's minimum dynamic-offset alignment).
 const SLOT: u64 = 256;
 const MAX_OPS: usize = 1024;
-/// Dispatches per submission. Run as one the network holds the GPU for tens of milliseconds
-/// and whatever else is drawing (the video!) waits behind it; split up, and waiting for each
-/// part, other work gets in between.
-const OPS_PER_SUBMIT: usize = 8;
+/// About how long (ms, on an RX 580) each submission should keep the GPU. Run as one the network
+/// holds the GPU for tens of milliseconds and whatever else is drawing (the video!) waits behind
+/// it; split up, other work gets in between. But each split costs a little.
+const SUBMIT_MS: f64 = 4.0;
 
 /// One dispatch's sizes and offsets (in floats); see depth.wgsl.
 #[repr(C)]
@@ -136,6 +141,11 @@ struct Params {
     f1: f32,
     f2: f32,
     f3: f32,
+    /// A second batch (see depth.wgsl): how far apart its inputs, weights and outputs are.
+    a_os: u32,
+    b_os: u32,
+    c_os: u32,
+    pad: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -146,18 +156,25 @@ enum Kernel {
     LayerNorm,
     Softmax,
     Conv3x3,
+    /// The same, 16 outputs a thread.
+    Conv3x3Wide,
+    WinoIn,
+    WinoOut,
     ConvTranspose,
     Resize,
     Copy,
 }
 
 /// Each `Kernel`'s entry point, and whether its `B_IN_MEM` is set.
-const KERNELS: [(&str, bool); 8] = [
+const KERNELS: [(&str, bool); 11] = [
     ("matmul", false),
     ("matmul", true),
     ("layer_norm", false),
     ("softmax", false),
     ("conv3x3", false),
+    ("conv3x3_16", false),
+    ("wino_in", false),
+    ("wino_out", false),
     ("conv_transpose", false),
     ("resize", false),
     ("copy", false),
@@ -258,6 +275,51 @@ struct Conv {
     b: u32,
 }
 
+/// A 3x3 convolution's weights as Winograd F(2x2, 3x3) wants them: U [16][cin][cout] (each
+/// 3x3 g becomes G g G^T), and the bias (or NONE).
+#[derive(Clone, Copy)]
+struct Wino {
+    u: u32,
+    b: u32,
+    cin: usize,
+    cout: usize,
+}
+
+impl Wino {
+    /// Floats of scratch it needs on an h x w picture.
+    fn scratch(cin: usize, cout: usize, (h, w): (usize, usize)) -> usize {
+        16 * (cin + cout) * h.div_ceil(2) * w.div_ceil(2)
+    }
+}
+
+/// `weights` [cout][cin][3][3] for `conv3x3_wino`.
+fn wino(up: &mut Upload, weights: &[f32], bias: Option<&[f32]>, cout: usize, cin: usize) -> Wino {
+    Wino { u: up.push(&wino_u(weights, cout, cin)), b: bias.map_or(NONE, |b| up.push(b)), cin, cout }
+}
+
+/// `weights` [cout][cin][3][3] transformed for Winograd's F(2x2, 3x3): [16][cin][cout].
+fn wino_u(weights: &[f32], cout: usize, cin: usize) -> Vec<f32> {
+    const G: [[f32; 3]; 4] = [[1.0, 0.0, 0.0], [0.5, 0.5, 0.5], [0.5, -0.5, 0.5], [0.0, 0.0, 1.0]];
+    let mut u = vec![0.0f32; 16 * cin * cout];
+    for co in 0..cout {
+        for ci in 0..cin {
+            let g = &weights[(co * cin + ci) * 9..][..9];
+            for i in 0..4 {
+                for j in 0..4 {
+                    let mut v = 0.0;
+                    for a in 0..3 {
+                        for b in 0..3 {
+                            v += G[i][a] * g[a * 3 + b] * G[j][b];
+                        }
+                    }
+                    u[((i * 4 + j) * cin + ci) * cout + co] = v;
+                }
+            }
+        }
+    }
+    u
+}
+
 fn linear(up: &mut Upload, wt: &Weights, name: &str, scale: Option<&[f32]>) -> Result<Linear> {
     let (inp, out, t) = wt.transposed(&format!("{name}.weight"), scale)?;
     let mut b = wt.vec(&format!("{name}.bias"))?;
@@ -283,11 +345,17 @@ fn conv(up: &mut Upload, wt: &Weights, name: &str) -> Result<Conv> {
 /// PyTorch's bicubic resize (align_corners = false, A = -0.75) of a [c][ih][iw] grid to
 /// [c][oh][ow]: how DINOv2 stretches its position embedding to other picture sizes.
 fn bicubic(src: &[f32], c: usize, (ih, iw): (usize, usize), (oh, ow): (usize, usize)) -> Vec<f32> {
+    bicubic_scaled(src, c, (ih, iw), (oh, ow), (ih as f64 / oh as f64, iw as f64 / ow as f64))
+}
+
+/// The same with each output pixel `ratio` (y, x) input pixels apart: what PyTorch does when
+/// given a scale factor rather than a size.
+fn bicubic_scaled(src: &[f32], c: usize, (ih, iw): (usize, usize), (oh, ow): (usize, usize), (ry, rx): (f64, f64)) -> Vec<f32> {
     const A: f64 = -0.75;
     let near = |x: f64| ((A + 2.0) * x - (A + 3.0)) * x * x + 1.0;
     let far = |x: f64| ((A * x - 5.0 * A) * x + 8.0 * A) * x - 4.0 * A;
-    let taps = |dst: usize, inn: usize, out: usize| {
-        let real = inn as f64 / out as f64 * (dst as f64 + 0.5) - 0.5;
+    let taps = |dst: usize, inn: usize, ratio: f64| {
+        let real = ratio * (dst as f64 + 0.5) - 0.5;
         let i = real.floor();
         let t = real - i;
         let w = [far(t + 1.0), near(t), near(1.0 - t), far(2.0 - t)];
@@ -296,9 +364,9 @@ fn bicubic(src: &[f32], c: usize, (ih, iw): (usize, usize), (oh, ow): (usize, us
     };
     let mut out = vec![0.0; c * oh * ow];
     for y in 0..oh {
-        let (iy, wy) = taps(y, ih, oh);
+        let (iy, wy) = taps(y, ih, ry);
         for x in 0..ow {
-            let (ix, wx) = taps(x, iw, ow);
+            let (ix, wx) = taps(x, iw, rx);
             for ch in 0..c {
                 let plane = &src[ch * ih * iw..];
                 let mut acc = 0.0f64;
@@ -482,6 +550,11 @@ impl Ops {
     /// Self-attention over `rows` tokens: q, k and v side by side in `qkv` [rows][3D], the
     /// heads' outputs side by side in `attn` [rows][D].
     fn attention(&mut self, s: &Layout, rows: usize) {
+        self.attention_at(s.qkv, s.scores, s.attn, rows);
+    }
+
+    /// The same with the buffers given.
+    fn attention_at(&mut self, qkv: u32, scores_at: u32, attn: u32, rows: usize) {
         let dh = D / HEADS;
         let rs = 3 * D;
         let scores = Params {
@@ -489,15 +562,15 @@ impl Ops {
             k: dh as u32,
             n: rows as u32,
             batch: HEADS as u32,
-            a_off: s.qkv,
+            a_off: qkv,
             a_bs: dh as u32,
             a_rs: rs as u32,
             a_cs: 1,
-            b_off: s.qkv + D as u32,
+            b_off: qkv + D as u32,
             b_bs: dh as u32,
             b_rs: 1,
             b_cs: rs as u32,
-            c_off: s.scores,
+            c_off: scores_at,
             c_bs: (rows * rows) as u32,
             c_rs: rows as u32,
             c_cs: 1,
@@ -505,22 +578,22 @@ impl Ops {
             ..Default::default()
         };
         self.push(Kernel::MatmulMem, scores, [groups(rows, 32), groups(rows, 32), HEADS as u32]);
-        let soft = Params { m: rows as u32, n: rows as u32, batch: HEADS as u32, a_off: s.scores, f0: 1.0 / (dh as f32).sqrt(), ..Default::default() };
+        let soft = Params { m: rows as u32, n: rows as u32, batch: HEADS as u32, a_off: scores_at, f0: 1.0 / (dh as f32).sqrt(), ..Default::default() };
         self.push(Kernel::Softmax, soft, [rows as u32, HEADS as u32, 1]);
         let mix = Params {
             m: rows as u32,
             k: rows as u32,
             n: dh as u32,
             batch: HEADS as u32,
-            a_off: s.scores,
+            a_off: scores_at,
             a_bs: (rows * rows) as u32,
             a_rs: rows as u32,
             a_cs: 1,
-            b_off: s.qkv + 2 * D as u32,
+            b_off: qkv + 2 * D as u32,
             b_bs: dh as u32,
             b_rs: rs as u32,
             b_cs: 1,
-            c_off: s.attn,
+            c_off: attn,
             c_bs: dh as u32,
             c_rs: D as u32,
             c_cs: 1,
@@ -547,7 +620,46 @@ impl Ops {
             flags,
             ..Default::default()
         };
-        self.push(Kernel::Conv3x3, p, [groups(ow, 16), groups(oh, 16), groups(cout, 8)]);
+        if cout >= 32 {
+            self.push(Kernel::Conv3x3Wide, p, [groups(ow, 32), groups(oh, 16), groups(cout, 16)]);
+        } else {
+            self.push(Kernel::Conv3x3, p, [groups(ow, 16), groups(oh, 16), groups(cout, 8)]);
+        }
+    }
+
+    /// A 3x3 convolution (stride 1, padding 1) by Winograd: [cv.cin][h][w] at `a` to
+    /// [cv.cout][h][w] at `c`, through `scratch` (a `Wino::scratch` of the biggest). Flags as
+    /// for `conv3x3`.
+    fn conv3x3_wino(&mut self, a: u32, (h, w): (usize, usize), cv: Wino, c: u32, scratch: u32, flags: u32) {
+        let tiles = h.div_ceil(2) * w.div_ceil(2);
+        let v = scratch;
+        let m = scratch + (16 * cv.cin * tiles) as u32;
+        let input = Params { m: h as u32, k: cv.cin as u32, n: w as u32, a_off: a, c_off: v, flags: flags & (EDGE | RELU_IN), ..Default::default() };
+        self.push(Kernel::WinoIn, input, [groups(tiles, 64), cv.cin as u32, 1]);
+        // For each of the 16: M^T [tiles][cout] = V^T [tiles][cin] U [cin][cout].
+        let mul = Params {
+            m: tiles as u32,
+            k: cv.cin as u32,
+            n: cv.cout as u32,
+            batch: 16,
+            a_off: v,
+            a_bs: (cv.cin * tiles) as u32,
+            a_rs: 1,
+            a_cs: tiles as u32,
+            b_off: cv.u,
+            b_bs: (cv.cin * cv.cout) as u32,
+            b_rs: cv.cout as u32,
+            b_cs: 1,
+            c_off: m,
+            c_bs: (cv.cout * tiles) as u32,
+            c_rs: 1,
+            c_cs: tiles as u32,
+            bias_off: NONE,
+            ..Default::default()
+        };
+        self.push(Kernel::Matmul, mul, [groups(cv.cout, 32), groups(tiles, 32), 16]);
+        let output = Params { m: h as u32, n: w as u32, x0: cv.cout as u32, a_off: m, c_off: c, bias_off: cv.b, flags: flags & (RELU | ACCUMULATE), ..Default::default() };
+        self.push(Kernel::WinoOut, output, [groups(tiles, 64), cv.cout as u32, 1]);
     }
 
     fn conv_transpose(&mut self, a: u32, ch: usize, (h, w): (usize, usize), cv: Conv, s: usize, c: u32) {
@@ -556,8 +668,53 @@ impl Ops {
     }
 
     fn resize(&mut self, a: u32, ch: usize, (h, w): (usize, usize), (oh, ow): (usize, usize), c: u32) {
-        let p = Params { m: h as u32, k: ch as u32, n: w as u32, a_off: a, c_off: c, x0: oh as u32, x1: ow as u32, ..Default::default() };
+        self.resize_with(a, ch, (h, w), (oh, ow), c, 0);
+    }
+
+    fn resize_with(&mut self, a: u32, ch: usize, (h, w): (usize, usize), (oh, ow): (usize, usize), c: u32, flags: u32) {
+        let p = Params { m: h as u32, k: ch as u32, n: w as u32, a_off: a, c_off: c, x0: oh as u32, x1: ow as u32, flags, ..Default::default() };
         self.push(Kernel::Resize, p, [groups(ow, 16), groups(oh, 16), ch as u32]);
+    }
+
+    /// A transposed convolution with kernel = stride = 2 as four matrix multiplies, one for each
+    /// place in the 2x2 it makes: [l.inp][h][w] at `a` to [l.out][2h][2w] at `c`, `taps` in
+    /// (dy, dx) order. Flags as for `linear`.
+    fn conv_transpose2(&mut self, a: u32, (h, w): (usize, usize), taps: [Linear; 4], c: u32, flags: u32) {
+        for (t, l) in taps.into_iter().enumerate() {
+            let (dy, dx) = (t / 2, t % 2);
+            let p = Params {
+                m: w as u32,
+                k: l.inp as u32,
+                n: l.out as u32,
+                batch: h as u32,
+                a_off: a,
+                a_bs: w as u32,
+                a_rs: 1,
+                a_cs: (h * w) as u32,
+                b_off: l.w,
+                b_rs: l.out as u32,
+                b_cs: 1,
+                c_off: c + (dy * 2 * w + dx) as u32,
+                c_bs: (4 * w) as u32,
+                c_rs: 2,
+                c_cs: (4 * h * w) as u32,
+                bias_off: l.b,
+                flags,
+                ..Default::default()
+            };
+            self.push(Kernel::Matmul, p, [groups(l.out, 32), groups(w, 32), h as u32]);
+        }
+    }
+
+    /// Makes the last `ops` dispatches run `n` times over, the i-th time with its input, weights
+    /// (and bias) and output `i` times these strides further on. For the matrix multiply, 3x3
+    /// convolutions and Winograd's steps.
+    fn repeat_last(&mut self, ops: usize, n: u32, strides: &[(u32, u32, u32)]) {
+        let len = self.list.len();
+        for ((_, p, g), (a, b, c)) in self.list[len - ops..].iter_mut().zip(strides) {
+            (p.a_os, p.b_os, p.c_os) = (*a, *b, *c);
+            g[2] *= n;
+        }
     }
 
     /// C = A (A in `w`), or with `from_mem` C = A in `mem`, or with ACCUMULATE C += A.
@@ -568,9 +725,9 @@ impl Ops {
     }
 }
 
-// ---- The network ----------------------------------------------------------------------------
-
-pub struct Depth {
+/// A network's plan on the GPU: its weights, one buffer for everything else, and the
+/// dispatches that run it.
+struct Runner {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipelines: Vec<wgpu::ComputePipeline>,
@@ -578,13 +735,325 @@ pub struct Depth {
     bind: wgpu::BindGroup,
     readback: wgpu::Buffer,
     ops: Ops,
+    /// The dispatches each submission makes.
+    parts: Vec<std::ops::Range<usize>>,
+    adapter: String,
+    _gpu: Gpu,
+}
+
+/// Roughly how long a dispatch takes on an RX 580 (ms): what splitting into submissions goes by.
+fn cost(kernel: Kernel, p: &Params) -> f64 {
+    let (m, k, n) = (f64::from(p.m), f64::from(p.k), f64::from(p.n));
+    let work = match kernel {
+        Kernel::Matmul | Kernel::MatmulMem => m * k * n * f64::from(p.batch.max(1)),
+        Kernel::Conv3x3 => m * n * k * f64::from(p.x0) * 9.0 / f64::from(p.x1.max(1) * p.x1.max(1)),
+        Kernel::ConvTranspose => m * n * k * f64::from(p.x0) * f64::from(p.x1 * p.x1),
+        _ => 0.0,
+    };
+    0.03 + work / 0.8e9
+}
+
+impl Runner {
+    /// `mem_len` floats of activations; `what` names the network in errors.
+    fn new(up: &Upload, ops: Ops, mem_len: u32, what: &str) -> Result<Self> {
+        if ops.list.len() > MAX_OPS {
+            bail!("{} dispatches, room for {MAX_OPS}", ops.list.len());
+        }
+        let gpu = Gpu::shared()?;
+        let (device, queue) = (gpu.0.device.clone(), gpu.0.queue.clone());
+        let w_bytes = up.data.len() as u64 * 4;
+        let mem_bytes = mem_len as u64 * 4;
+        let needed = w_bytes.max(mem_bytes);
+        if needed > gpu.0.most_buffer {
+            bail!("the GPU allows {} MB buffers; {what} needs {} MB", gpu.0.most_buffer >> 20, needed >> 20);
+        }
+
+        let storage = |label, size: u64, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
+        let w = storage("weights", w_bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        queue.write_buffer(&w, 0, bytemuck::cast_slice(&up.data));
+        let mem = storage("mem", mem_bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
+        let params = storage("params", SLOT * MAX_OPS as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        let readback = storage("readback", mem_bytes, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+        let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("flex-depth"),
+            entries: &[
+                entry(
+                    0,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
+                    },
+                ),
+                entry(1, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }),
+                entry(2, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }),
+            ],
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("flex-depth"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &params,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
+                    }),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: mem.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: w.as_entire_binding() },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("flex-depth"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let source = wgpu::ShaderModuleDescriptor { label: Some("depth.wgsl"), source: wgpu::ShaderSource::Wgsl(include_str!("depth.wgsl").into()) };
+        // SAFETY: these are our own shaders, and every offset and size they use comes from the
+        // plan above, which fits `mem` and the weights by construction. The checks wgpu would
+        // add go on every array access, and cost 15% of the whole network.
+        let module = unsafe { device.create_shader_module_trusted(source, wgpu::ShaderRuntimeChecks::unchecked()) };
+        let pipelines = KERNELS
+            .iter()
+            .map(|(entry, b_in_mem)| {
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pipeline_layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions { constants: &[("B_IN_MEM", f64::from(u8::from(*b_in_mem)))], ..Default::default() },
+                    cache: None,
+                })
+            })
+            .collect();
+        // The parameters never change: write them once.
+        let mut slots = vec![0u8; ops.list.len() * SLOT as usize];
+        for (i, (_, p, _)) in ops.list.iter().enumerate() {
+            slots[i * SLOT as usize..][..std::mem::size_of::<Params>()].copy_from_slice(bytemuck::bytes_of(p));
+        }
+        queue.write_buffer(&params, 0, &slots);
+        drop(w); // the bind group keeps it
+        let mut parts = Vec::new();
+        let (mut start, mut ms) = (0, 0.0);
+        for (i, (kernel, p, _)) in ops.list.iter().enumerate() {
+            ms += cost(*kernel, p);
+            if ms >= SUBMIT_MS || i + 1 == ops.list.len() {
+                parts.push(start..i + 1);
+                (start, ms) = (i + 1, 0.0);
+            }
+        }
+        Ok(Self { device, queue, pipelines, mem, bind, readback, ops, parts, adapter: gpu.0.adapter.clone(), _gpu: gpu })
+    }
+
+    /// Puts `data` in `mem` at `at`.
+    fn write(&self, at: u32, data: &[f32]) {
+        self.queue.write_buffer(&self.mem, at as u64 * 4, bytemuck::cast_slice(data));
+    }
+
+    /// Runs every dispatch, a few at a time with the next few queued behind them (so the GPU
+    /// never waits on us, and other work still gets in between).
+    fn run(&self) -> Result<()> {
+        let mut queued: Option<wgpu::SubmissionIndex> = None;
+        for (start, ops) in self.parts.iter().map(|r| (r.start, &self.ops.list[r.clone()])) {
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                for (i, (kernel, _, g)) in ops.iter().enumerate() {
+                    if g.contains(&0) {
+                        continue;
+                    }
+                    pass.set_pipeline(&self.pipelines[*kernel as usize]);
+                    let slot = (start + i) as u64 * SLOT;
+                    pass.set_bind_group(0, &self.bind, &[slot as u32]);
+                    pass.dispatch_workgroups(g[0], g[1], g[2]);
+                }
+            }
+            let this = self.queue.submit([enc.finish()]);
+            if let Some(before) = queued.replace(this) {
+                self.wait(before)?;
+            }
+        }
+        match queued {
+            Some(last) => self.wait(last),
+            None => Ok(()),
+        }
+    }
+
+    fn wait(&self, submission: wgpu::SubmissionIndex) -> Result<()> {
+        self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None }).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(())
+    }
+
+    /// For tuning: how long the first `n` dispatches take together (ms), as one submission.
+    #[cfg(test)]
+    fn time_first(&self, n: usize, runs: usize) -> f64 {
+        let once = || {
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                for (i, (kernel, _, g)) in self.ops.list[..n].iter().enumerate() {
+                    pass.set_pipeline(&self.pipelines[*kernel as usize]);
+                    pass.set_bind_group(0, &self.bind, &[(i as u64 * SLOT) as u32]);
+                    pass.dispatch_workgroups(g[0], g[1], g[2]);
+                }
+            }
+            self.queue.submit([enc.finish()]);
+            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        };
+        once();
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            once();
+        }
+        started.elapsed().as_secs_f64() * 1000.0 / runs as f64
+    }
+
+    /// For tuning: the whole plan, each dispatch run `k` times in a row (ms).
+    #[cfg(test)]
+    fn time_repeated(&self, k: usize, runs: usize) -> f64 {
+        let once = || {
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                for (i, (kernel, _, g)) in self.ops.list.iter().enumerate() {
+                    for _ in 0..k {
+                        pass.set_pipeline(&self.pipelines[*kernel as usize]);
+                        pass.set_bind_group(0, &self.bind, &[(i as u64 * SLOT) as u32]);
+                        pass.dispatch_workgroups(g[0], g[1], g[2]);
+                    }
+                }
+            }
+            self.queue.submit([enc.finish()]);
+            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        };
+        once();
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            once();
+        }
+        started.elapsed().as_secs_f64() * 1000.0 / runs as f64
+    }
+
+    /// For tuning: how long each dispatch takes (ms), each run `times` times in a row.
+    #[cfg(test)]
+    fn profile(&self, times: usize) -> Vec<f64> {
+        let once = |i: usize, n: usize| {
+            let (kernel, _, g) = &self.ops.list[i];
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                for _ in 0..n {
+                    pass.set_pipeline(&self.pipelines[*kernel as usize]);
+                    pass.set_bind_group(0, &self.bind, &[(i as u64 * SLOT) as u32]);
+                    pass.dispatch_workgroups(g[0], g[1], g[2]);
+                }
+            }
+            let started = std::time::Instant::now();
+            self.queue.submit([enc.finish()]);
+            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            started.elapsed().as_secs_f64() * 1000.0
+        };
+        (0..self.ops.list.len())
+            .map(|i| {
+                once(i, 1);
+                // The difference between many and one takes out the cost of submitting.
+                (once(i, times + 1) - once(i, 1)) / times as f64
+            })
+            .collect()
+    }
+
+    /// Prints where the time goes, grouped by `label`'s name for each dispatch.
+    #[cfg(test)]
+    fn report(&self, label: impl Fn(usize, &Kernel, &Params) -> String) {
+        let times = self.profile(10);
+        let mut groups: Vec<(String, f64, usize)> = Vec::new();
+        for (i, ((k, p, _), t)) in self.ops.list.iter().zip(&times).enumerate() {
+            let name = label(i, k, p);
+            match groups.iter_mut().find(|g| g.0 == name) {
+                Some(g) => {
+                    g.1 += t;
+                    g.2 += 1;
+                }
+                None => groups.push((name, *t, 1)),
+            }
+        }
+        groups.sort_by(|a, b| b.1.total_cmp(&a.1));
+        eprintln!("total {:.1} ms over {} dispatches", times.iter().sum::<f64>(), times.len());
+        for (name, t, n) in groups.iter().take(25) {
+            eprintln!("{t:7.2} ms  {n:3}x  {name}");
+        }
+    }
+
+    /// Reads `len` floats of `mem` from `at` (waiting for the GPU).
+    fn read(&self, at: u32, len: usize) -> Result<Vec<f32>> {
+        let size = len as u64 * 4;
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(&self.mem, at as u64 * 4, &self.readback, 0, size);
+        self.queue.submit([enc.finish()]);
+        let slice = self.readback.slice(..size);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let out = bytemuck::cast_slice(&slice.get_mapped_range().map_err(|e| anyhow::anyhow!("{e}"))?).to_vec();
+        self.readback.unmap();
+        Ok(out)
+    }
+}
+
+/// A picture `grid` patches wide and high, as RGB bytes row by row from the top, normalised
+/// and cut into patches: [patch][channel][14][14].
+fn patches_of(rgb: &[u8], (gw, gh): (usize, usize)) -> Result<Vec<f32>> {
+    let (w, h) = (gw * PATCH, gh * PATCH);
+    if rgb.len() != w * h * 3 {
+        bail!("expected {w}x{h} RGB, got {} bytes", rgb.len());
+    }
+    let per = 3 * PATCH * PATCH;
+    let mut patches = vec![0.0f32; gw * gh * per];
+    for py in 0..gh {
+        for px in 0..gw {
+            let base = (py * gw + px) * per;
+            for c in 0..3 {
+                for ky in 0..PATCH {
+                    for kx in 0..PATCH {
+                        let (x, y) = (px * PATCH + kx, py * PATCH + ky);
+                        let v = f32::from(rgb[(y * w + x) * 3 + c]) / 255.0;
+                        patches[base + c * PATCH * PATCH + ky * PATCH + kx] = (v - MEAN[c]) / STD[c];
+                    }
+                }
+            }
+        }
+    }
+    Ok(patches)
+}
+
+/// Logits [classes][pixels] as how likely each pixel is to be each class.
+fn softmax_planes(mut planes: Vec<f32>, pixels: usize) -> Vec<f32> {
+    let classes = planes.len() / pixels;
+    let mut logits = vec![0.0f32; classes];
+    for i in 0..pixels {
+        for (c, l) in logits.iter_mut().enumerate() {
+            *l = planes[c * pixels + i];
+        }
+        let top = logits.iter().fold(f32::MIN, |a, b| a.max(*b));
+        let total: f32 = logits.iter().map(|l| (l - top).exp()).sum();
+        for (c, l) in logits.iter().enumerate() {
+            planes[c * pixels + i] = (l - top).exp() / total;
+        }
+    }
+    planes
+}
+
+// ---- The network ----------------------------------------------------------------------------
+
+pub struct Depth {
+    run: Runner,
     s: Layout,
     /// The picture's size in patches (width, height).
     grid: (usize, usize),
     /// Whether the masks are worked out too.
     with_masks: bool,
-    adapter: String,
-    _gpu: Gpu,
 }
 
 impl Depth {
@@ -819,89 +1288,9 @@ impl Depth {
             ops.conv1x1(s.fine2, fh * fw, h.out, s.logits, 0);
             ops.resize(s.logits, MASK_CLASSES, (fh, fw), (out_h, out_w), s.masks);
         }
-        if ops.list.len() > MAX_OPS {
-            bail!("{} dispatches, room for {MAX_OPS}", ops.list.len());
-        }
 
-        // The GPU.
-        let gpu = Gpu::shared()?;
-        let (device, queue) = (gpu.0.device.clone(), gpu.0.queue.clone());
-        let w_bytes = up.data.len() as u64 * 4;
-        let mem_bytes = s.end as u64 * 4;
-        let needed = w_bytes.max(mem_bytes);
-        if needed > gpu.0.most_buffer {
-            bail!("the GPU allows {} MB buffers; depth needs {} MB", gpu.0.most_buffer >> 20, needed >> 20);
-        }
-
-        let storage = |label, size: u64, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
-        let w = storage("weights", w_bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-        queue.write_buffer(&w, 0, bytemuck::cast_slice(&up.data));
-        let mem = storage("mem", mem_bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
-        let params = storage("params", SLOT * MAX_OPS as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
-        let readback = storage("readback", mem_bytes, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
-        let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("flex-depth"),
-            entries: &[
-                entry(
-                    0,
-                    wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
-                    },
-                ),
-                entry(1, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }),
-                entry(2, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }),
-            ],
-        });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("flex-depth"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &params,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64),
-                    }),
-                },
-                wgpu::BindGroupEntry { binding: 1, resource: mem.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: w.as_entire_binding() },
-            ],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("flex-depth"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let source = wgpu::ShaderModuleDescriptor { label: Some("depth.wgsl"), source: wgpu::ShaderSource::Wgsl(include_str!("depth.wgsl").into()) };
-        // SAFETY: these are our own shaders, and every offset and size they use comes from the
-        // plan above, which fits `mem` and the weights by construction. The checks wgpu would
-        // add go on every array access, and cost 15% of the whole network.
-        let module = unsafe { device.create_shader_module_trusted(source, wgpu::ShaderRuntimeChecks::unchecked()) };
-        let pipelines = KERNELS
-            .iter()
-            .map(|(entry, b_in_mem)| {
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pipeline_layout),
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: wgpu::PipelineCompilationOptions { constants: &[("B_IN_MEM", f64::from(u8::from(*b_in_mem)))], ..Default::default() },
-                    cache: None,
-                })
-            })
-            .collect();
-        // The parameters never change: write them once.
-        let mut slots = vec![0u8; ops.list.len() * SLOT as usize];
-        for (i, (_, p, _)) in ops.list.iter().enumerate() {
-            slots[i * SLOT as usize..][..std::mem::size_of::<Params>()].copy_from_slice(bytemuck::bytes_of(p));
-        }
-        queue.write_buffer(&params, 0, &slots);
-        drop(w); // the bind group keeps it
-        Ok(Self { device, queue, pipelines, mem, bind, readback, ops, s, grid: (gw, gh), with_masks, adapter: gpu.0.adapter.clone(), _gpu: gpu })
+        let run = Runner::new(&up, ops, s.end, "depth")?;
+        Ok(Self { run, s, grid: (gw, gh), with_masks })
     }
 
     /// The picture size it takes, in pixels.
@@ -911,7 +1300,7 @@ impl Depth {
 
     /// The GPU it runs on.
     pub fn adapter(&self) -> &str {
-        &self.adapter
+        &self.run.adapter
     }
 
     /// Depth for a picture of exactly `size()`, as RGB bytes row by row from the top:
@@ -929,85 +1318,39 @@ impl Depth {
             bail!("loaded without masks");
         }
         let (w, h) = self.size();
-        let pixels = w * h;
-        let mut planes = self.read(self.s.masks, MASK_CLASSES * pixels)?;
-        for i in 0..pixels {
-            let mut logits = [0.0; MASK_CLASSES];
-            for (c, l) in logits.iter_mut().enumerate() {
-                *l = planes[c * pixels + i];
-            }
-            let top = logits.iter().fold(f32::MIN, |a, b| a.max(*b));
-            let total: f32 = logits.iter().map(|l| (l - top).exp()).sum();
-            for (c, l) in logits.iter().enumerate() {
-                planes[c * pixels + i] = (l - top).exp() / total;
-            }
-        }
-        Ok(planes)
+        Ok(softmax_planes(self.read(self.s.masks, MASK_CLASSES * w * h)?, w * h))
     }
 
     /// Uploads the picture and runs every dispatch.
     fn submit(&mut self, rgb: &[u8]) -> Result<()> {
-        let (gw, gh) = self.grid;
-        let (w, h) = self.size();
-        if rgb.len() != w * h * 3 {
-            bail!("expected {w}x{h} RGB, got {} bytes", rgb.len());
-        }
-        // Normalised and cut into patches: [patch][channel][14][14].
-        let per = 3 * PATCH * PATCH;
-        let mut patches = vec![0.0f32; gw * gh * per];
-        for py in 0..gh {
-            for px in 0..gw {
-                let base = (py * gw + px) * per;
-                for c in 0..3 {
-                    for ky in 0..PATCH {
-                        for kx in 0..PATCH {
-                            let (x, y) = (px * PATCH + kx, py * PATCH + ky);
-                            let v = f32::from(rgb[(y * w + x) * 3 + c]) / 255.0;
-                            patches[base + c * PATCH * PATCH + ky * PATCH + kx] = (v - MEAN[c]) / STD[c];
-                        }
-                    }
-                }
-            }
-        }
-        self.queue.write_buffer(&self.mem, self.s.patches as u64 * 4, bytemuck::cast_slice(&patches));
-        for (part, ops) in self.ops.list.chunks(OPS_PER_SUBMIT).enumerate() {
-            let mut enc = self.device.create_command_encoder(&Default::default());
-            {
-                let mut pass = enc.begin_compute_pass(&Default::default());
-                for (i, (kernel, _, g)) in ops.iter().enumerate() {
-                    if g.contains(&0) {
-                        continue;
-                    }
-                    pass.set_pipeline(&self.pipelines[*kernel as usize]);
-                    let slot = (part * OPS_PER_SUBMIT + i) as u64 * SLOT;
-                    pass.set_bind_group(0, &self.bind, &[slot as u32]);
-                    pass.dispatch_workgroups(g[0], g[1], g[2]);
-                }
-            }
-            self.queue.submit([enc.finish()]);
-            self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{e}"))?;
-        }
-        Ok(())
+        let patches = patches_of(rgb, self.grid)?;
+        self.run.write(self.s.patches, &patches);
+        self.run.run()
     }
 
     /// Reads `len` floats of `mem` from `at` (waiting for the GPU).
     fn read(&self, at: u32, len: usize) -> Result<Vec<f32>> {
-        let size = len as u64 * 4;
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_buffer_to_buffer(&self.mem, at as u64 * 4, &self.readback, 0, size);
-        self.queue.submit([enc.finish()]);
-        let slice = self.readback.slice(..size);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let out = bytemuck::cast_slice(&slice.get_mapped_range().map_err(|e| anyhow::anyhow!("{e}"))?).to_vec();
-        self.readback.unmap();
-        Ok(out)
+        self.run.read(at, len)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn dispatch_overhead() {
+        for n in [1usize, 191, 382] {
+            let up = Upload { data: vec![0.0; 64] };
+            let mut ops = Ops::default();
+            for _ in 0..n {
+                ops.copy(0, 64, 64, 0);
+            }
+            let run = Runner::new(&up, ops, 4096, "test").unwrap();
+            eprintln!("{n} tiny dispatches: {:.2} ms", run.time_first(n, 20));
+        }
+    }
 
     #[test]
     fn bicubic_matches_torch_on_a_known_case() {

@@ -1,8 +1,9 @@
-//! Depth for video effects that ask for it (`depth = true`): Depth Anything V2 Small on the
-//! GPU through flex-depth, in a thread of its own. The player's paint callback hands it small
-//! frames (see `effects::Renderer`) whenever it's free, and picks up depth maps as they come.
+//! Depth for video effects that ask for it (`depth = true`): MoGe-2 (depth with the shape of
+//! things in it, and which way each surface faces), or Depth Anything V2 Small, on the GPU through
+//! flex-depth, in a thread of its own. The player's paint callback hands it small frames (see
+//! `effects::Renderer`) whenever it's free, and picks up depth maps as they come.
 //!
-//! The model (99 MB) is downloaded into the data folder the first time it's needed. The
+//! The model (141 or 99 MB) is downloaded into the data folder the first time it's needed. The
 //! thread stops, freeing the GPU memory, once nothing has asked for depth for a while.
 
 use std::collections::VecDeque;
@@ -11,6 +12,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use flex_depth::Depth;
+use flex_depth::moge::Moge;
 
 use crate::flow::{FLOW_HEIGHT, FLOW_WIDTH, Report};
 use crate::ground::Ground;
@@ -21,6 +23,8 @@ const LEVELS: [(usize, usize); 5] = [(37, 21), (32, 18), (28, 16), (24, 14), (21
 /// The frames in and depth maps out are always the biggest size: other levels scale them.
 pub const WIDTH: usize = LEVELS[0].0 * flex_depth::PATCH;
 pub const HEIGHT: usize = LEVELS[0].1 * flex_depth::PATCH;
+/// The same for MoGe-2, which costs more per patch.
+const MOGE_LEVELS: [(usize, usize); 4] = [(28, 16), (25, 14), (21, 12), (18, 10)];
 /// A depth map taking longer than this, on average (ms), moves to a smaller size.
 const TOO_SLOW: f32 = 35.0;
 /// A bigger size is tried if it should take no longer than this (ms).
@@ -50,7 +54,7 @@ const MIN_INTERVAL: Duration = Duration::from_millis(33);
 /// With movement to carry them along, depth and masks come from the model less often: starting
 /// at this size, this often (every fourth frame of a film), or at once after a cut. That leaves
 /// each run longer, so the limits for moving between sizes are higher.
-const CARRIED_LEVEL: usize = 1;
+const CARRIED_LEVEL: [usize; 2] = [1, 1];
 const CARRIED_TOO_SLOW: f32 = 75.0;
 const CARRIED_ROOM: f32 = 55.0;
 const CARRIED_INTERVAL: Duration = Duration::from_millis(150);
@@ -73,6 +77,8 @@ pub enum Status {
     /// Downloading the model: percent done.
     Downloading(u8),
     Ready {
+        /// Which network.
+        model: &'static str,
         adapter: String,
         /// How long the last depth map took.
         ms: f32,
@@ -92,7 +98,7 @@ impl Status {
             Status::Off => "off".into(),
             Status::Starting => "starting…".into(),
             Status::Downloading(p) => format!("downloading the depth model ({p}%)…"),
-            Status::Ready { adapter, ms, size, masks, carried } => format!("{ms:.0} ms a frame at {}×{}{}{} on {adapter}", size.0, size.1, if *masks { " with masks" } else { "" }, if *carried { ", carried by movement" } else { "" }),
+            Status::Ready { model, adapter, ms, size, masks, carried } => format!("{model}: {ms:.0} ms a frame at {}×{}{}{} on {adapter}", size.0, size.1, if *masks { " with masks" } else { "" }, if *carried { ", carried by movement" } else { "" }),
             Status::Failed(e) => format!("⚠ {e}"),
         }
     }
@@ -108,6 +114,12 @@ pub struct DepthMap {
     /// How much of each pixel is a person (red), wall (green) and sky (blue), RGBA, bottom row
     /// first, `WIDTH` × `HEIGHT`, when an effect asked for them.
     pub masks: Option<Vec<u8>>,
+    /// Ground, ceiling, water and plant; then window, skin, hair and clothes (from MoGe-2's head),
+    /// likewise.
+    pub more_masks: Option<[Vec<u8>; 2]>,
+    /// Which way surfaces face (see `normal_bytes`), RGBA, bottom row first, `WIDTH` × `HEIGHT`,
+    /// when the network gives them.
+    pub normals: Option<Vec<u8>>,
     /// Where the ground is, as `ground::Ground::update` gives it.
     pub ground: [f32; 4],
     /// A guess at a frame that hasn't been seen yet, carried on along the last movement.
@@ -137,17 +149,142 @@ struct State {
     /// a cut.
     last_run: Option<Instant>,
     not_before: Option<Instant>,
-    /// Into `LEVELS`, kept so the next video starts at the size that worked for this one.
-    level: usize,
+    /// Into each `Kind`'s levels, kept so the next video starts at the size that worked for
+    /// this one.
+    level: [usize; 2],
 }
 
-fn tokens(level: usize) -> f32 {
-    (LEVELS[level].0 * LEVELS[level].1 + 1) as f32
+/// Which network makes depth.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    /// MoGe-2: depth with the shape of things in it, and which way surfaces face.
+    Moge = 0,
+    /// Depth Anything V2 Small: quicker, and what people, walls and sky come from until
+    /// MoGe-2 has its own.
+    Small = 1,
+}
+
+impl Kind {
+    /// MoGe-2, unless masks are wanted and it has no head for them; FLEX_DEPTH_MODEL=small or
+    /// moge says otherwise.
+    fn choose(masks: bool) -> Kind {
+        match std::env::var("FLEX_DEPTH_MODEL").as_deref() {
+            Ok("small") => Kind::Small,
+            Ok("moge") => Kind::Moge,
+            _ if masks && flex_depth::moge::MASK_HEAD.is_none() => Kind::Small,
+            _ => Kind::Moge,
+        }
+    }
+
+    fn levels(self) -> &'static [(usize, usize)] {
+        match self {
+            Kind::Moge => &MOGE_LEVELS,
+            Kind::Small => &LEVELS,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Moge => "MoGe-2",
+            Kind::Small => "Depth Anything V2",
+        }
+    }
+
+    fn path(self) -> PathBuf {
+        let file = match self {
+            Kind::Moge => "moge-2-vits-normal.pt",
+            Kind::Small => "depth-anything-v2-small.safetensors",
+        };
+        flex_core::data_dir().join("models").join(file)
+    }
+
+    /// Where it comes from: the URL, its SHA-256 and its size.
+    fn source(self) -> (&'static str, &'static str, u64) {
+        match self {
+            Kind::Moge => (flex_depth::moge::WEIGHTS_URL, flex_depth::moge::WEIGHTS_SHA256, flex_depth::moge::WEIGHTS_BYTES),
+            Kind::Small => (flex_depth::WEIGHTS_URL, flex_depth::WEIGHTS_SHA256, flex_depth::WEIGHTS_BYTES),
+        }
+    }
+}
+
+/// The network, loaded.
+enum Net {
+    Small(Depth),
+    Moge(Moge),
+}
+
+/// What the network makes of a frame, at `WIDTH` × `HEIGHT`, rows from the top.
+struct Found {
+    /// Bigger is nearer, in no fixed units.
+    disparity: Vec<f32>,
+    masks: Option<Vec<Vec<f32>>>,
+    /// Which way surfaces face: x to the right, y up, z towards the viewer.
+    normals: Option<[Vec<f32>; 3]>,
+}
+
+impl Net {
+    fn load(kind: Kind, grid: (usize, usize), masks: bool) -> anyhow::Result<Net> {
+        Ok(match kind {
+            Kind::Small => Net::Small(Depth::load(&kind.path(), grid, masks)?),
+            Kind::Moge => Net::Moge(Moge::load(&kind.path(), grid, flex_depth::moge::MASK_HEAD.filter(|_| masks))?),
+        })
+    }
+
+    fn size(&self) -> (usize, usize) {
+        match self {
+            Net::Small(d) => d.size(),
+            Net::Moge(m) => m.size(),
+        }
+    }
+
+    fn adapter(&self) -> &str {
+        match self {
+            Net::Small(d) => d.adapter(),
+            Net::Moge(m) => m.adapter(),
+        }
+    }
+
+    /// `rgb` is `WIDTH` × `HEIGHT`, rows from the top.
+    fn run(&mut self, rgb: &[u8], masks: bool) -> anyhow::Result<Found> {
+        let size = self.size();
+        let input = if size == (WIDTH, HEIGHT) { std::borrow::Cow::Borrowed(rgb) } else { std::borrow::Cow::Owned(scaled_rgb(rgb, (WIDTH, HEIGHT), size)) };
+        let full = |plane: &[f32], from: (usize, usize)| if from == (WIDTH, HEIGHT) { plane.to_vec() } else { scaled(plane, from, (WIDTH, HEIGHT)) };
+        match self {
+            Net::Small(d) => {
+                let raw = d.run(&input)?;
+                let masks = if masks { Some(mask_planes(&d.masks()?, None, size)) } else { None };
+                Ok(Found { disparity: full(&raw, size), masks, normals: None })
+            }
+            Net::Moge(m) => {
+                m.submit(&input)?;
+                let g = m.geometry()?;
+                let from = (g.width, g.height);
+                let disparity: Vec<f32> = g.depth.iter().map(|d| 1.0 / d.max(1e-3)).collect();
+                // MoGe's camera has y down and z away; effects have y up and z towards them.
+                let normals = std::array::from_fn(|c| {
+                    let sign = if c == 0 { 1.0 } else { -1.0 };
+                    full(&g.normals.iter().map(|n| n[c] * sign).collect::<Vec<f32>>(), from)
+                });
+                let masks = if masks && m.has_masks() {
+                    let found = m.masks()?;
+                    Some(mask_planes(&found.scene, found.parts.as_deref(), from))
+                } else {
+                    None
+                };
+                Ok(Found { disparity: full(&disparity, from), masks, normals: Some(normals) })
+            }
+        }
+    }
+}
+
+fn tokens(levels: &[(usize, usize)], level: usize) -> f32 {
+    (levels[level].0 * levels[level].1 + 1) as f32
 }
 
 /// Chooses the size the model runs at from how long depth maps are taking. Nearly all of a
 /// map's time goes with the number of patches, so that says how long another size would take.
 struct Pace {
+    levels: &'static [(usize, usize)],
     level: usize,
     average: Option<f32>,
     changed: Instant,
@@ -155,8 +292,8 @@ struct Pace {
 }
 
 impl Pace {
-    fn new(level: usize, now: Instant) -> Self {
-        Self { level, average: None, changed: now, retry: None }
+    fn new(levels: &'static [(usize, usize)], level: usize, now: Instant) -> Self {
+        Self { levels, level: level.min(levels.len() - 1), average: None, changed: now, retry: None }
     }
 
     /// A map took `ms`, with maps `carried` along the movement or not. Returns the level to move
@@ -168,11 +305,12 @@ impl Pace {
         if now.duration_since(self.changed) < SETTLE {
             return None;
         }
-        let at = |level| average * tokens(level) / tokens(self.level);
-        let level = if average > too_slow && self.level + 1 < LEVELS.len() {
+        let levels = self.levels;
+        let at = |level| average * tokens(levels, level) / tokens(levels, self.level);
+        let level = if average > too_slow && self.level + 1 < levels.len() {
             // Straight to the size that should be fast enough, or the smallest.
             self.retry = Some(now + RETRY);
-            (self.level + 1..LEVELS.len()).find(|l| at(*l) <= too_slow).unwrap_or(LEVELS.len() - 1)
+            (self.level + 1..levels.len()).find(|l| at(*l) <= too_slow).unwrap_or(levels.len() - 1)
         } else if self.level > 0 && at(self.level - 1) <= room && self.retry.is_none_or(|t| now >= t) {
             self.level - 1
         } else {
@@ -185,26 +323,56 @@ impl Pace {
     }
 }
 
-/// Mask classes effects get: person, wall and sky.
+/// Mask classes effects get, in this order: person, wall and sky (from either network), then
+/// (from MoGe-2's head) ground, ceiling, water, plant, window, and a person's skin, hair and
+/// clothes.
 const MASKS: usize = 3;
+const ALL_MASKS: usize = 11;
 
-/// The model's [other, person, wall, sky] planes as person, wall and sky at `WIDTH` × `HEIGHT`.
-fn mask_planes(planes: &[f32], size: (usize, usize)) -> [Vec<f32>; MASKS] {
+/// A network's planes (`size`, rows from the top, the first being "other") as the masks effects
+/// get, at `WIDTH` × `HEIGHT`. `parts` are of a person, so they're scaled by how much of a
+/// person each pixel is.
+fn mask_planes(planes: &[f32], parts: Option<&[f32]>, size: (usize, usize)) -> Vec<Vec<f32>> {
     let pixels = size.0 * size.1;
-    std::array::from_fn(|c| {
-        let plane = &planes[(c + 1) * pixels..][..pixels];
-        if size == (WIDTH, HEIGHT) { plane.to_vec() } else { scaled(plane, size, (WIDTH, HEIGHT)) }
-    })
+    let full = |plane: &[f32]| if size == (WIDTH, HEIGHT) { plane.to_vec() } else { scaled(plane, size, (WIDTH, HEIGHT)) };
+    let classes = planes.len() / pixels;
+    let mut out: Vec<Vec<f32>> = (1..classes).map(|c| full(&planes[c * pixels..][..pixels])).collect();
+    if let Some(parts) = parts {
+        let person = &planes[pixels..][..pixels];
+        for part in parts.chunks(pixels) {
+            out.push(full(&part.iter().zip(person).map(|(a, b)| a * b).collect::<Vec<f32>>()));
+        }
+    }
+    out
 }
 
-/// Masks (rows from the top) as a texture's bytes: RGBA, bottom row first.
-fn mask_bytes(planes: &[Vec<f32>; MASKS]) -> Vec<u8> {
+/// Four masks (rows from the top) as a texture's bytes: RGBA, bottom row first, with 1 for
+/// any that aren't there.
+fn mask_bytes(planes: &[Vec<f32>]) -> Vec<u8> {
     let mut out = vec![255u8; WIDTH * HEIGHT * 4];
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
-            let px = &mut out[((HEIGHT - 1 - y) * WIDTH + x) * 4..][..MASKS];
+            let px = &mut out[((HEIGHT - 1 - y) * WIDTH + x) * 4..][..4];
             for (byte, plane) in px.iter_mut().zip(planes) {
                 *byte = (plane[y * WIDTH + x].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Normals (rows from the top) as a texture's bytes: x, y, z from -1 to 1 as 0 to 255, RGBA,
+/// bottom row first.
+fn normal_bytes(planes: &[Vec<f32>; 3]) -> Vec<u8> {
+    let mut out = vec![255u8; WIDTH * HEIGHT * 4];
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let at = y * WIDTH + x;
+            let v = [planes[0][at], planes[1][at], planes[2][at]];
+            let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
+            let px = &mut out[((HEIGHT - 1 - y) * WIDTH + x) * 4..][..3];
+            for (byte, c) in px.iter_mut().zip(v) {
+                *byte = ((c / len * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
             }
         }
     }
@@ -322,7 +490,8 @@ fn carried(plane: &[f32], flow: &[Vec<f32>; 2], seconds: f32) -> Vec<f32> {
 /// What's known of the picture at one moment, rows from the top.
 struct Picture {
     depth: Vec<f32>,
-    masks: Option<[Vec<f32>; MASKS]>,
+    masks: Option<Vec<Vec<f32>>>,
+    normals: Option<[Vec<f32>; 3]>,
     time: f32,
 }
 
@@ -330,7 +499,8 @@ impl Picture {
     fn moved(&self, flow: &[Vec<f32>; 2], seconds: f32) -> Picture {
         Picture {
             depth: carried(&self.depth, flow, seconds),
-            masks: self.masks.as_ref().map(|masks| std::array::from_fn(|c| carried(&masks[c], flow, seconds))),
+            masks: self.masks.as_ref().map(|masks| masks.iter().map(|m| carried(m, flow, seconds)).collect()),
+            normals: self.normals.as_ref().map(|normals| std::array::from_fn(|c| carried(&normals[c], flow, seconds))),
             time: self.time + seconds,
         }
     }
@@ -378,7 +548,9 @@ impl Carrier {
             values: picture.depth.chunks(WIDTH).rev().flatten().copied().collect(),
             serial: self.serial,
             time: picture.time,
-            masks: picture.masks.as_ref().map(mask_bytes),
+            masks: picture.masks.as_ref().map(|m| mask_bytes(&m[..MASKS])),
+            more_masks: picture.masks.as_ref().filter(|m| m.len() == ALL_MASKS).map(|m| [mask_bytes(&m[3..7]), mask_bytes(&m[7..11])]),
+            normals: picture.normals.as_ref().map(normal_bytes),
             ground: self.ground,
             ahead,
             clues: None,
@@ -436,6 +608,11 @@ impl Carrier {
                     settle(plane, old, (WIDTH, HEIGHT));
                 }
             }
+            if let (Some(normals), Some(old)) = (&mut now.normals, &before.normals) {
+                for (plane, old) in normals.iter_mut().zip(old) {
+                    settle(plane, old, (WIDTH, HEIGHT));
+                }
+            }
         }
         let map = self.map(&now, false);
         self.picture = Some(now);
@@ -449,13 +626,9 @@ pub struct Link(Arc<(Mutex<State>, Condvar)>);
 
 impl Default for Link {
     fn default() -> Self {
-        let state = State { status: Status::Off, running: false, input: None, busy: false, output: VecDeque::new(), newest: None, last_wanted: Instant::now(), masks_wanted: false, carried: false, moves: VecDeque::new(), last_run: None, not_before: None, level: 0 };
+        let state = State { status: Status::Off, running: false, input: None, busy: false, output: VecDeque::new(), newest: None, last_wanted: Instant::now(), masks_wanted: false, carried: false, moves: VecDeque::new(), last_run: None, not_before: None, level: [0; 2] };
         Self(Arc::new((Mutex::new(state), Condvar::new())))
     }
-}
-
-fn model_path() -> PathBuf {
-    flex_core::data_dir().join("models").join("depth-anything-v2-small.safetensors")
 }
 
 impl Link {
@@ -551,30 +724,37 @@ impl Link {
         state.not_before = state.last_run.filter(|_| state.carried).map(|last| last + crate::gpu::rest(crate::gpu::Net::Depth, carrier.interval()));
     }
 
-    fn work(&self) {
-        let path = model_path();
-        let (level, mut with_masks) = {
-            let state = self.lock();
-            (if state.carried { state.level.max(CARRIED_LEVEL) } else { state.level }, state.masks_wanted)
-        };
-        let mut pace = Pace::new(level, Instant::now());
-        let result = (|| -> anyhow::Result<Depth> {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
+    /// Downloads `kind` if it isn't here yet (showing how far it's got), and loads it.
+    fn load(&self, kind: Kind, grid: (usize, usize), masks: bool) -> anyhow::Result<Net> {
+        let path = kind.path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let (url, sha, total) = kind.source();
+        let progress = |done: u64| {
+            let pct = (done * 100 / total.max(1)).min(100) as u8;
+            let mut state = self.lock();
+            if state.status != Status::Downloading(pct) && done < total {
+                state.status = Status::Downloading(pct);
             }
-            let total = flex_depth::WEIGHTS_BYTES;
-            let progress = |done: u64| {
-                let pct = (done * 100 / total.max(1)).min(100) as u8;
-                let mut state = self.lock();
-                if state.status != Status::Downloading(pct) && done < total {
-                    state.status = Status::Downloading(pct);
-                }
-            };
-            flex_core::update::download_verified(flex_depth::WEIGHTS_URL, "the depth model", total, flex_depth::WEIGHTS_SHA256, &path, progress)?;
-            Depth::load(&path, LEVELS[pace.level], with_masks)
-        })();
-        let mut depth = match result {
-            Ok(depth) => depth,
+        };
+        flex_core::update::download_verified(url, "the depth model", total, sha, &path, progress)?;
+        Net::load(kind, grid, masks)
+    }
+
+    fn work(&self) {
+        let (mut with_masks, carried) = {
+            let state = self.lock();
+            (state.masks_wanted, state.carried)
+        };
+        let mut kind = Kind::choose(with_masks);
+        let level = {
+            let state = self.lock();
+            if carried { state.level[kind as usize].max(CARRIED_LEVEL[kind as usize]) } else { state.level[kind as usize] }
+        };
+        let mut pace = Pace::new(kind.levels(), level, Instant::now());
+        let mut net = match self.load(kind, kind.levels()[pace.level], with_masks) {
+            Ok(net) => net,
             Err(e) => {
                 log::warn!("depth: {e:#}");
                 let mut state = self.lock();
@@ -583,8 +763,8 @@ impl Link {
                 return;
             }
         };
-        log::info!("depth: running on {}", depth.adapter());
-        self.lock().status = Status::Ready { adapter: depth.adapter().to_owned(), ms: 0.0, size: depth.size(), masks: with_masks, carried: false };
+        log::info!("depth: {} running on {}", kind.name(), net.adapter());
+        self.lock().status = Status::Ready { model: kind.name(), adapter: net.adapter().to_owned(), ms: 0.0, size: net.size(), masks: with_masks, carried: false };
 
         let mut carrier = Carrier::default();
         let mut range: Option<(f32, f32)> = None;
@@ -618,15 +798,13 @@ impl Link {
                 }
             }
             let started = Instant::now();
-            let size = depth.size();
+            let size = net.size();
             let turn = crate::gpu::turn(crate::gpu::Net::Depth);
-            let result = if size == (WIDTH, HEIGHT) { depth.run(&rgb) } else { depth.run(&scaled_rgb(&rgb, (WIDTH, HEIGHT), size)) };
-            let result = result.and_then(|raw| Ok((raw, if with_masks { Some(depth.masks()?) } else { None })));
+            let result = net.run(&rgb, with_masks);
             let ms = turn.ms();
             drop(turn);
-            let (raw, planes) = match result {
-                Ok((raw, planes)) if size == (WIDTH, HEIGHT) => (raw, planes),
-                Ok((raw, planes)) => (scaled(&raw, size, (WIDTH, HEIGHT)), planes),
+            let found = match result {
+                Ok(found) => found,
                 Err(e) => {
                     log::warn!("depth: {e:#}");
                     let mut state = self.lock();
@@ -637,6 +815,7 @@ impl Link {
             };
             // Scaled to 0–1 by a range that follows the picture's smoothly (so it doesn't
             // pump), blended with the last map, and flipped back to bottom-up.
+            let raw = found.disparity;
             let (lo, hi) = raw.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
             // A new shot has nothing to do with the last one: start again from this picture.
             if cut {
@@ -651,10 +830,9 @@ impl Link {
             range = Some((lo, hi));
             let scale = 1.0 / (hi - lo).max(1e-6);
             let values: Vec<f32> = raw.iter().map(|v| ((v - lo) * scale).clamp(0.0, 1.0)).collect();
-            let masks = planes.map(|planes| mask_planes(&planes, size));
             // What moved while the model was running, so its answer goes in beside the latest.
             self.catch_up(&mut carrier);
-            let mut map = carrier.found(Picture { depth: values, masks, time });
+            let mut map = carrier.found(Picture { depth: values, masks: found.masks, normals: found.normals, time });
             map.ground = ground.update(&map.values, map.masks.as_deref(), (WIDTH, HEIGHT));
             carrier.ground = map.ground;
             map.clues = carrier.picture.as_ref().and_then(|p| p.masks.as_ref().map(|masks| crate::shot_type::Clues::of(&p.depth, &masks[0], &masks[2], &rgb, (WIDTH, HEIGHT))));
@@ -662,7 +840,7 @@ impl Link {
             let carried = {
                 let mut state = self.lock();
                 let carried = state.carried;
-                state.status = Status::Ready { adapter: depth.adapter().to_owned(), ms, size, masks: with_masks, carried };
+                state.status = Status::Ready { model: kind.name(), adapter: net.adapter().to_owned(), ms, size, masks: with_masks, carried };
                 carried
             };
             self.publish([map]);
@@ -673,18 +851,28 @@ impl Link {
             }
             let moved = pace.update(ms, Instant::now(), carried);
             let masks_wanted = self.lock().masks_wanted;
-            if moved.is_some() || masks_wanted != with_masks {
+            let wanted_kind = Kind::choose(masks_wanted);
+            if moved.is_some() || masks_wanted != with_masks || wanted_kind != kind {
+                if wanted_kind != kind {
+                    kind = wanted_kind;
+                    let level = self.lock().level[kind as usize];
+                    pace = Pace::new(kind.levels(), if carried { level.max(CARRIED_LEVEL[kind as usize]) } else { level }, Instant::now());
+                    // Different networks' depth and normals don't follow on from each other.
+                    carrier.cut();
+                    range = None;
+                }
                 let level = pace.level;
-                log::info!("depth: {ms:.0} ms a frame, running at {} × {} patches, masks {masks_wanted}", LEVELS[level].0, LEVELS[level].1);
-                self.lock().level = level;
+                let grid = kind.levels()[level];
+                log::info!("depth: {ms:.0} ms a frame; now {} at {} × {} patches, masks {masks_wanted}", kind.name(), grid.0, grid.1);
+                self.lock().level[kind as usize] = level;
                 with_masks = masks_wanted;
                 if let Some(picture) = &mut carrier.picture {
                     picture.masks = None;
                 }
                 // The old one goes first: a slow GPU may not have room for both.
-                drop(depth);
-                depth = match Depth::load(&path, LEVELS[level], with_masks) {
-                    Ok(depth) => depth,
+                drop(net);
+                net = match self.load(kind, grid, with_masks) {
+                    Ok(net) => net,
                     Err(e) => {
                         log::warn!("depth: {e:#}");
                         let mut state = self.lock();
@@ -699,7 +887,7 @@ impl Link {
             }
             self.lock().busy = false;
         }
-        drop(depth);
+        drop(net);
         log::info!("depth: stopped");
         let mut state = self.lock();
         state.running = false;
@@ -748,7 +936,7 @@ mod tests {
     fn dot(x: usize, y: usize, time: f32) -> Picture {
         let mut depth = vec![0.0; WIDTH * HEIGHT];
         depth[y * WIDTH + x] = 1.0;
-        Picture { depth, masks: None, time }
+        Picture { depth, masks: None, normals: None, time }
     }
 
     fn report(time: f32, vx: f32, vy: f32) -> Report {
@@ -793,8 +981,8 @@ mod tests {
 
     #[test]
     fn the_model_runs_sooner_when_the_carried_map_was_wrong() {
-        let mut carrier = Carrier { picture: Some(Picture { depth: vec![0.2; WIDTH * HEIGHT], masks: None, time: 1.0 }), ..Default::default() };
-        carrier.found(Picture { depth: vec![0.2 + CARRIED_WRONG + 0.05; WIDTH * HEIGHT], masks: None, time: 1.0 });
+        let mut carrier = Carrier { picture: Some(Picture { depth: vec![0.2; WIDTH * HEIGHT], masks: None, normals: None, time: 1.0 }), ..Default::default() };
+        carrier.found(Picture { depth: vec![0.2 + CARRIED_WRONG + 0.05; WIDTH * HEIGHT], masks: None, normals: None, time: 1.0 });
         assert_eq!(carrier.interval(), CARRIED_SOON);
     }
 
@@ -831,7 +1019,7 @@ mod tests {
     #[test]
     fn pace_moves_down_to_a_size_that_fits_and_settles_first() {
         let now = Instant::now();
-        let mut pace = Pace::new(0, now);
+        let mut pace = Pace::new(&LEVELS, 0, now);
         assert_eq!(pace.update(200.0, now + Duration::from_secs(1), false), None);
         // 200 ms at the biggest size: only the smallest should come in under the limit.
         assert_eq!(pace.update(200.0, now + SETTLE, false), Some(LEVELS.len() - 1));
@@ -841,7 +1029,7 @@ mod tests {
     #[test]
     fn pace_waits_before_retrying_a_size_that_was_too_slow() {
         let now = Instant::now();
-        let mut pace = Pace::new(0, now);
+        let mut pace = Pace::new(&LEVELS, 0, now);
         assert_eq!(pace.update(TOO_SLOW + 1.0, now + SETTLE, false), Some(1));
         // Fast enough to go back up, by the estimate, but it only just failed.
         let t = now + SETTLE * 3;
@@ -852,18 +1040,18 @@ mod tests {
     #[test]
     fn carried_maps_can_take_longer_as_they_come_less_often() {
         let now = Instant::now();
-        let mut pace = Pace::new(CARRIED_LEVEL, now);
+        let mut pace = Pace::new(&LEVELS, CARRIED_LEVEL[1], now);
         assert_eq!(pace.update(TOO_SLOW + 10.0, now + SETTLE, true), None);
-        let mut pace = Pace::new(CARRIED_LEVEL, now);
-        assert!(pace.update(CARRIED_TOO_SLOW + 10.0, now + SETTLE, true).is_some_and(|l| l > CARRIED_LEVEL));
+        let mut pace = Pace::new(&LEVELS, CARRIED_LEVEL[1], now);
+        assert!(pace.update(CARRIED_TOO_SLOW + 10.0, now + SETTLE, true).is_some_and(|l| l > CARRIED_LEVEL[1]));
     }
 
     #[test]
     fn pace_stays_put_between_too_slow_and_room() {
         let now = Instant::now();
-        let mut pace = Pace::new(1, now);
+        let mut pace = Pace::new(&LEVELS, 1, now);
         // Fine here; the size above would be slower than ROOM.
-        let ms = ROOM * tokens(1) / tokens(0) + 5.0;
+        let ms = ROOM * tokens(&LEVELS, 1) / tokens(&LEVELS, 0) + 5.0;
         assert_eq!(pace.update(ms, now + SETTLE, false), None);
     }
 
@@ -873,7 +1061,7 @@ mod tests {
         let pixels = WIDTH * HEIGHT;
         let mut planes = vec![0.0; 4 * pixels];
         planes[pixels] = 1.0; // person, at the top left
-        let bytes = mask_bytes(&mask_planes(&planes, (WIDTH, HEIGHT)));
+        let bytes = mask_bytes(&mask_planes(&planes, None, (WIDTH, HEIGHT)));
         assert_eq!(&bytes[(HEIGHT - 1) * WIDTH * 4..][..4], &[255, 0, 0, 255]);
         assert_eq!(&bytes[..4], &[0, 0, 0, 255]);
     }

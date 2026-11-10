@@ -531,6 +531,24 @@ vec2 world_pin_nearby(vec2 uv, float distance) {
 float world_distance(float near) {
     return 1.0 / max(u_world_depth.x * near + u_world_depth.y, 0.02);
 }
+uniform sampler2D u_normals;
+uniform float u_has_normals;
+// Which way the surface at a point on screen faces: x to the right, y up and z towards the viewer
+// (unit length). From the depth network where it gives them (MoGe-2); otherwise worked out from
+// depth's slopes, which show outlines but little of the shape within them.
+vec3 normal_at(vec2 uv) {
+    vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
+    if (u_has_normals > 0.5) {
+        return normalize(texture(u_normals, p).xyz * 2.0 - 1.0);
+    }
+    // Two texels of the depth map either way; any finer and its noise shows as bumps.
+    vec2 e = 2.0 / vec2(518.0, 294.0);
+    float dx = texture(u_depth, p + vec2(e.x, 0.0)).r - texture(u_depth, p - vec2(e.x, 0.0)).r;
+    float dy = texture(u_depth, p + vec2(0.0, e.y)).r - texture(u_depth, p - vec2(0.0, e.y)).r;
+    // Limited, or the jump in depth around everything's outline becomes a hard edge.
+    vec2 slope = clamp(vec2(dx, dy), -0.035, 0.035) * u_has_depth;
+    return normalize(vec3(-slope, 0.06));
+}
 float person_at(vec2 uv) {
     return masks_at(uv).r;
 }
@@ -540,6 +558,24 @@ float wall_at(vec2 uv) {
 float sky_at(vec2 uv) {
     return masks_at(uv).b;
 }
+// With segment = true and MoGe-2's head (u_has_more_masks is 1): more of what each point is,
+// each from 0 to 1. ground_at is anything underfoot (floors, roads, grass, sand, snow), and
+// body_skin_at, clothes_at and hair_at say which part of a person a point is (they add up to
+// person_at).
+uniform sampler2D u_masks2;
+uniform sampler2D u_masks3;
+uniform float u_has_more_masks;
+vec4 more_masks_at(vec2 uv, int which) {
+    vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
+    return (which == 0 ? texture(u_masks2, p) : texture(u_masks3, p)) * u_has_more_masks;
+}
+float ground_at(vec2 uv) { return more_masks_at(uv, 0).r; }
+float ceiling_at(vec2 uv) { return more_masks_at(uv, 0).g; }
+float water_at(vec2 uv) { return more_masks_at(uv, 0).b; }
+float plant_at(vec2 uv) { return more_masks_at(uv, 0).a; }
+float window_at(vec2 uv) { return more_masks_at(uv, 1).r; }
+float body_skin_at(vec2 uv) { return more_masks_at(uv, 1).g; }
+float clothes_at(vec2 uv) { return more_masks_at(uv, 1).a; }
 const int MAX_FACES = 8;
 uniform int u_face_count;
 // Each face: x0, y0, x1, y1 on screen. Its five points: right eye, left eye, nose, right and
@@ -601,9 +637,12 @@ float face_roll(int face) {
     vec2 across = u_face_points[face * 5 + 1] - u_face_points[face * 5];
     return atan(across.y * u_resolution.y, across.x * u_resolution.x);
 }
-// Roughly where hair is, with mesh = true and segment = true: the person above and around each
-// face, leaving out the face itself. It knows nothing of individual strands.
+// Where hair is, with segment = true: from MoGe-2's head where there is one; otherwise (with mesh
+// = true too) roughly, as the person above and around each face, leaving out the face itself.
 float hair_at(vec2 uv) {
+    if (u_has_more_masks > 0.5) {
+        return more_masks_at(uv, 1).b;
+    }
     float cap = 0.0;
     for (int i = 0; i < u_face_count; i++) {
         vec2 size = max(u_faces[i].zw - u_faces[i].xy, vec2(1e-4));
@@ -925,7 +964,7 @@ impl Renderer {
             let words_texture = self.words.as_ref().map(|(words, _)| {
                 self.held_words.pick(frame.video_time - held_back).map_or(words.texture, |w| w.0)
             });
-            let (depth_texture, mask_texture) = if frame.depth.is_some() { self.depth.map_for(pts) } else { (None, None) };
+            let (depth_texture, mask_texture, normal_texture, more_textures) = if frame.depth.is_some() { self.depth.map_for(pts) } else { (None, None, None, None) };
             let faces = if frame.faces.is_some() { self.faces.uniforms(pts, rect) } else { FaceUniforms::default() };
             let clues = std::mem::take(&mut self.depth.clues);
             let shot = if frame.needs.scene {
@@ -1001,6 +1040,12 @@ impl Renderer {
             gl.bind_texture(glow::TEXTURE_2D, depth_texture);
             gl.active_texture(glow::TEXTURE4);
             gl.bind_texture(glow::TEXTURE_2D, mask_texture);
+            gl.active_texture(glow::TEXTURE13);
+            gl.bind_texture(glow::TEXTURE_2D, normal_texture);
+            gl.active_texture(glow::TEXTURE14);
+            gl.bind_texture(glow::TEXTURE_2D, more_textures.map(|t| t[0]));
+            gl.active_texture(glow::TEXTURE15);
+            gl.bind_texture(glow::TEXTURE_2D, more_textures.map(|t| t[1]));
             let history = if frame.needs.history { self.history.texture() } else { None };
             let flow = if frame.needs.flow { network_flow.or_else(|| self.flow.at(pts)) } else { None };
             let plate = if frame.needs.plate { self.plate.texture() } else { None };
@@ -1031,6 +1076,8 @@ impl Renderer {
                 has_depth: depth_texture.is_some() && self.depth.serial > 0,
                 ground: self.depth.ground,
                 has_masks: mask_texture.is_some() && self.depth.has_masks,
+                has_normals: normal_texture.is_some() && self.depth.has_normals,
+                has_more_masks: more_textures.is_some() && self.depth.has_more_masks,
                 faces: &faces,
                 has_face_map,
                 shot,
@@ -1194,6 +1241,8 @@ struct Given<'a> {
     has_depth: bool,
     ground: [f32; 4],
     has_masks: bool,
+    has_normals: bool,
+    has_more_masks: bool,
     faces: &'a FaceUniforms,
     has_face_map: bool,
 }
@@ -1347,6 +1396,11 @@ impl Slot {
             gl.uniform_4_f32(at("u_ground").as_ref(), given.ground[0], given.ground[1], given.ground[2], given.ground[3]);
             gl.uniform_1_i32(at("u_masks").as_ref(), 4);
             gl.uniform_1_f32(at("u_has_masks").as_ref(), if given.has_masks { 1.0 } else { 0.0 });
+            gl.uniform_1_i32(at("u_normals").as_ref(), 13);
+            gl.uniform_1_f32(at("u_has_normals").as_ref(), if given.has_normals { 1.0 } else { 0.0 });
+            gl.uniform_1_i32(at("u_masks2").as_ref(), 14);
+            gl.uniform_1_i32(at("u_masks3").as_ref(), 15);
+            gl.uniform_1_f32(at("u_has_more_masks").as_ref(), if given.has_more_masks { 1.0 } else { 0.0 });
             let faces = given.faces;
             gl.uniform_1_i32(at("u_face_count").as_ref(), faces.count);
             gl.uniform_4_f32_slice(at("u_faces").as_ref(), &faces.boxes);
@@ -1498,6 +1552,9 @@ struct DepthObjects {
     maps: Vec<(glow::Texture, Option<f32>)>,
     /// `u_masks`, each to go with the depth map in the same place in `maps`.
     masks: Vec<glow::Texture>,
+    /// `u_normals`, and `u_masks2` and `u_masks3`, likewise.
+    normals: Vec<glow::Texture>,
+    more: Vec<[glow::Texture; 2]>,
 }
 
 /// Depth maps kept, so a held-back frame can have the one made from it.
@@ -1601,8 +1658,10 @@ struct DepthGl {
     pending: Option<Fence>,
     /// The video time of the last frame sent, so a paused frame isn't sent again and again.
     last_time: Option<f32>,
-    /// Whether masks have arrived.
+    /// Whether masks have arrived, and normals and more masks with the latest map.
     has_masks: bool,
+    has_normals: bool,
+    has_more_masks: bool,
     /// Where the ground is, from the newest depth map.
     ground: [f32; 4],
     /// New clues to the shot, and the positions they're from.
@@ -1623,11 +1682,12 @@ struct DepthGl {
 }
 
 impl DepthGl {
-    /// The depth map and masks made from the frame nearest `time`.
-    fn map_for(&self, time: f32) -> (Option<glow::Texture>, Option<glow::Texture>) {
-        let Some(o) = self.gl.as_ref() else { return (None, None) };
+    /// The depth map, masks, normals and more masks made from the frame nearest `time`.
+    #[allow(clippy::type_complexity)]
+    fn map_for(&self, time: f32) -> (Option<glow::Texture>, Option<glow::Texture>, Option<glow::Texture>, Option<[glow::Texture; 2]>) {
+        let Some(o) = self.gl.as_ref() else { return (None, None, None, None) };
         let nearest = o.maps.iter().enumerate().filter_map(|(i, (_, at))| at.map(|at| (i, (at - time).abs()))).min_by(|a, b| a.1.total_cmp(&b.1)).map_or(0, |(i, _)| i);
-        (o.maps.get(nearest).map(|m| m.0), o.masks.get(nearest).copied())
+        (o.maps.get(nearest).map(|m| m.0), o.masks.get(nearest).copied(), o.normals.get(nearest).copied(), o.more.get(nearest).copied())
     }
 
     /// Picks up a frame read back last time and hands it over, stores a new depth map, and
@@ -1689,6 +1749,18 @@ impl DepthGl {
                     gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(masks)));
                     self.has_masks = true;
                 }
+                if let Some(normals) = &map.normals {
+                    gl.bind_texture(glow::TEXTURE_2D, Some(o.normals[slot]));
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(normals)));
+                }
+                self.has_normals = map.normals.is_some();
+                if let Some(more) = &map.more_masks {
+                    for (texture, bytes) in o.more[slot].iter().zip(more) {
+                        gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
+                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(bytes)));
+                    }
+                }
+                self.has_more_masks = map.more_masks.is_some();
                 gl.bind_texture(glow::TEXTURE_2D, None);
                 self.serial = map.serial;
                 self.ground = map.ground;
@@ -1741,11 +1813,13 @@ impl DepthGl {
                 for (texture, _) in o.maps {
                     gl.delete_texture(texture);
                 }
-                for texture in o.masks {
+                for texture in o.masks.into_iter().chain(o.normals).chain(o.more.into_iter().flatten()) {
                     gl.delete_texture(texture);
                 }
             }
             self.has_masks = false;
+            self.has_normals = false;
+            self.has_more_masks = false;
             self.serial = 0;
             self.arrived = 0;
             self.next_map = 0;
@@ -2544,19 +2618,23 @@ unsafe fn create_depth(gl: &glow::Context) -> Result<DepthObjects, String> {
         let zeros = vec![0u8; WIDTH * HEIGHT * 4];
         let mut maps = Vec::with_capacity(DEPTH_MAPS);
         let mut masks = Vec::with_capacity(DEPTH_MAPS);
+        let mut normals = Vec::with_capacity(DEPTH_MAPS);
+        let (mut more_a, mut more_b) = (Vec::with_capacity(DEPTH_MAPS), Vec::with_capacity(DEPTH_MAPS));
         for _ in 0..DEPTH_MAPS {
-            let mask = gl.create_texture()?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(mask));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, size.0, size.1, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&zeros)));
-            for (param, value) in [
-                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
-                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
-                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
-                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
-            ] {
-                gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
+            for list in [&mut masks, &mut normals, &mut more_a, &mut more_b] {
+                let texture = gl.create_texture()?;
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, size.0, size.1, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&zeros)));
+                for (param, value) in [
+                    (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                    (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+                ] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
+                }
+                list.push(texture);
             }
-            masks.push(mask);
             let texture = gl.create_texture()?;
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R16F as i32, size.0, size.1, 0, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(&zeros)));
@@ -2571,7 +2649,8 @@ unsafe fn create_depth(gl: &glow::Context) -> Result<DepthObjects, String> {
             maps.push((texture, None));
         }
         gl.bind_texture(glow::TEXTURE_2D, None);
-        Ok(DepthObjects { capture, pbo, maps, masks })
+        let more = more_a.into_iter().zip(more_b).map(|(a, b)| [a, b]).collect();
+        Ok(DepthObjects { capture, pbo, maps, masks, normals, more })
     }
 }
 

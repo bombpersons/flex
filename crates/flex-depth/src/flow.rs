@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 
-use super::{Params, Tensors, read_safetensors};
+use super::{Params, Tensors, read_safetensors, wino_u};
 
 const WEIGHTS: &[u8] = include_bytes!("flow.safetensors");
 /// The picture it takes.
@@ -29,11 +29,13 @@ const AT_RADIUS: usize = 211;
 const RADIUS: f32 = 4.0;
 const LN_EPS: f32 = 1e-5;
 const SLOT: u64 = 256;
-const OPS_PER_SUBMIT: usize = 8;
+/// Dispatches a submission: about 4 ms of work on an RX 580, so that what else is drawing can
+/// get in between, while each submission's own cost stays small.
+const OPS_PER_SUBMIT: usize = 40;
 const NONE: u32 = u32::MAX;
 const GELU: u32 = 1;
 const ACCUMULATE: u32 = 2;
-const LEAKY: u32 = 32;
+const LEAKY: u32 = 64;
 
 #[derive(Clone, Copy, Debug)]
 enum Kernel {
@@ -50,15 +52,19 @@ enum Kernel {
     Channels,
     Correlate,
     Expect,
+    WinoIn,
+    WinoOut,
+    Im2col,
+    Sum,
 }
 
 /// In `Kernel`'s order: entry point, and whether the matrix multiply's B is in `mem`.
-const KERNELS: [(&str, bool); 13] = [
+const KERNELS: [(&str, bool); 17] = [
     ("matmul", false),
     ("matmul", true),
     ("layer_norm", false),
     ("softmax", false),
-    ("flow_conv3", false),
+    ("conv3x3_16", false),
     ("flow_conv", false),
     ("flow_half", false),
     ("flow_double", false),
@@ -67,6 +73,10 @@ const KERNELS: [(&str, bool); 13] = [
     ("flow_channels", false),
     ("flow_correlate", false),
     ("flow_expect", false),
+    ("wino_in", false),
+    ("wino_out", false),
+    ("flow_im2col", false),
+    ("flow_sum", false),
 ];
 
 fn groups(n: usize, of: usize) -> u32 {
@@ -130,11 +140,11 @@ impl Ops {
         self.list.push((kernel, p, g));
     }
 
-    /// 3x3, stride 1, padding 1.
+    /// 3x3, stride 1, padding 1: depth.wgsl's conv3x3_16, though `winograd` replaces them all.
     #[allow(clippy::too_many_arguments)]
     fn conv3(&mut self, a: u32, cin: usize, (h, w): (usize, usize), (weight, bias): (u32, u32), cout: usize, c: u32, flags: u32) {
         let p = Params { m: h as u32, k: cin as u32, n: w as u32, a_off: a, b_off: weight, bias_off: bias, c_off: c, x0: cout as u32, x1: 1, flags, ..Default::default() };
-        self.push(Kernel::Conv3, p, [groups(w, 16), groups(h, 16), groups(cout, 8)]);
+        self.push(Kernel::Conv3, p, [groups(w, 32), groups(h, 16), groups(cout, 16)]);
     }
 
     /// The larger convolutions, always with leaky ReLU after.
@@ -207,6 +217,114 @@ impl Ops {
         let p = Params { m: size as u32, n: size as u32, a_off: a, f0: scale, ..Default::default() };
         self.push(Kernel::Softmax, p, [size as u32, 1, 1]);
     }
+}
+
+/// For a large convolution with many input channels (only one in the backbone): how many parts
+/// to split its sum into as a matrix multiply, so that there are enough workgroups. The direct
+/// kernel has too few on its small picture, each with a long sum.
+fn matmul_parts(kernel: Kernel, p: &Params) -> Option<usize> {
+    if !matches!(kernel, Kernel::Conv) || p.k < 32 {
+        return None;
+    }
+    let rows = (p.k * p.a_bs * p.a_bs) as usize;
+    let tiles = (p.b_bs * p.b_rs).div_ceil(32) as usize * (p.x0 as usize).div_ceil(32);
+    let wanted = 144usize.div_ceil(tiles).clamp(1, rows / 256);
+    // Parts that divide the sum evenly, each a whole number of the multiply's steps of 16.
+    (1..=wanted).rev().find(|n| rows.is_multiple_of(n * 16))
+}
+
+/// Floats of scratch a convolution done as a matrix multiply needs.
+fn matmul_scratch(p: &Params, parts: usize) -> usize {
+    let pixels = (p.b_bs * p.b_rs) as usize;
+    (p.k * p.a_bs * p.a_bs) as usize * pixels + parts * p.x0 as usize * pixels
+}
+
+/// Floats of scratch Winograd needs for a cin to cout convolution on an h x w picture.
+fn wino_scratch(cin: usize, cout: usize, h: usize, w: usize) -> usize {
+    16 * (cin + cout) * h.div_ceil(2) * w.div_ceil(2)
+}
+
+/// `ops` with its 3x3 convolutions done by Winograd (as depth's are, see `conv3x3_wino` in
+/// lib.rs) and its large convolution as a matrix multiply. NeuFlow's pictures are small, so the
+/// direct convolutions have too few workgroups to keep the GPU busy, where the matrix
+/// multiplies have plenty. Weights are transformed into `wt` (once each, remembered in `done`);
+/// the working space is at `scratch`.
+fn winograd(ops: Ops, wt: &mut Weights, done: &mut std::collections::HashMap<u32, u32>, scratch: u32) -> Ops {
+    let mut out = Ops::default();
+    for (kernel, p, g) in ops.list {
+        if let Some(parts) = matmul_parts(kernel, &p) {
+            // A convolution with many input channels as a matrix multiply, its sum split into
+            // `parts` side by side: C [pixel][cout] = cols^T [pixel][cin * taps] W^T.
+            let (cin, cout, taps, pixels) = (p.k as usize, p.x0 as usize, (p.a_bs * p.a_bs) as usize, (p.b_bs * p.b_rs) as usize);
+            let (rows, each) = (cin * taps, cin * taps / parts);
+            let cols = scratch;
+            let sums = scratch + (rows * pixels) as u32;
+            let n = rows * pixels;
+            out.push(Kernel::Im2col, Params { c_off: cols, ..p }, [groups(n, 64).min(65535), groups(n, 64 * 65535), 1]);
+            let mul = Params {
+                m: pixels as u32,
+                k: each as u32,
+                n: cout as u32,
+                batch: parts as u32,
+                a_off: cols,
+                a_bs: (each * pixels) as u32,
+                a_rs: 1,
+                a_cs: pixels as u32,
+                b_off: p.b_off,
+                b_bs: each as u32,
+                b_rs: 1,
+                b_cs: rows as u32,
+                c_off: sums,
+                c_bs: (cout * pixels) as u32,
+                c_rs: 1,
+                c_cs: pixels as u32,
+                bias_off: NONE,
+                ..Default::default()
+            };
+            out.push(Kernel::Matmul, mul, [groups(cout, 32), groups(pixels, 32), parts as u32]);
+            let sum = Params { k: cout as u32, m: pixels as u32, x0: parts as u32, a_off: sums, c_off: p.c_off, bias_off: p.bias_off, flags: p.flags, ..Default::default() };
+            out.push(Kernel::Sum, sum, [groups(cout * pixels, 64), 1, 1]);
+            continue;
+        }
+        let (h, w, cin, cout) = (p.m as usize, p.n as usize, p.k as usize, p.x0 as usize);
+        if !matches!(kernel, Kernel::Conv3) {
+            out.push(kernel, p, g);
+            continue;
+        }
+        let u = *done.entry(p.b_off).or_insert_with(|| {
+            let raw = wt.data[p.b_off as usize..][..cout * cin * 9].to_vec();
+            wt.push(&wino_u(&raw, cout, cin))
+        });
+        let tiles = h.div_ceil(2) * w.div_ceil(2);
+        let (v, m) = (scratch, scratch + (16 * cin * tiles) as u32);
+        let input = Params { m: h as u32, k: cin as u32, n: w as u32, a_off: p.a_off, c_off: v, ..Default::default() };
+        out.push(Kernel::WinoIn, input, [groups(tiles, 64), cin as u32, 1]);
+        // For each of the 16: M^T [tiles][cout] = V^T [tiles][cin] U [cin][cout].
+        let mul = Params {
+            m: tiles as u32,
+            k: cin as u32,
+            n: cout as u32,
+            batch: 16,
+            a_off: v,
+            a_bs: (cin * tiles) as u32,
+            a_rs: 1,
+            a_cs: tiles as u32,
+            b_off: u,
+            b_bs: (cin * cout) as u32,
+            b_rs: cout as u32,
+            b_cs: 1,
+            c_off: m,
+            c_bs: (cout * tiles) as u32,
+            c_rs: 1,
+            c_cs: tiles as u32,
+            bias_off: NONE,
+            ..Default::default()
+        };
+        out.push(Kernel::Matmul, mul, [groups(cout, 32), groups(tiles, 32), 16]);
+        let output = Params { m: h as u32, n: w as u32, x0: cout as u32, a_off: m, c_off: p.c_off, bias_off: p.bias_off, flags: p.flags, ..Default::default() };
+        out.push(Kernel::WinoOut, output, [groups(tiles, 64), cout as u32, 1]);
+    }
+    out
 }
 
 /// The memory `mem` has, handed out in order.
@@ -464,6 +582,8 @@ pub struct Flow {
     _gpu: super::Gpu,
     #[cfg(test)]
     shared: Shared,
+    #[cfg(test)]
+    params: Vec<Params>,
 }
 
 impl Flow {
@@ -559,6 +679,21 @@ impl Flow {
         for (i, ops) in after.iter_mut().enumerate() {
             rest(ops, &shared, &tails, pictures[i], pictures[1 - i]);
         }
+        let scratch_len = before
+            .iter()
+            .chain(&after)
+            .flat_map(|o| &o.list)
+            .map(|(k, p, _)| match matmul_parts(*k, p) {
+                Some(parts) => matmul_scratch(p, parts),
+                None if matches!(k, Kernel::Conv3) => wino_scratch(p.k as usize, p.x0 as usize, p.m as usize, p.n as usize),
+                None => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        let scratch = memory.take(scratch_len);
+        let mut done = std::collections::HashMap::new();
+        let before = before.map(|ops| winograd(ops, &mut wt, &mut done, scratch));
+        let after = after.map(|ops| winograd(ops, &mut wt, &mut done, scratch));
 
         let gpu = super::Gpu::shared()?;
         let (device, queue) = (gpu.0.device.clone(), gpu.0.queue.clone());
@@ -631,8 +766,10 @@ impl Flow {
         let [c, d] = after;
         let (c, d) = (lay_out(c), lay_out(d));
         queue.write_buffer(&params, 0, &slots);
+        #[cfg(test)]
+        let params: Vec<Params> = slots.chunks(SLOT as usize).map(|c| *bytemuck::from_bytes(&c[..std::mem::size_of::<Params>()])).collect();
         let flow = shared.block8 + (AT_FLOW * PIXELS8) as u32;
-        Ok(Self { device, queue, pipelines, mem, bind, readback, first: [a, b], second: [c, d], pictures, flow, last: None, adapter: gpu.0.adapter.clone(), _gpu: gpu, #[cfg(test)] shared })
+        Ok(Self { device, queue, pipelines, mem, bind, readback, first: [a, b], second: [c, d], pictures, flow, last: None, adapter: gpu.0.adapter.clone(), _gpu: gpu, #[cfg(test)] shared, #[cfg(test)] params })
     }
 
     pub fn adapter(&self) -> &str {
@@ -695,10 +832,64 @@ impl Flow {
                     pass.dispatch_workgroups(g[0], g[1], g[2]);
                 }
             }
+            // In parts, so that what else is drawing can get in between, but without waiting
+            // for each: the GPU takes them in order.
             self.queue.submit([enc.finish()]);
-            self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{e}"))?;
         }
         Ok(())
+    }
+
+    /// For tuning: each dispatch's time (ms) in the backbone and the rest, grouped by what it
+    /// is.
+    #[cfg(test)]
+    fn report(&self, params: &[Params]) {
+        let time = |slot: u32, (kernel, g): &(Kernel, [u32; 3]), times: usize| {
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                for _ in 0..times {
+                    pass.set_pipeline(&self.pipelines[*kernel as usize]);
+                    pass.set_bind_group(0, &self.bind, &[(u64::from(slot) * SLOT) as u32]);
+                    pass.dispatch_workgroups(g[0], g[1], g[2]);
+                }
+            }
+            let started = std::time::Instant::now();
+            self.queue.submit([enc.finish()]);
+            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            started.elapsed().as_secs_f64() * 1000.0
+        };
+        for (what, (first, list)) in [("backbone", &self.first[0]), ("the rest", &self.second[0])] {
+            let mut groups: Vec<(String, f64, usize)> = Vec::new();
+            let mut total = 0.0;
+            for (i, op) in list.iter().enumerate() {
+                let slot = first + i as u32;
+                time(slot, op, 1);
+                let t = (time(slot, op, 11) - time(slot, op, 1)) / 10.0;
+                total += t;
+                let p = &params[slot as usize];
+                let name = match op.0 {
+                    Kernel::Conv3 => format!("conv3 {}->{} at {}x{}", p.k, p.x0, p.n, p.m),
+                    Kernel::Conv => format!("conv {}x{} {}->{} at {}x{}", p.a_bs, p.a_bs, p.k, p.x0, p.b_rs, p.b_bs),
+                    Kernel::Matmul | Kernel::MatmulMem => format!("{:?} {}x{}x{} batch {}", op.0, p.m, p.k, p.n, p.batch),
+                    Kernel::Im2col => format!("Im2col {}x{} {} at {}x{}", p.a_bs, p.a_bs, p.k, p.b_rs, p.b_bs),
+                    Kernel::WinoIn => format!("WinoIn {} at {}x{}", p.k, p.n, p.m),
+                    Kernel::WinoOut => format!("WinoOut {} at {}x{}", p.x0, p.n, p.m),
+                    k => format!("{k:?}"),
+                };
+                match groups.iter_mut().find(|g| g.0 == name) {
+                    Some(g) => {
+                        g.1 += t;
+                        g.2 += 1;
+                    }
+                    None => groups.push((name, t, 1)),
+                }
+            }
+            groups.sort_by(|a, b| b.1.total_cmp(&a.1));
+            eprintln!("{what}: {} dispatches, {total:.2} ms one by one", list.len());
+            for (name, t, n) in groups.iter().take(30) {
+                eprintln!("{t:7.3} ms  {n:3}x  {name}");
+            }
+        }
     }
 
     fn read(&self, at: u32, len: usize) -> Result<Vec<f32>> {
@@ -766,5 +957,16 @@ mod tests {
             net.run(if i % 2 == 0 { &a } else { &b }).unwrap();
         }
         eprintln!("{:.1} ms a picture ({WIDTH}x{HEIGHT}, {STEPS} steps)", started.elapsed().as_secs_f64() * 1000.0 / f64::from(runs));
+        let gpu_only = |net: &Flow| {
+            let started = std::time::Instant::now();
+            for _ in 0..runs {
+                net.dispatch(&net.first[0]).unwrap();
+                net.dispatch(&net.second[0]).unwrap();
+                net.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            }
+            started.elapsed().as_secs_f64() * 1000.0 / f64::from(runs)
+        };
+        eprintln!("{:.1} ms just the dispatches", gpu_only(&net));
+        net.report(&net.params);
     }
 }

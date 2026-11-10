@@ -1,5 +1,5 @@
-// Torchlight: each point gets a position in space from depth and a surface direction from how
-// depth changes around it, and the torch lights it like a real scene.
+// Torchlight: each point gets a position in space from depth and a surface direction (normal_at),
+// and the torch lights it like a real scene.
 
 float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -39,8 +39,7 @@ vec4 effect(vec2 uv) {
     vec2 rel = (uv - aim) * aspect;
     float cone = 0.36 * s_size / 100.0;
     float beam = (1.0 - smoothstep(cone * 0.45, cone, length(rel))) + 0.14 * (1.0 - smoothstep(cone, cone * 2.0, length(rel)));
-    vec2 slope = depth_slope(uv, 4.0) * 16.0;
-    vec3 normal = normalize(vec3(-slope, 1.0));
+    vec3 normal = normal_at(uv);
     float facing = clamp(dot(normal, normalize(vec3(-rel * 1.5, 1.0))), 0.0, 1.0);
     float falloff = 0.65 + 0.9 * near * near;
     float shake = 1.0 - s_flicker / 100.0 * 0.5 * noise(vec2(u_time * 11.0, 2.0));
