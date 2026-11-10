@@ -252,6 +252,7 @@ plate = true                   # the room behind people (runs the masks); defaul
 cuts = true                    # scene cuts; default false
 stats = true                   # the picture's palette and brightness; default false
 scene = true                   # what sort of shot and scene this is; default false
+camera = true                  # where the camera is, for world_at (runs depth and masks); default false
 shuffle = false                # leave it out of shuffle unless someone adds it; default true
 suits = ["close", "dialogue"]  # with shuffle at scene cuts, come up more in these: close, wide,
                                # action, dialogue, quiet, if Suit the shot is on; default none
@@ -347,6 +348,17 @@ goes from 0 to 1, `u_pace` is cuts a minute, and `u_scene` is action, dialogue, 
 each from 0 to 1. Scene scores only look backward, so they take a while to catch up with a new
 scene, and two people talking in one long take reads as quiet. The Shot and Scene effect shows
 them all, and F3 prints them.
+
+### Pinning things to the world
+
+With `camera = true`, Flex follows points through each shot and works out where the camera is, so
+an effect can keep something in one place as the camera moves. `world_at(uv)` says where a point on
+screen is in the world, and `world_to_screen(world)` where a world point is on screen, its `z` being
+how far away it is. Each shot has a world of its own, with a typical distance of about 1. The first
+second of a shot goes on working out its lens, so `u_world_ready` stays 0 until then, fades up to 1,
+and drops back to 0 for a moment if the tracking is lost: multiply what you draw by it. It needs
+something in the picture to hold on to, so plain walls and fast action lose it. The World Grid
+effect shows how well it's doing.
 
 ### Black bars
 

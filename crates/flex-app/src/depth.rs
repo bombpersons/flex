@@ -125,6 +125,8 @@ struct State {
     busy: bool,
     /// Maps not collected yet, oldest first.
     output: VecDeque<Arc<DepthMap>>,
+    /// The latest map of a frame that's really been seen, for the camera.
+    newest: Option<Arc<DepthMap>>,
     last_wanted: Instant,
     /// Whether an effect wants people, walls and sky as well as depth.
     masks_wanted: bool,
@@ -447,7 +449,7 @@ pub struct Link(Arc<(Mutex<State>, Condvar)>);
 
 impl Default for Link {
     fn default() -> Self {
-        let state = State { status: Status::Off, running: false, input: None, busy: false, output: VecDeque::new(), last_wanted: Instant::now(), masks_wanted: false, carried: false, moves: VecDeque::new(), last_run: None, not_before: None, level: 0 };
+        let state = State { status: Status::Off, running: false, input: None, busy: false, output: VecDeque::new(), newest: None, last_wanted: Instant::now(), masks_wanted: false, carried: false, moves: VecDeque::new(), last_run: None, not_before: None, level: 0 };
         Self(Arc::new((Mutex::new(state), Condvar::new())))
     }
 }
@@ -509,6 +511,11 @@ impl Link {
         self.0.1.notify_all();
     }
 
+    /// The latest map of a frame that's really been seen.
+    pub fn newest_map(&self) -> Option<Arc<DepthMap>> {
+        self.lock().newest.clone()
+    }
+
     /// The maps that have come in since the last call, oldest first.
     pub fn take_maps(&self) -> Vec<Arc<DepthMap>> {
         self.lock().output.drain(..).collect()
@@ -516,7 +523,13 @@ impl Link {
 
     fn publish(&self, maps: impl IntoIterator<Item = DepthMap>) {
         let mut state = self.lock();
-        state.output.extend(maps.into_iter().map(Arc::new));
+        for map in maps {
+            let map = Arc::new(map);
+            if !map.ahead {
+                state.newest = Some(map.clone());
+            }
+            state.output.push_back(map);
+        }
         let extra = state.output.len().saturating_sub(MOST_MAPS);
         state.output.drain(..extra);
     }
@@ -679,6 +692,7 @@ impl Link {
                         state.running = false;
                         state.busy = false;
                         state.output.clear();
+                        state.newest = None;
                         return;
                     }
                 };
@@ -690,6 +704,7 @@ impl Link {
         let mut state = self.lock();
         state.running = false;
         state.output.clear();
+        state.newest = None;
         state.moves.clear();
         state.last_run = None;
         state.not_before = None;

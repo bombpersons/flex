@@ -87,6 +87,7 @@ pub struct Renderer {
     words: Option<(Target, (i32, i32))>,
     faces: FaceGl,
     motion: NetFlowGl,
+    camera: CameraGl,
     shots: crate::shot_type::Tracker,
     cuts: CutGl,
     history: HistoryGl,
@@ -127,6 +128,8 @@ pub struct Frame {
     pub faces: Option<crate::faces::Link>,
     /// The movement worker, when the effect asked for movement.
     pub motion: Option<crate::flow::Link>,
+    /// The camera worker, when the effect asked where the camera is.
+    pub camera: Option<crate::camera::Link>,
     /// Subtitles are to be kept out of the effect and laid on top of it.
     pub subtitles: bool,
 }
@@ -459,6 +462,30 @@ uniform float u_has_masks;
 vec4 masks_at(vec2 uv) {
     vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
     return texture(u_masks, p) * u_has_masks;
+}
+// Where the camera is (with camera = true), so things can stay put in the world. u_world_ready fades
+// from 0 to 1 about a second and a half into each shot, and is 0 when there's no telling. A shot's
+// world is its own, in no particular scale: a typical distance is about 1.
+uniform float u_world_ready;
+uniform mat3 u_world_rotation;
+uniform vec3 u_world_offset;
+uniform vec3 u_world_lens;
+uniform vec2 u_world_depth;
+// Where a point on screen is in the world.
+vec3 world_at(vec2 uv) {
+    vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
+    vec2 size = u_world_lens.yz;
+    vec2 pixel = vec2(p.x * size.x - 0.5, (1.0 - p.y) * size.y - 0.5);
+    vec3 ray = vec3((pixel - (size - 1.0) * 0.5) / u_world_lens.x, 1.0);
+    return transpose(u_world_rotation) * (ray / max(u_world_depth.x * depth_at(uv) + u_world_depth.y, 0.02) - u_world_offset);
+}
+// Where a point in the world is on screen; z is its distance, and negative if it's behind the camera.
+vec3 world_to_screen(vec3 world) {
+    vec3 c = u_world_rotation * world + u_world_offset;
+    vec2 size = u_world_lens.yz;
+    vec2 pixel = u_world_lens.x * c.xy / max(c.z, 1e-3) + (size - 1.0) * 0.5;
+    vec2 p = vec2((pixel.x + 0.5) / size.x, 1.0 - (pixel.y + 0.5) / size.y);
+    return vec3(u_video_rect.xy + p * (u_video_rect.zw - u_video_rect.xy), c.z);
 }
 float person_at(vec2 uv) {
     return masks_at(uv).r;
@@ -808,7 +835,7 @@ impl Renderer {
             gl.blit_framebuffer(x0, y0, x0 + size.0, y0 + size.1, 0, 0, size.0, size.1, glow::COLOR_BUFFER_BIT, glow::NEAREST);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             let video = &o.cropped;
-            let holding = frame.depth.is_some() || frame.faces.is_some() || frame.motion.is_some();
+            let holding = frame.depth.is_some() || frame.faces.is_some() || frame.motion.is_some() || frame.camera.is_some();
             if holding {
                 self.held.push(gl, video, size, frame.pts);
                 if let Some((words, _)) = &self.words {
@@ -836,6 +863,10 @@ impl Renderer {
             match &frame.motion {
                 Some(link) => self.motion.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
                 None => self.motion.delay = 0.0,
+            }
+            match &frame.camera {
+                Some(link) => self.camera.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
+                None => self.camera.delay = 0.0,
             }
             // The picture is held back to the frame the networks have caught up with.
             let held_back = self.held_back();
@@ -955,6 +986,7 @@ impl Renderer {
                 faces: &faces,
                 has_face_map,
                 shot,
+                world: if frame.camera.is_some() { self.camera.at(pts) } else { None },
             };
 
             // The effects, each at its working size.
@@ -1029,6 +1061,7 @@ impl Renderer {
             self.history.release(gl);
             self.flow.release(gl);
             self.motion.release(gl);
+            self.camera.release(gl);
             self.plate.release(gl);
             self.last_paint = None;
             if let Some(vao) = self.vao.take() {
@@ -1039,7 +1072,7 @@ impl Renderer {
 
     /// How far behind the picture is being held (seconds), which the sound has to match.
     pub fn held_back(&self) -> f32 {
-        self.depth.delay.max(self.faces.delay).max(self.motion.delay)
+        self.depth.delay.max(self.faces.delay).max(self.motion.delay).max(self.camera.delay)
     }
 
     /// Whether a scene cut has reached `shown` in the video since this was last asked.
@@ -1108,6 +1141,7 @@ struct Given<'a> {
     video_time: f32,
     audio: Option<&'a Features>,
     shot: crate::shot_type::Reading,
+    world: Option<crate::camera::Report>,
     has_depth: bool,
     ground: [f32; 4],
     has_masks: bool,
@@ -1218,6 +1252,16 @@ impl Slot {
             gl.uniform_1_f32(at("u_video_time").as_ref(), given.video_time);
             gl.uniform_1_f32(at("u_dt").as_ref(), given.dt);
             gl.uniform_1_f32(at("u_since_cut").as_ref(), given.since_cut.unwrap_or(1e6));
+            gl.uniform_1_f32(at("u_world_ready").as_ref(), given.world.map_or(0.0, |w| w.ready));
+            if let Some(w) = given.world {
+                // By columns, as GL wants.
+                let r = w.rotation;
+                let columns = [r[0][0], r[1][0], r[2][0], r[0][1], r[1][1], r[2][1], r[0][2], r[1][2], r[2][2]];
+                gl.uniform_matrix_3_f32_slice(at("u_world_rotation").as_ref(), false, &columns);
+                gl.uniform_3_f32_slice(at("u_world_offset").as_ref(), &w.offset);
+                gl.uniform_3_f32_slice(at("u_world_lens").as_ref(), &w.lens);
+                gl.uniform_2_f32_slice(at("u_world_depth").as_ref(), &w.depth);
+            }
             gl.uniform_1_f32(at("u_shot_size").as_ref(), given.shot.size);
             gl.uniform_4_f32_slice(at("u_camera").as_ref(), &given.shot.camera);
             gl.uniform_1_f32(at("u_handheld").as_ref(), given.shot.handheld);
@@ -1687,6 +1731,147 @@ struct FaceGl {
     late: f32,
     /// How far the picture is being held back to match (seconds).
     delay: f32,
+}
+
+/// How long a camera report can be used from the frame it's of (seconds), and how many are kept.
+const CAMERA_REACH: f32 = 0.2;
+const CAMERA_KEPT: usize = 48;
+/// The width frames are followed at, in pixels.
+const CAMERA_WIDTH: usize = 640;
+
+/// Gets frames to the camera worker, and keeps what it finds.
+#[derive(Default)]
+struct CameraGl {
+    objects: Option<(Target, glow::Buffer, (usize, usize))>,
+    failed: bool,
+    pending: Option<Fence>,
+    pending_time: f32,
+    last_time: Option<f32>,
+    handed: Option<f32>,
+    reports: VecDeque<crate::camera::Report>,
+    arrived: u32,
+    late: f32,
+    delay: f32,
+}
+
+impl CameraGl {
+    /// The report for the frame nearest `time`.
+    fn at(&self, time: f32) -> Option<crate::camera::Report> {
+        self.reports.iter().filter(|r| (r.time - time).abs() < CAMERA_REACH).min_by(|a, b| (a.time - time).abs().total_cmp(&(b.time - time).abs())).copied()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::camera::Link, cuts: &CutGl, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
+        unsafe {
+            if self.failed {
+                return;
+            }
+            let aspect = (rect[2] - rect[0]) * size.0 as f32 / ((rect[3] - rect[1]) * size.1 as f32).max(1.0);
+            let want = (CAMERA_WIDTH, (((CAMERA_WIDTH as f32 / aspect.max(0.1)) / 2.0).round() as usize * 2).clamp(64, 1024));
+            if self.objects.as_ref().is_none_or(|o| o.2 != want) {
+                if self.pending.is_some() {
+                    return;
+                }
+                if let Some((target, pbo, _)) = self.objects.take() {
+                    gl.delete_framebuffer(target.fbo);
+                    gl.delete_texture(target.texture);
+                    gl.delete_buffer(pbo);
+                }
+                let made = create_target(gl, (want.0 as i32, want.1 as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|capture| {
+                    let pbo = gl.create_buffer()?;
+                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
+                    gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (want.0 * want.1 * 4) as i32, glow::STREAM_READ);
+                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                    Ok((capture, pbo))
+                });
+                match made {
+                    Ok((capture, pbo)) => self.objects = Some((capture, pbo, want)),
+                    Err(e) => {
+                        log::warn!("camera: {e}");
+                        self.failed = true;
+                        return;
+                    }
+                }
+            }
+            let Some((capture, pbo, (w, h))) = self.objects.as_ref() else { return };
+            let (w, h) = (*w, *h);
+            let bytes = w * h * 4;
+            if let Some(Fence(fence)) = self.pending.filter(|_| cuts.has_seen(self.pending_time)) {
+                match gl.client_wait_sync(fence, 0, 0) {
+                    glow::TIMEOUT_EXPIRED => {}
+                    status => {
+                        gl.delete_sync(fence);
+                        self.pending = None;
+                        if status != glow::WAIT_FAILED {
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
+                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
+                            if !ptr.is_null() {
+                                let cut = cuts.reset_between(self.handed, self.pending_time);
+                                self.handed = Some(self.pending_time);
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), (w, h), self.pending_time, cut);
+                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                            }
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                        }
+                    }
+                }
+            }
+            for report in link.take_reports() {
+                let late = clock - report.time;
+                if (0.0..0.5).contains(&late) {
+                    self.arrived += 1;
+                    self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
+                    if self.arrived >= HOLD_AFTER_MAPS {
+                        self.delay = next_delay(self.delay, self.late + MOTION_SPARE);
+                    }
+                }
+                // Going backwards: what's kept is from somewhere else.
+                if self.reports.back().is_some_and(|r| r.time > report.time) {
+                    self.reports.clear();
+                }
+                self.reports.push_back(report);
+                if self.reports.len() > CAMERA_KEPT {
+                    self.reports.pop_front();
+                }
+            }
+            if self.pending.is_none() && link.ready_for_frame() && self.last_time != Some(time) {
+                self.last_time = Some(time);
+                self.pending_time = time;
+                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
+                let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
+                gl.disable(glow::SCISSOR_TEST);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(capture.fbo));
+                gl.blit_framebuffer(x0, y0, x1, y1, 0, 0, w as i32, h as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(capture.fbo));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+                gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+                    self.pending = Some(Fence(fence));
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+        }
+    }
+
+    unsafe fn release(&mut self, gl: &glow::Context) {
+        unsafe {
+            if let Some(Fence(fence)) = self.pending.take() {
+                gl.delete_sync(fence);
+            }
+            if let Some((target, pbo, _)) = self.objects.take() {
+                gl.delete_framebuffer(target.fbo);
+                gl.delete_texture(target.texture);
+                gl.delete_buffer(pbo);
+            }
+            self.reports.clear();
+            self.arrived = 0;
+            self.delay = 0.0;
+            self.last_time = None;
+        }
+    }
 }
 
 /// How many frames' movement are kept, and the furthest (seconds) a frame's can be used from.

@@ -106,7 +106,7 @@ fn pyramid(gray: &[f32], size: (usize, usize)) -> Vec<f32> {
 }
 
 /// `values` averaged over a square reaching `radius` each way (fewer at the edges).
-fn box_average(values: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+pub fn box_average(values: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
     let mut sum = vec![0.0f64; (w + 1) * (h + 1)];
     for y in 0..h {
         for x in 0..w {

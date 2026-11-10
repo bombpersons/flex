@@ -58,6 +58,10 @@ pub struct Manifest {
     /// Measure the picture's palette and brightness.
     #[serde(default)]
     pub stats: bool,
+    /// Work out where the camera is, so things can be pinned to the world (`world_at`). Runs depth
+    /// and the masks.
+    #[serde(default)]
+    pub camera: bool,
     /// The kinds of shot or scene this suits, out of `SUITS`: with shuffle at scene cuts, it comes
     /// up more often in those and less often otherwise.
     #[serde(default)]
@@ -86,7 +90,7 @@ fn yes() -> bool {
 
 impl Default for Manifest {
     fn default() -> Self {
-        Self { name: String::new(), description: String::new(), suits: Vec::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, scale: 1.0, shuffle: true, settings: Vec::new() }
+        Self { name: String::new(), description: String::new(), suits: Vec::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, camera: false, scale: 1.0, shuffle: true, settings: Vec::new() }
     }
 }
 
@@ -190,6 +194,7 @@ pub struct Needs {
     pub cuts: bool,
     pub stats: bool,
     pub scene: bool,
+    pub camera: bool,
     /// The largest size any of them works at (0.25–1).
     pub scale: f32,
 }
@@ -659,20 +664,21 @@ impl Effects {
             let id = Some(e.id.as_str());
             self.on && (id == self.chosen.as_deref() || id == fading || (self.shuffle.on && self.in_shuffle(&e.id)))
         });
-        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, scale: 0.25 };
+        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, camera: false, scale: 0.25 };
         for e in counted {
             let m = &e.manifest;
             // Shuffle needs to know about the shot to choose an effect that suits it.
             let scene = m.scene || (self.wants_cuts() && self.shuffle.by_shot && !m.suits.is_empty());
             needs.audio |= m.audio || scene;
-            needs.depth |= m.depth || m.segment || m.plate || scene;
-            needs.segment |= m.segment || m.plate || scene;
+            needs.depth |= m.depth || m.segment || m.plate || scene || m.camera;
+            needs.segment |= m.segment || m.plate || scene || m.camera;
             needs.faces |= m.faces || m.mesh || scene;
             needs.mesh |= m.mesh;
             needs.history |= m.history;
             needs.flow |= m.flow;
             needs.plate |= m.plate;
-            needs.cuts |= m.cuts || scene;
+            needs.cuts |= m.cuts || scene || m.camera;
+            needs.camera |= m.camera;
             needs.stats |= m.stats;
             needs.scene |= scene;
             needs.scale = needs.scale.max(usable_scale(m.scale));

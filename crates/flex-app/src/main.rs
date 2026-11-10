@@ -14,6 +14,7 @@ mod effects;
 mod face_map;
 mod faces;
 mod flow;
+mod camera;
 mod gpu;
 mod shot_type;
 mod ground;
