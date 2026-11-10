@@ -1,6 +1,7 @@
 name = "Snow Globe"
-description = "Snow falls through the scene behind whatever's near, settles on things, and a beat shakes it all up."
+description = "Snow falls through the scene behind whatever's near, drifts on the air, settles on things, and a beat knocks it off again."
 suits = ["wide"]
+camera = true
 depth = true
 audio = true
 feedback = true
@@ -28,7 +29,7 @@ default = 30
 
 [[settings]]
 key = "shake"
-label = "Shake on the beat"
+label = "Knocked off on the beat"
 type = "number"
 min = 0
 max = 100

@@ -28,19 +28,29 @@ vec2 depth_slope(vec2 uv, float reach) {
     return vec2(depth_at(uv + vec2(e.x, 0.0)) - depth_at(uv - vec2(e.x, 0.0)), depth_at(uv + vec2(0.0, e.y)) - depth_at(uv - vec2(0.0, e.y)));
 }
 
-float streaks(vec2 p, float scale, float t) {
-    vec2 q = vec2(p.x * scale - p.y * s_wind / 100.0 * scale * 0.3, p.y * scale * 0.11 + t * (1.4 + scale * 0.02));
-    vec2 cell = floor(q);
-    if (hash(cell) > s_rain / 100.0) return 0.0;
-    vec2 f = fract(q);
-    return (1.0 - smoothstep(0.02, 0.08, abs(f.x - 0.5 - 0.3 * (hash(cell + 3.0) - 0.5)))) * smoothstep(0.0, 0.3, f.y) * (1.0 - smoothstep(0.7, 1.0, f.y));
+// One layer of rain. Every column of it falls at its own speed, with drops of its own spacing and
+// length, so nothing lines up from one column to the next.
+float streaks(vec2 p, float scale, float t, float wind) {
+    float x = (p.x - p.y * wind) * scale;
+    float column = floor(x);
+    float speed = 2.2 + 1.8 * hash(vec2(column, scale));
+    float spacing = 0.12 + 0.2 * hash(vec2(column + 7.0, scale));
+    float y = (p.y + t * speed) / spacing + 17.0 * hash(vec2(column + 3.0, scale));
+    vec2 id = vec2(column, floor(y));
+    if (hash(id + scale) > s_rain / 100.0) return 0.0;
+    float size = 0.3 + 0.6 * hash(id + 9.0);
+    float along = (fract(y) - (1.0 - size) * hash(id + 5.0)) / size;
+    if (along < 0.0 || along > 1.0) return 0.0;
+    float across = abs(fract(x) - 0.5 - 0.3 * (hash(id + 3.0) - 0.5));
+    return (1.0 - smoothstep(0.02, 0.09, across)) * smoothstep(0.0, 0.25, along) * (1.0 - smoothstep(0.55, 1.0, along)) * (0.5 + 0.5 * hash(id + 11.0));
 }
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(0.0, 0.0, 0.0, 1.0);
     vec2 p = uv * vec2(u_resolution.x / u_resolution.y, 1.0);
-    float t = u_time;
+    // Wrapped, so the sums below don't run out of precision over a long film.
+    float t = mod(u_time, 900.0);
     float near = depth_at(uv);
     float gloom = s_dark / 100.0;
     vec3 graded = mix(c, c * vec3(0.5, 0.6, 0.8) * 0.8, gloom);
@@ -49,10 +59,15 @@ vec4 effect(vec2 uv) {
     strike *= s_lightning / 100.0;
     graded += c * vec3(0.8, 0.85, 1.0) * strike * (0.4 + 1.6 * (1.0 - near));
 
+    // Gusts: the wind comes and goes, and the rain gets heavier and lighter in passing sheets.
+    float wind = s_wind / 100.0 * 0.32 * (0.7 + 0.8 * noise(vec2(t * 0.27, 3.0)));
+    float sheets = 0.55 + 0.45 * smoothstep(0.3, 0.7, noise(vec2(p.x * 2.2 + t * 0.7, t * 0.33)));
     float fall = 0.0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         float f = float(i);
-        fall += streaks(p + f * 3.1, 90.0 - f * 20.0, t) * step(near, 0.2 + f * 0.25) * (0.22 + f * 0.09);
+        // Each layer stays put in the air as the camera moves.
+        vec2 at_layer = p - (world_pin(vec2(0.5), world_distance(0.15 + f * 0.2)) - vec2(0.5)) * vec2(u_resolution.x / u_resolution.y, 1.0);
+        fall += streaks(at_layer + f * 3.1, 110.0 - f * 19.0, t, wind) * step(near, 0.15 + f * 0.2) * (0.22 + f * 0.09) * sheets;
     }
     graded += vec3(0.75, 0.82, 0.95) * fall * (1.0 + 2.0 * strike);
 

@@ -69,6 +69,8 @@ vec4 effect(vec2 uv) {
     vec2 p = uv * aspect;
     float t = u_time * s_drift / 100.0;
     vec2 centre_uv = u_video_rect.xy + (u_video_rect.zw - u_video_rect.xy) * (vec2(0.5, 0.56) + vec2(0.27 * sin(t * 0.31), 0.14 * sin(t * 0.43 + 1.0)));
+    // It hangs in the room, so it stays there when the camera moves.
+    centre_uv = world_pin_nearby(centre_uv, 1.5);
     vec2 centre = centre_uv * aspect;
     float radius = 0.06 * s_size / 100.0 * (1.0 + 0.12 * u_bass * s_react / 100.0);
     vec2 rel = p - centre;

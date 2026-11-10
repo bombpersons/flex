@@ -64,6 +64,8 @@ vec4 effect(vec2 uv) {
             0.42 * cos(t * (0.37 + 0.09 * f) + f * 1.3),
             0.95 + 0.25 * sin(t * 0.6 + f)
         );
+        // Lights stay where they are in the room when the camera moves.
+        at.xy = (world_pin_nearby(at.xy / vec2(aspect, 1.0) + 0.5, 1.2) - 0.5) * vec2(aspect, 1.0);
         vec3 colour = rainbow(f * 0.31 + 0.1 + 0.03 * t) * 1.4;
         vec3 to = at - p;
         float dist2 = dot(to, to);

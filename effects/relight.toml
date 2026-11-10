@@ -1,5 +1,6 @@
 name = "Relight"
 description = "Puts new coloured lights in the film's world, using a surface worked out from how far away everything is"
+camera = true
 audio = true
 depth = true
 

@@ -1,6 +1,7 @@
 name = "Black Hole"
 description = "A real black hole hangs in the room: it bends everything behind it into a ring, people pass in front of it, and its glowing disc lights up the walls."
 suits = ["wide"]
+camera = true
 depth = true
 segment = true
 plate = true

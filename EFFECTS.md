@@ -356,7 +356,13 @@ an effect can keep something in one place as the camera moves. `world_at(uv)` sa
 screen is in the world, and `world_to_screen(world)` where a world point is on screen, its `z` being
 how far away it is. Each shot has a world of its own, with a typical distance of about 1. The first
 second of a shot goes on working out its lens, so `u_world_ready` stays 0 until then, fades up to 1,
-and drops back to 0 for a moment if the tracking is lost: multiply what you draw by it. It needs
+and drops back to 0 for a moment if the tracking is lost: multiply what you draw by it.
+`world_pin(uv, distance)` is the simplest way in: give it a screen position and how far away the
+thing is, and it says where that thing is on screen now. `shot_uv(uv)` says where a point on screen
+was when the shot began, so a pattern drawn there sticks to what it's on. `world_pin_nearby` is
+`world_pin` for one thing that shouldn't be lost: it comes back into view when the camera leaves it. `world_distance(near)`
+turns a depth value into a distance. All three do nothing useful until `u_world_ready` is above 0,
+and the first two just give back `uv`, so an effect still works without the camera. It needs
 something in the picture to hold on to, so plain walls and fast action lose it. The World Grid
 effect shows how well it's doing.
 

@@ -1,6 +1,7 @@
 name = "Wallpaper Crawl"
 description = "Walls writhe, and now and then eyes open in them and watch the people in the room."
 suits = ["wide"]
+camera = true
 segment = true
 faces = true
 audio = true

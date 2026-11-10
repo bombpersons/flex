@@ -487,6 +487,37 @@ vec3 world_to_screen(vec3 world) {
     vec2 p = vec2((pixel.x + 0.5) / size.x, 1.0 - (pixel.y + 0.5) / size.y);
     return vec3(u_video_rect.xy + p * (u_video_rect.zw - u_video_rect.xy), c.z);
 }
+// Where a point on screen was when the shot began: a pattern drawn there stays stuck to what's in
+// the picture as the camera moves. Just uv when the camera isn't known.
+vec2 shot_uv(vec2 uv) {
+    if (u_world_ready <= 0.0) return uv;
+    vec3 world = world_at(uv);
+    vec2 size = u_world_lens.yz;
+    vec2 pixel = u_world_lens.x * world.xy / max(world.z, 1e-3) + (size - 1.0) * 0.5;
+    vec2 p = vec2((pixel.x + 0.5) / size.x, 1.0 - (pixel.y + 0.5) / size.y);
+    return mix(uv, u_video_rect.xy + p * (u_video_rect.zw - u_video_rect.xy), u_world_ready);
+}
+// Where something hung at uv when the shot began, this far away, is on screen now: a world_pin of
+// any screen position stays put in the world. Just uv when the camera isn't known.
+vec2 world_pin(vec2 uv, float distance) {
+    if (u_world_ready <= 0.0) return uv;
+    vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
+    vec2 size = u_world_lens.yz;
+    vec2 pixel = vec2(p.x * size.x - 0.5, (1.0 - p.y) * size.y - 0.5);
+    vec3 ray = vec3((pixel - (size - 1.0) * 0.5) / u_world_lens.x, 1.0) * distance;
+    return mix(uv, world_to_screen(ray).xy, u_world_ready);
+}
+// world_pin for something that shouldn't be lost: as it goes out of the picture it comes back
+// towards uv, instead of staying where the camera has left it.
+vec2 world_pin_nearby(vec2 uv, float distance) {
+    vec2 pin = world_pin(uv, distance);
+    vec2 p = (pin - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
+    return mix(pin, uv, smoothstep(0.6, 1.0, max(abs(p.x - 0.5), abs(p.y - 0.5))));
+}
+// How far away something is that depth_at would call `near`.
+float world_distance(float near) {
+    return 1.0 / max(u_world_depth.x * near + u_world_depth.y, 0.02);
+}
 float person_at(vec2 uv) {
     return masks_at(uv).r;
 }
@@ -606,6 +637,9 @@ int who_at(vec2 uv) {
 // about half a second (with cuts = true). u_since_cut is huge until the first cut.
 uniform float u_cut;
 uniform float u_since_cut;
+// When this shot began, in seconds into the video: the same all through a shot, and 0 until the
+// first cut (with cuts = true), so something random can be chosen once for a whole shot.
+uniform float u_shot_start;
 // What sort of shot this is, and what's going on across the last few (with scene = true).
 // u_shot_size: 0 very wide to 1 extreme close-up. u_camera: pan, tilt, zoom and roll a second.
 // u_handheld: 0 to 1. u_pace: cuts a minute. u_scene: action, dialogue, quiet, montage, each 0 to 1.
@@ -973,6 +1007,7 @@ impl Renderer {
             let given = Given {
                 dt,
                 since_cut: if frame.needs.cuts { self.cuts.found.since(pts) } else { None },
+                shot_start: if frame.needs.cuts { self.cuts.found.since(pts).map_or(0.0, |since| ((pts - since) * 100.0).round() / 100.0) } else { 0.0 },
                 history: history.map(|_| self.history.spot(pts)),
                 has_flow: flow.is_some(),
                 has_plate: plate.is_some(),
@@ -1140,6 +1175,7 @@ struct Given<'a> {
     rect: [f32; 4],
     video_time: f32,
     audio: Option<&'a Features>,
+    shot_start: f32,
     shot: crate::shot_type::Reading,
     world: Option<crate::camera::Report>,
     has_depth: bool,
@@ -1252,6 +1288,7 @@ impl Slot {
             gl.uniform_1_f32(at("u_video_time").as_ref(), given.video_time);
             gl.uniform_1_f32(at("u_dt").as_ref(), given.dt);
             gl.uniform_1_f32(at("u_since_cut").as_ref(), given.since_cut.unwrap_or(1e6));
+            gl.uniform_1_f32(at("u_shot_start").as_ref(), given.shot_start);
             gl.uniform_1_f32(at("u_world_ready").as_ref(), given.world.map_or(0.0, |w| w.ready));
             if let Some(w) = given.world {
                 // By columns, as GL wants.

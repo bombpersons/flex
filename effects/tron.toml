@@ -1,6 +1,7 @@
 name = "Neon Grid"
 description = "The world goes dark and the edges of everything light up in neon, over a glowing grid."
 suits = ["wide"]
+camera = true
 depth = true
 audio = true
 

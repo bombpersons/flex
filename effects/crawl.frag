@@ -47,7 +47,8 @@ vec4 effect(vec2 uv) {
     float wall = smoothstep(0.35, 0.7, wall_at(uv));
     if (wall <= 0.0) return vec4(c, 1.0);
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
-    vec2 p = uv * aspect;
+    // On the wall itself, so the writhing and the eyes stay put when the camera moves.
+    vec2 p = shot_uv(uv) * aspect;
     float t = u_video_time;
     vec2 flow = vec2(fbm(p * 4.0 + vec2(t * 0.25, 0.0)), fbm(p * 4.0 + vec2(5.2, -t * 0.2))) - 0.47;
     vec2 from = uv + flow * 0.06 * s_crawl / 100.0 * (1.0 + u_bass);

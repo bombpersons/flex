@@ -30,6 +30,12 @@ vec4 effect(vec2 uv) {
     float x = (uv.x - 0.5) * z * 2.0;
     vec2 cells = abs(fract(vec2(x, z - u_video_time * 0.5) * 2.0) - 0.5);
     float grid_line = 1.0 - smoothstep(0.0, 0.04 + 0.02 * z, min(cells.x, cells.y));
+    if (u_world_ready > 0.0) {
+        // Once the camera's known, a grid that stays where it is in the world.
+        vec3 world = world_at(uv);
+        vec2 fixed_cells = abs(fract(world.xz * 2.0) - 0.5);
+        grid_line = mix(grid_line, 1.0 - smoothstep(0.0, 0.04 + 0.02 * z, min(fixed_cells.x, fixed_cells.y)), u_world_ready);
+    }
     out_colour += hue(s_colour / 360.0 + 0.5) * grid_line * s_grid / 100.0 * 0.5 * (1.0 - smoothstep(0.1, 0.75, near)) * (0.5 + u_bass * s_react / 100.0);
     return vec4(out_colour, 1.0);
 }
