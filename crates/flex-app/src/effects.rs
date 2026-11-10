@@ -471,13 +471,26 @@ uniform mat3 u_world_rotation;
 uniform vec3 u_world_offset;
 uniform vec3 u_world_lens;
 uniform vec2 u_world_depth;
-// Where a point on screen is in the world.
-vec3 world_at(vec2 uv) {
+// The camera's place in the world, and the way through a point on screen, so that the point in
+// the world `distance` away (as world_distance gives it) is origin + direction * distance. The
+// world's y points down, as it did on screen when the shot began.
+void world_ray(vec2 uv, out vec3 origin, out vec3 direction) {
     vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
     vec2 size = u_world_lens.yz;
     vec2 pixel = vec2(p.x * size.x - 0.5, (1.0 - p.y) * size.y - 0.5);
-    vec3 ray = vec3((pixel - (size - 1.0) * 0.5) / u_world_lens.x, 1.0);
-    return transpose(u_world_rotation) * (ray / max(u_world_depth.x * depth_at(uv) + u_world_depth.y, 0.02) - u_world_offset);
+    mat3 to_world = transpose(u_world_rotation);
+    origin = -(to_world * u_world_offset);
+    direction = to_world * vec3((pixel - (size - 1.0) * 0.5) / u_world_lens.x, 1.0);
+}
+// Where a point on screen would be in the world if depth_at said `near` there.
+vec3 world_point(vec2 uv, float near) {
+    vec3 origin, direction;
+    world_ray(uv, origin, direction);
+    return origin + direction / max(u_world_depth.x * near + u_world_depth.y, 0.02);
+}
+// Where a point on screen is in the world.
+vec3 world_at(vec2 uv) {
+    return world_point(uv, depth_at(uv));
 }
 // Where a point in the world is on screen; z is its distance, and negative if it's behind the camera.
 vec3 world_to_screen(vec3 world) {

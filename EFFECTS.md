@@ -361,7 +361,10 @@ and drops back to 0 for a moment if the tracking is lost: multiply what you draw
 thing is, and it says where that thing is on screen now. `shot_uv(uv)` says where a point on screen
 was when the shot began, so a pattern drawn there sticks to what it's on. `world_pin_nearby` is
 `world_pin` for one thing that shouldn't be lost: it comes back into view when the camera leaves it. `world_distance(near)`
-turns a depth value into a distance. All three do nothing useful until `u_world_ready` is above 0,
+turns a depth value into a distance. `world_ray(uv, origin, direction)` gives the camera's place
+and the line of sight through a point, for testing what it passes in front of, and
+`world_point(uv, near)` is `world_at` for a depth of your own, such as one from `u_ground`. The
+world's y points down. All three do nothing useful until `u_world_ready` is above 0,
 and the first two just give back `uv`, so an effect still works without the camera. It needs
 something in the picture to hold on to, so plain walls and fast action lose it. The World Grid
 effect shows how well it's doing.

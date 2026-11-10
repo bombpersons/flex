@@ -2,6 +2,7 @@ name = "Spinning Features"
 description = "Eyes and mouths turn round and round where they are."
 suits = ["close"]
 faces = true
+mesh = true
 audio = true
 
 [[settings]]

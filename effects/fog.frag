@@ -1,0 +1,79 @@
+// Fog Layer: a level of mist in the shot's world, a little above the ground that depth finds. Each pixel's line of
+// sight is followed down into it, so whatever's deep in the fog is hidden by more of it, and what
+// stands above it isn't.
+
+float hash(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.1137, 0.1279));
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float noise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash(vec3(i, 0.0)), b = hash(vec3(i + vec2(1.0, 0.0), 0.0));
+    float c = hash(vec3(i + vec2(0.0, 1.0), 0.0)), d = hash(vec3(i + vec2(1.0, 1.0), 0.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float fbm(vec2 p) {
+    float sum = 0.0, amount = 0.5;
+    for (int i = 0; i < 4; i++) {
+        sum += amount * noise(p);
+        p = p * 2.03 + vec2(17.1, 9.2);
+        amount *= 0.5;
+    }
+    return sum;
+}
+
+vec3 hue(float t) {
+    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
+}
+
+// How tall something `size` big in the world looks on screen, `away` from the camera.
+float screen_size(float size, float away) {
+    return u_world_lens.x * size / max(away, 1e-3) / u_world_lens.z * (u_video_rect.w - u_video_rect.y);
+}
+
+vec4 effect(vec2 uv) {
+    vec3 film = texture(u_video, uv).rgb;
+    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw) || u_world_ready <= 0.0) return vec4(film, 1.0);
+    vec3 origin, direction;
+    world_ray(uv, origin, direction);
+    float scene = world_distance(depth_at(uv));
+    // The ground, from depth, gives which way is up, and how high the camera is. A shot's world
+    // has no real scale, so the fog's height goes by the camera's.
+    if (u_ground.w < 0.3) return vec4(film, 1.0);
+    vec2 size = u_video_rect.zw - u_video_rect.xy;
+    vec2 a = vec2(0.3, 0.12), b = vec2(0.7, 0.12), m = vec2(0.5, 0.3);
+    vec3 g0 = world_point(u_video_rect.xy + a * size, dot(vec3(a, 1.0), u_ground.xyz));
+    vec3 g1 = world_point(u_video_rect.xy + b * size, dot(vec3(b, 1.0), u_ground.xyz));
+    vec3 g2 = world_point(u_video_rect.xy + m * size, dot(vec3(m, 1.0), u_ground.xyz));
+    vec3 up = normalize(cross(g1 - g0, g2 - g0));
+    if (dot(up, origin - g0) < 0.0) up = -up;
+    float eye = dot(origin - g0, up);
+    if (eye <= 1e-3) return vec4(film, 1.0);
+    float top = eye * s_height / 100.0;
+    // How much of the line of sight, up to what's there, is below the top.
+    float h0 = eye, h1 = dot(origin + direction * scene - g0, up);
+    float inside = 0.0;
+    if (h0 < top && h1 < top) {
+        inside = scene;
+    } else if (h0 < top || h1 < top) {
+        float cross_at = clamp((top - h0) / (h1 - h0) * scene, 0.0, scene);
+        inside = h1 < top ? scene - cross_at : cross_at;
+    }
+    inside *= length(direction) / eye;
+    vec3 at = origin + direction * scene;
+    float t = u_video_time * s_drift / 100.0;
+    // Along the ground, for the billows.
+    vec3 across = normalize(cross(up, vec3(0.0, 0.0, 1.0)) + vec3(1e-4));
+    vec2 flat_at = vec2(dot(at, across), dot(at, cross(up, across))) / eye;
+    float billow = 0.55 + 0.9 * fbm(flat_at * 0.7 + vec2(t * 0.06, t * 0.025));
+    // Thicker the further down into it.
+    float depth_in = clamp(1.0 - dot(at - g0, up) / max(top, 1e-3), 0.0, 1.0);
+    float fog = 1.0 - exp(-inside * 2.0 * s_thick / 100.0 * billow * (0.5 + depth_in));
+    float light = dot(film, vec3(0.3, 0.59, 0.11));
+    vec3 mist = mix(vec3(0.62, 0.66, 0.72), vec3(0.85, 0.88, 0.92), billow - 0.55) * (0.6 + 0.5 * light);
+    return vec4(mix(film, mist, fog * u_world_ready), 1.0);
+}
