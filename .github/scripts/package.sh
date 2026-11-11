@@ -172,6 +172,13 @@ People effects)
   Source: https://github.com/TachibanaYoshino/AnimeGANv3 and
   https://github.com/TachibanaYoshino/AnimeGANv3_Portrait_Inference (Ghibli and sketch styles)
 
+Fast neural style (repaints the picture in a painting's style for the Painting, Drawn World and
+Drawn People effects)
+  Not included: downloaded from the ONNX Model Zoo the first time a style is used.
+  License: BSD 3-Clause (the ONNX Model Zoo's; trained with PyTorch's examples).
+  Source: https://huggingface.co/onnxmodelzoo (mosaic-9, candy-9, rain-princess-9, udnie-9,
+  pointilism-9) and https://github.com/pytorch/examples/tree/main/fast_neural_style
+
 JASSUB $JASSUB_VERSION (built into flex.exe; draws subtitles in the web UI's player)
   JASSUB itself: MIT (licenses/jassub-LICENSE.txt). Its WebAssembly contains libass
   (ISC), FreeType (FTL or GPL 2), HarfBuzz (MIT), FriBidi (LGPL 2.1 or later) and their

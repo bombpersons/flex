@@ -171,7 +171,8 @@ enum Kernel {
     ConvTranspose,
     Resize,
     Copy,
-    // AnimeGANv3's (animegan.wgsl).
+    // The restyle networks' (animegan.wgsl).
+    Conv9,
     Conv7,
     Conv5,
     ConvK3,
@@ -186,7 +187,7 @@ enum Kernel {
 }
 
 /// Each `Kernel`'s entry point, and whether its `B_IN_MEM` is set.
-const KERNELS: [(&str, bool); 22] = [
+const KERNELS: [(&str, bool); 23] = [
     ("matmul", false),
     ("matmul", true),
     ("layer_norm", false),
@@ -198,6 +199,7 @@ const KERNELS: [(&str, bool); 22] = [
     ("conv_transpose", false),
     ("resize", false),
     ("copy", false),
+    ("ag_conv9", false),
     ("ag_conv7", false),
     ("ag_conv5", false),
     ("ag_conv3", false),
@@ -779,6 +781,7 @@ fn cost(kernel: Kernel, p: &Params) -> f64 {
     let work = match kernel {
         Kernel::Matmul | Kernel::MatmulMem => m * k * n * f64::from(p.batch.max(1)),
         Kernel::Conv3x3 | Kernel::Conv3x3Wide => m * n * k * f64::from(p.x0) * 9.0 / f64::from(p.x1.max(1) * p.x1.max(1)),
+        Kernel::Conv9 => m * n * k * f64::from(p.x0.next_multiple_of(8)) * 81.0,
         Kernel::Conv7 => m * n * k * f64::from(p.x0.next_multiple_of(8)) * 49.0,
         Kernel::Conv5 => m * n * k * f64::from(p.x0.next_multiple_of(8)) * 25.0,
         Kernel::ConvK3 => m * n * k * f64::from(p.x0.next_multiple_of(8)) * 9.0,

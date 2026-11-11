@@ -49,8 +49,10 @@ Flex comes with these to start from, in [`effects`](effects):
   patches blossom and details sprout texture.
 - **Anime**: the whole film redrawn as anime by a neural network, in the style of Hayao
   Miyazaki's films, Makoto Shinkai's or Studio Ghibli's, or as an ink sketch, with inked outlines.
-- **Drawn World**: real people in an anime world: everything but people redrawn.
-- **Drawn People**: anime people in the real world: only people redrawn.
+- **Painting**: the whole film repainted by a neural network in a painting's style: a
+  stained-glass mosaic, pop colours, brushstrokes, flat cubist planes or pointillist dots.
+- **Drawn World**: real people in an anime or painted world: everything but people redrawn.
+- **Drawn People**: anime or painted people in the real world: only people redrawn.
 - **Depth**: uses a neural network's guess at how far away everything is, for rainbow
   contours rippling through the scene, or fog.
 - **Distance**: an effect that grows with distance, or closeness: fog (in any two colours), prisms, heat haze,
@@ -378,6 +380,12 @@ style picked by its choice setting `<key>`, whose options' ids name the networks
   on white). Free for non-commercial use only: its weights aren't shipped with Flex, but
   downloaded from the author's own releases (4 MB each, 7 MB for `ghibli`) the first time a
   style is wanted.
+- Fast neural style (Johnson, Alahi and Fei-Fei's network, as trained by
+  [PyTorch's examples](https://github.com/pytorch/examples/tree/main/fast_neural_style)), the
+  [ONNX Model Zoo](https://huggingface.co/onnxmodelzoo)'s five paintings' styles: `mosaic`
+  (stained glass), `candy` (pop colours), `rain-princess` (thick brushstrokes), `udnie` (flat
+  planes) and `pointilism` (dots). BSD licence; downloaded from the Model Zoo's copies (7 MB
+  each) the first time a style is wanted. About as fast as AnimeGANv3's styles.
 
 ```toml
 restyle = "style"

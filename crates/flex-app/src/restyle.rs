@@ -43,7 +43,7 @@ pub enum Status {
     /// Downloading a style: which, and percent done.
     Downloading(&'static str, u8),
     Ready {
-        style: &'static str,
+        style: &'static animegan::Style,
         adapter: String,
         /// How long the last picture took.
         ms: f32,
@@ -59,8 +59,8 @@ impl Status {
             Status::Off => "off".into(),
             Status::Starting => "starting…".into(),
             Status::Downloading(style, p) => format!("downloading the {style} style ({p}%)…"),
-            Status::Ready { style, ms, .. } if *ms == 0.0 => format!("{style}: ready · {}", animegan::CREDIT),
-            Status::Ready { style, adapter, ms, size } => format!("{style}: {ms:.0} ms a picture at {}×{} on {adapter} · {}", size.0, size.1, animegan::CREDIT),
+            Status::Ready { style, ms, .. } if *ms == 0.0 => format!("{}: ready · {}", style.label, style.credit),
+            Status::Ready { style, adapter, ms, size } => format!("{}: {ms:.0} ms a picture at {}×{} on {adapter} · {}", style.label, size.0, size.1, style.credit),
             Status::Failed(e, _) => format!("⚠ {e}"),
         }
     }
@@ -208,7 +208,7 @@ impl Link {
                 }
                 first = true;
                 let mut state = self.lock();
-                state.status = Status::Ready { style: style.label, adapter: String::new(), ms: 0.0, size: (0, 0) };
+                state.status = Status::Ready { style, adapter: String::new(), ms: 0.0, size: (0, 0) };
                 state.input = None;
             }
             let input = {
@@ -275,7 +275,7 @@ impl Link {
             }
             {
                 let mut state = self.lock();
-                state.status = Status::Ready { style: style.label, adapter: n.adapter().to_owned(), ms, size };
+                state.status = Status::Ready { style, adapter: n.adapter().to_owned(), ms, size };
                 state.output.push_back(Arc::new(Restyled { rgba: flipped, size, time }));
                 let extra = state.output.len().saturating_sub(MOST_WAITING);
                 state.output.drain(..extra);

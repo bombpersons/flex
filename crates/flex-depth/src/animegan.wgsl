@@ -1,18 +1,31 @@
-// AnimeGANv3's kernels (see animegan.rs), next to depth.wgsl's: its 7x7 convolutions, the
-// statistics over the whole picture its norms use, the norms themselves, the softmax and
-// normalising of its attention, its doubling and the packing of what comes out.
+// The restyle networks' kernels (see animegan.rs), next to depth.wgsl's: their 7x7 and 9x9
+// convolutions, the statistics over the whole picture their norms use, the norms themselves,
+// the softmax and normalising of AnimeGANv3's attention, doubling, and the packing of what comes
+// out.
 // Pictures are channels first, [channels][height][width], in `mem`.
 
 /// Tanh after (the 7x7 convolution).
 const TANH: u32 = 256u;
 /// The norm adds `b` before its leaky ReLU (else after).
 const ADD_BEFORE: u32 = 512u;
+/// The norm's ReLU is a plain one (else leaky, 0.2).
+const NORM_RELU: u32 = 4096u;
+/// The norm has no ReLU at all.
+const NORM_LINEAR: u32 = 8192u;
+/// ag_join: the second's mean and spread are a scale and shift for each channel from the
+/// weights instead (an instance norm's).
+const AFFINE: u32 = 16384u;
+/// ag_double: nearest, not bilinear.
+const NEAREST: u32 = 32768u;
+/// ag_pack: the values are already 0 to 255.
+const BYTES: u32 = 65536u;
 
-// k x k convolution (k = 3, 5 or 7), stride 1, reflect padding k / 2: in [k][H = m][W = n] at
+// k x k convolution (k = 3, 5, 7 or 9), stride 1, reflect padding k / 2: in [k][H = m][W = n] at
 // a_off, weights [x0][k][k][k] at b_off, bias at bias_off (or NONE), out [x0][H][W] at c_off.
 // Flags: TANH, LEAKY2, ACCUMULATE, LEAKY2_LAST. A 64 x 16 tile of pixels a workgroup: each thread makes 4 pixels side by
 // side for 8 output channels (group wg.z), sliding along each row of its neighbourhood, with 2
-// input channels at a time in workgroup memory (15 KB in all, under WebGPU's least 16).
+// input channels at a time in workgroup memory (15 KB in all, under WebGPU's least 16; 9 x 9
+// takes one at a time to fit).
 var<workgroup> ckw: array<vec4<f32>, 196>; // [ci 2][tap k * k][2] x 4 outputs
 var<workgroup> ckx: array<f32, 3080>; // [ci 2][16 + k - 1][64 + k - 1]
 
@@ -30,8 +43,9 @@ fn conv_k(ks: u32, lid: vec3<u32>, li: u32, wg: vec3<u32>) {
     let ty0 = i32(wg.y * 16u) - i32(ks / 2u);
     var a0 = array<vec4<f32>, 4>();
     var a1 = array<vec4<f32>, 4>();
-    for (var c0 = 0u; c0 < p.k; c0 += 2u) {
-        let kc = min(2u, p.k - c0);
+    let batch = select(2u, 1u, ks > 7u);
+    for (var c0 = 0u; c0 < p.k; c0 += batch) {
+        let kc = min(batch, p.k - c0);
         workgroupBarrier();
         for (var e = li; e < kc * taps * 2u; e += 256u) {
             let half = e % 2u;
@@ -55,7 +69,7 @@ fn conv_k(ks: u32, lid: vec3<u32>, li: u32, wg: vec3<u32>) {
         for (var ci = 0u; ci < kc; ci++) {
             for (var dy = 0u; dy < ks; dy++) {
                 let row = ci * area + (lid.y + dy) * cols + lid.x * 4u;
-                var r: array<f32, 10>;
+                var r: array<f32, 12>;
                 for (var i = 0u; i < ks + 3u; i++) { r[i] = ckx[row + i]; }
                 let wr = (ci * taps + dy * ks) * 2u;
                 for (var dx = 0u; dx < ks; dx++) {
@@ -89,6 +103,11 @@ fn conv_k(ks: u32, lid: vec3<u32>, li: u32, wg: vec3<u32>) {
 @compute @workgroup_size(16, 16)
 fn ag_conv7(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wg: vec3<u32>) {
     conv_k(7u, lid, li, wg);
+}
+
+@compute @workgroup_size(16, 16)
+fn ag_conv9(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wg: vec3<u32>) {
+    conv_k(9u, lid, li, wg);
 }
 
 @compute @workgroup_size(16, 16)
@@ -156,14 +175,17 @@ fn ag_stats(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
 // output, then the 1x1 convolution's of that) joined, and the norm's scale and shift written to
 // [x1][2] at c_off: the first's values normalised, then given the second's mean and spread.
 // eps is f0. With mem[bias_off] above 0 (bias_off not NONE), they're eased from what was there by
-// that much.
+// that much. With AFFINE, the parts are only the first's, and the scale and shift those that
+// normalise it and then scale and shift it by the weights' [x1] scales and [x1] shifts at b_off
+// (an instance norm's).
 @compute @workgroup_size(64)
 fn ag_join(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c = gid.x;
     if (c >= p.x1) { return; }
     let per = (p.m + p.x0 - 1u) / p.x0;
     var mv: array<vec2<f32>, 2>;
-    for (var which = 0u; which < 2u; which++) {
+    let affine = (p.flags & AFFINE) != 0u;
+    for (var which = 0u; which < select(2u, 1u, affine); which++) {
         let src = p.a_off + ((c + which * p.x1) * p.x0) * 2u;
         var mean = 0.0;
         for (var i = 0u; i < p.x0; i++) {
@@ -179,8 +201,12 @@ fn ag_join(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         mv[which] = vec2<f32>(mean, m2 / f32(p.m));
     }
-    let scale = sqrt(mv[1].y + p.f0) / sqrt(mv[0].y + p.f0);
-    let shift = mv[1].x - mv[0].x * scale;
+    var scale = sqrt(mv[1].y + p.f0) / sqrt(mv[0].y + p.f0);
+    var shift = mv[1].x - mv[0].x * scale;
+    if (affine) {
+        scale = w[p.b_off + c] / sqrt(mv[0].y + p.f0);
+        shift = w[p.b_off + p.x1 + c] - mv[0].x * scale;
+    }
     let o = p.c_off + c * 2u;
     var ease = 0.0;
     if (p.bias_off != NONE) { ease = clamp(mem[p.bias_off], 0.0, 1.0); }
@@ -223,7 +249,8 @@ fn ag_layer(@builtin(local_invocation_id) lid3: vec3<u32>) {
 
 // out[c][i] = leaky(in[c][i] * scale[c] + shift[c]), with in [k][m] at a_off, the scales and
 // shifts [k][2] at x0 in `mem` (or NONE for none), out at c_off, and [k][m] at b_off (unless
-// NONE) added after the leaky ReLU (or before it, with ADD_BEFORE). Grid: (m / 256, k).
+// NONE) added after the leaky ReLU (or before it, with ADD_BEFORE). With NORM_RELU the ReLU is a
+// plain one; with NORM_LINEAR there's none. Grid: (m / 256, k).
 @compute @workgroup_size(256)
 fn ag_norm(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -235,7 +262,9 @@ fn ag_norm(@builtin(global_invocation_id) gid: vec3<u32>) {
     let add = p.b_off != NONE;
     let before = (p.flags & ADD_BEFORE) != 0u;
     if (add && before) { v += mem[p.b_off + at]; }
-    v = select(v * 0.2, v, v >= 0.0);
+    if ((p.flags & NORM_LINEAR) == 0u) {
+        v = select(v * select(0.2, 0.0, (p.flags & NORM_RELU) != 0u), v, v >= 0.0);
+    }
     if (add && !before) { v += mem[p.b_off + at]; }
     mem[p.c_off + at] = v;
 }
@@ -304,7 +333,8 @@ fn ag_columns(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // Twice the size, bilinear, each output pixel at half its place in the input (ONNX's Upsample,
-// TensorFlow's resize without half pixels): [k][m][n] at a_off to [k][2m][2n] at c_off.
+// TensorFlow's resize without half pixels): [k][m][n] at a_off to [k][2m][2n] at c_off. With
+// NEAREST, each input pixel four times.
 @compute @workgroup_size(16, 16)
 fn ag_double(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
@@ -316,11 +346,16 @@ fn ag_double(@builtin(global_invocation_id) gid: vec3<u32>) {
     let y1 = min(y0 + (y & 1u), p.m - 1u);
     let x1 = min(x0 + (x & 1u), p.n - 1u);
     let src = p.a_off + c * p.m * p.n;
+    let out = p.c_off + c * 4u * p.m * p.n + y * 2u * p.n + x;
+    if ((p.flags & NEAREST) != 0u) {
+        mem[out] = mem[src + y0 * p.n + x0];
+        return;
+    }
     let v = mem[src + y0 * p.n + x0] + mem[src + y0 * p.n + x1] + mem[src + y1 * p.n + x0] + mem[src + y1 * p.n + x1];
-    mem[p.c_off + c * 4u * p.m * p.n + y * 2u * p.n + x] = v * 0.25;
+    mem[out] = v * 0.25;
 }
 
-// [3][m] at a_off, from -1 to 1, to m RGB bytes packed in words at c_off. The top byte is 0x40,
+// [3][m] at a_off, from -1 to 1 (or 0 to 255, with BYTES), to m RGB bytes packed in words at c_off. The top byte is 0x40,
 // which makes every word an ordinary float (from 2 to 4): never a NaN or a denormal, that
 // something on the way might change.
 @compute @workgroup_size(256)
@@ -328,6 +363,7 @@ fn ag_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.y * 65535u * 256u + gid.x;
     if (i >= p.m) { return; }
     let rgb = vec3<f32>(mem[p.a_off + i], mem[p.a_off + p.m + i], mem[p.a_off + 2u * p.m + i]);
-    let b = vec3<u32>(clamp((rgb + 1.0) * 127.5 + 0.5, vec3<f32>(0.0), vec3<f32>(255.0)));
+    let bytes = select((rgb + 1.0) * 127.5, rgb, (p.flags & BYTES) != 0u);
+    let b = vec3<u32>(clamp(bytes + 0.5, vec3<f32>(0.0), vec3<f32>(255.0)));
     mem[p.c_off + i] = bitcast<f32>(b.x | (b.y << 8u) | (b.z << 16u) | (0x40u << 24u));
 }
