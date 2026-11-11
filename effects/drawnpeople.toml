@@ -1,5 +1,5 @@
 name = "Drawn People"
-description = "Drawn or painted people in the real world: only people redrawn in the style picked, as anime by AnimeGANv3 (Asher Chan's network, free for non-commercial use only) or painted by fast neural style (Johnson et al.'s, from the ONNX Model Zoo; BSD licence). The style is downloaded the first time (4–7 MB)."
+description = "Drawn or painted people in the real world: only people redrawn in the style picked, as anime by AnimeGANv3 (Asher Chan's network, free for non-commercial use only) painted by fast neural style (Johnson et al.'s, from the ONNX Model Zoo; BSD licence) or line-drawn by Informative Drawings (Chan, Durand and Isola's; MIT licence). The style is downloaded the first time (4–17 MB)."
 restyle = "style"
 segment = true
 
@@ -21,6 +21,8 @@ options = [
     { id = "rain-princess", label = "Painted: rain princess" },
     { id = "udnie", label = "Painted: Udnie" },
     { id = "pointilism", label = "Painted: pointillism" },
+    { id = "lines", label = "Line drawing" },
+    { id = "lines-anime", label = "Line drawing, anime" },
 ]
 
 [[settings]]

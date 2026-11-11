@@ -51,8 +51,11 @@ Flex comes with these to start from, in [`effects`](effects):
   Miyazaki's films, Makoto Shinkai's or Studio Ghibli's, or as an ink sketch, with inked outlines.
 - **Painting**: the whole film repainted by a neural network in a painting's style: a
   stained-glass mosaic, pop colours, brushstrokes, flat cubist planes or pointillist dots.
-- **Drawn World**: real people in an anime or painted world: everything but people redrawn.
-- **Drawn People**: anime or painted people in the real world: only people redrawn.
+- **Line Art**: the film as a line drawing by a neural network, in ink on paper or over the
+  film's own colours in flat comic-book bands.
+- **Drawn World**: real people in an anime, painted or line-drawn world: everything but people
+  redrawn.
+- **Drawn People**: anime, painted or line-drawn people in the real world: only people redrawn.
 - **Depth**: uses a neural network's guess at how far away everything is, for rainbow
   contours rippling through the scene, or fog.
 - **Distance**: an effect that grows with distance, or closeness: fog (in any two colours), prisms, heat haze,
@@ -386,6 +389,11 @@ style picked by its choice setting `<key>`, whose options' ids name the networks
   (stained glass), `candy` (pop colours), `rain-princess` (thick brushstrokes), `udnie` (flat
   planes) and `pointilism` (dots). BSD licence; downloaded from the Model Zoo's copies (7 MB
   each) the first time a style is wanted. About as fast as AnimeGANv3's styles.
+- [Informative Drawings](https://github.com/carolineec/informative-drawings) (Chan, Durand and
+  Isola) for line drawings: `lines` (contours) and `lines-anime` (looser, anime-style lines),
+  dark lines on white, the same in all three channels. MIT licence; downloaded from the copy
+  ControlNet's annotators use (17 MB each) the first time a style is wanted. It's about
+  2.4 times the work a pixel, so it's drawn smaller.
 
 ```toml
 restyle = "style"

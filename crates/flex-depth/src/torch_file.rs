@@ -193,8 +193,9 @@ fn unpickle(data: &[u8]) -> Result<Value> {
     }
 }
 
-/// The float tensors under `key` (for example "model") in the file's top dictionary.
-pub fn read(bytes: &[u8], key: &str) -> Result<Tensors> {
+/// The float tensors under `key` (for example "model") in the file's top dictionary, or with
+/// `None`, the top dictionary's own (a saved `state_dict`).
+pub fn read(bytes: &[u8], key: Option<&str>) -> Result<Tensors> {
     let files = zip_entries(bytes)?;
     let (pickle_name, pickle) = files.iter().find(|(n, _)| n.ends_with("/data.pkl")).context("no data.pkl in the file")?;
     let root = pickle_name.trim_end_matches("data.pkl");
@@ -202,7 +203,13 @@ pub fn read(bytes: &[u8], key: &str) -> Result<Tensors> {
         bail!("big-endian tensors aren't supported");
     }
     let Value::Dict(top) = unpickle(pickle)? else { bail!("the file isn't a dictionary") };
-    let Some((_, Value::Dict(tensors))) = top.iter().find(|(k, _)| matches!(k, Value::Str(s) if s == key)) else { bail!("no {key} in the file") };
+    let tensors = match key {
+        None => &top,
+        Some(key) => match top.iter().find(|(k, _)| matches!(k, Value::Str(s) if s == key)) {
+            Some((_, Value::Dict(tensors))) => tensors,
+            _ => bail!("no {key} in the file"),
+        },
+    };
     let mut out = HashMap::new();
     for (name, t) in tensors {
         let (Value::Str(name), Value::Tensor { storage, offset, size, stride }) = (name, t) else { continue };

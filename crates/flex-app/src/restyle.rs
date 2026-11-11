@@ -139,9 +139,12 @@ impl Link {
         self.lock().status.clone()
     }
 
-    /// The size to hand frames over at, for a picture of this shape (width over height).
+    /// The size to hand frames over at, for a picture of this shape (width over height): fewer
+    /// pixels for styles that are more work each.
     pub fn size_for(&self, aspect: f32) -> (usize, usize) {
-        animegan::size_for(f64::from(aspect), LEVELS[self.lock().level])
+        let state = self.lock();
+        let work = animegan::style(&state.style).map_or(1.0, |s| s.work);
+        animegan::size_for(f64::from(aspect), (LEVELS[state.level] as f32 / work) as usize)
     }
 
     /// Whether the worker would take a frame now. `cut`: there's been a scene cut since the last.

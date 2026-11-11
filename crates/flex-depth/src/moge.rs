@@ -207,7 +207,7 @@ impl Moge {
         if gw == 0 || gh == 0 {
             bail!("an empty picture");
         }
-        let wt = Weights { t: crate::torch_file::read(bytes, "model")? };
+        let wt = Weights { t: crate::torch_file::read(bytes, Some("model"))? };
         let n = gw * gh;
         let tokens = n + 1;
         if tokens > MAX_TOKENS {

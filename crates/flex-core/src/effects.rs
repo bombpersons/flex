@@ -210,7 +210,7 @@ pub struct Needs {
 }
 
 /// The networks `Manifest::restyle` can pick from, by id.
-pub const RESTYLES: [&str; 12] = ["hayao", "hayao-warm", "hayao-vivid", "shinkai", "shinkai-bold", "ghibli", "sketch", "mosaic", "candy", "rain-princess", "udnie", "pointilism"];
+pub const RESTYLES: [&str; 14] = ["hayao", "hayao-warm", "hayao-vivid", "shinkai", "shinkai-bold", "ghibli", "sketch", "mosaic", "candy", "rain-princess", "udnie", "pointilism", "lines", "lines-anime"];
 
 /// What a manifest's `suits` can have in it.
 pub const SUITS: [&str; 5] = ["close", "wide", "action", "dialogue", "quiet"];

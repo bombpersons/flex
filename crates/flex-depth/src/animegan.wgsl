@@ -19,6 +19,8 @@ const AFFINE: u32 = 16384u;
 const NEAREST: u32 = 32768u;
 /// ag_pack: the values are already 0 to 255.
 const BYTES: u32 = 65536u;
+/// ag_pack: one channel, through a sigmoid (0 to 1), as grey.
+const GREY: u32 = 131072u;
 
 // k x k convolution (k = 3, 5, 7 or 9), stride 1, reflect padding k / 2: in [k][H = m][W = n] at
 // a_off, weights [x0][k][k][k] at b_off, bias at bias_off (or NONE), out [x0][H][W] at c_off.
@@ -355,15 +357,34 @@ fn ag_double(@builtin(global_invocation_id) gid: vec3<u32>) {
     mem[out] = v * 0.25;
 }
 
-// [3][m] at a_off, from -1 to 1 (or 0 to 255, with BYTES), to m RGB bytes packed in words at c_off. The top byte is 0x40,
+// Four pictures [4][k][m][n] at a_off (the places in each 2x2: top left, top right, bottom left,
+// bottom right) woven into one twice the size, [k][2m][2n] at c_off.
+@compute @workgroup_size(16, 16)
+fn ag_weave(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    let c = gid.z;
+    if (x >= 2u * p.n || y >= 2u * p.m) { return; }
+    let plane = p.m * p.n;
+    let place = (y & 1u) * 2u + (x & 1u);
+    mem[p.c_off + c * 4u * plane + y * 2u * p.n + x] = mem[p.a_off + (place * p.k + c) * plane + (y / 2u) * p.n + x / 2u];
+}
+
+// [3][m] at a_off, from -1 to 1 (or 0 to 255, with BYTES; or with GREY, [1][m] through a sigmoid
+// as grey), to m RGB bytes packed in words at c_off. The top byte is 0x40,
 // which makes every word an ordinary float (from 2 to 4): never a NaN or a denormal, that
 // something on the way might change.
 @compute @workgroup_size(256)
 fn ag_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.y * 65535u * 256u + gid.x;
     if (i >= p.m) { return; }
-    let rgb = vec3<f32>(mem[p.a_off + i], mem[p.a_off + p.m + i], mem[p.a_off + 2u * p.m + i]);
-    let bytes = select((rgb + 1.0) * 127.5, rgb, (p.flags & BYTES) != 0u);
+    var bytes: vec3<f32>;
+    if ((p.flags & GREY) != 0u) {
+        bytes = vec3<f32>(255.0 / (1.0 + exp(-mem[p.a_off + i])));
+    } else {
+        let rgb = vec3<f32>(mem[p.a_off + i], mem[p.a_off + p.m + i], mem[p.a_off + 2u * p.m + i]);
+        bytes = select((rgb + 1.0) * 127.5, rgb, (p.flags & BYTES) != 0u);
+    }
     let b = vec3<u32>(clamp(bytes + 0.5, vec3<f32>(0.0), vec3<f32>(255.0)));
     mem[p.c_off + i] = bitcast<f32>(b.x | (b.y << 8u) | (b.z << 16u) | (0x40u << 24u));
 }

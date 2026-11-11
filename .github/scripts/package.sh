@@ -179,6 +179,14 @@ Drawn People effects)
   Source: https://huggingface.co/onnxmodelzoo (mosaic-9, candy-9, rain-princess-9, udnie-9,
   pointilism-9) and https://github.com/pytorch/examples/tree/main/fast_neural_style
 
+Informative Drawings by Caroline Chan, Fredo Durand and Phillip Isola (line drawings for the
+Line Art, Drawn World and Drawn People effects)
+  Not included: downloaded the first time a style is used, from the copy of its weights in
+  ControlNet's annotators (https://huggingface.co/lllyasviel/Annotators: sk_model.pth and
+  sk_model2.pth).
+  License: MIT.
+  Source: https://github.com/carolineec/informative-drawings
+
 JASSUB $JASSUB_VERSION (built into flex.exe; draws subtitles in the web UI's player)
   JASSUB itself: MIT (licenses/jassub-LICENSE.txt). Its WebAssembly contains libass
   (ISC), FreeType (FTL or GPL 2), HarfBuzz (MIT), FriBidi (LGPL 2.1 or later) and their

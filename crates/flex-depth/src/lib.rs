@@ -183,11 +183,12 @@ enum Kernel {
     RowSoftmax,
     Columns,
     Double,
+    Weave,
     Pack,
 }
 
 /// Each `Kernel`'s entry point, and whether its `B_IN_MEM` is set.
-const KERNELS: [(&str, bool); 23] = [
+const KERNELS: [(&str, bool); 24] = [
     ("matmul", false),
     ("matmul", true),
     ("layer_norm", false),
@@ -210,6 +211,7 @@ const KERNELS: [(&str, bool); 23] = [
     ("ag_softmax", false),
     ("ag_columns", false),
     ("ag_double", false),
+    ("ag_weave", false),
     ("ag_pack", false),
 ];
 
