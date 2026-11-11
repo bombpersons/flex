@@ -87,9 +87,8 @@ impl Drop for SystemSound {
     }
 }
 
-/// The host, and the device on it to record the default output from, with its name.
-fn source() -> Result<(cpal::Device, String), String> {
-    let host = cpal::default_host();
+/// The device to record the default output from, with its name.
+fn source(host: &cpal::Host) -> Result<(cpal::Device, String), String> {
     let output = host.default_output_device().ok_or("no default output")?;
     let id = output.id().map_err(|e| e.to_string())?;
     #[cfg(target_os = "linux")]
@@ -110,8 +109,8 @@ fn source() -> Result<(cpal::Device, String), String> {
 }
 
 /// The default output's name, cheaply, to see whether it changed.
-fn default_output() -> Option<String> {
-    let output = cpal::default_host().default_output_device()?;
+fn default_output(host: &cpal::Host) -> Option<String> {
+    let output = host.default_output_device()?;
     output.id().ok().map(|id| id.id().to_owned())
 }
 
@@ -161,6 +160,8 @@ fn open(shared: &Arc<Shared>, device: &cpal::Device, broken: &Arc<AtomicBool>) -
 /// The recording thread: opens the default output, and opens it again when that changes or the
 /// recording breaks.
 fn record(shared: &Arc<Shared>) {
+    // One host throughout: each new one is a new connection to the server (PulseAudio).
+    let host = cpal::default_host();
     let mut current: Option<(cpal::Stream, String)> = None;
     let mut failures = 0;
     let mut broken = Arc::new(AtomicBool::new(false));
@@ -168,7 +169,7 @@ fn record(shared: &Arc<Shared>) {
     while !shared.stop.load(Ordering::Relaxed) {
         if checked.is_none_or(|t| t.elapsed() >= CHECK_EVERY) {
             checked = Some(Instant::now());
-            let output = default_output();
+            let output = default_output(&host);
             let stale = match &current {
                 Some((_, name)) => broken.load(Ordering::Relaxed) || output.is_none_or(|o| !name.starts_with(&o)),
                 None => true,
@@ -176,7 +177,7 @@ fn record(shared: &Arc<Shared>) {
             if stale {
                 current = None;
                 broken = Arc::new(AtomicBool::new(false));
-                match source().and_then(|(device, name)| open(shared, &device, &broken).map(|stream| (stream, name))) {
+                match source(&host).and_then(|(device, name)| open(shared, &device, &broken).map(|stream| (stream, name))) {
                     Ok((stream, name)) => {
                         log::info!("video effects: recording the computer's sound from {name}");
                         current = Some((stream, name));
