@@ -89,6 +89,7 @@ pub struct Renderer {
     motion: NetFlowGl,
     camera: CameraGl,
     restyle: RestyleGl,
+    nca: crate::nca::NcaGl,
     /// How many texture units a fragment shader can have (16 at least): `u_original` is the 17th.
     units: i32,
     shots: crate::shot_type::Tracker,
@@ -135,6 +136,8 @@ pub struct Frame {
     pub camera: Option<crate::camera::Link>,
     /// The restyling worker, when the effect draws on a restyled picture.
     pub restyle: Option<crate::restyle::Link>,
+    /// Or the living texture to grow, when its style is one of those.
+    pub texture: Option<crate::nca::Link>,
     /// Subtitles are to be kept out of the effect and laid on top of it.
     pub subtitles: bool,
 }
@@ -417,6 +420,9 @@ pub fn window(ctx: &egui::Context, open: &mut bool, sh: &mut Shared, frame: Opti
             }
             if let Some(restyle) = frame.and_then(|f| f.restyle.as_ref()) {
                 ui.label(format!("Style: {}", restyle.status().describe()));
+            }
+            if let Some(texture) = frame.and_then(|f| f.texture.as_ref()) {
+                ui.label(format!("Texture: {}", texture.status().describe()));
             }
             if let Some(a) = frame.and_then(|f| f.audio.as_deref()) {
                 ui.separator();
@@ -874,7 +880,7 @@ pub fn fragment_source(version: &str, embedded: bool, uniforms: &[String], body:
     )
 }
 
-fn vertex_source(version: &str) -> String {
+pub(crate) fn vertex_source(version: &str) -> String {
     // One triangle covering the screen, with no vertex buffer.
     format!(
         "{version}\nout vec2 v_uv;\nvoid main() {{\n    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n\
@@ -1169,7 +1175,11 @@ impl Renderer {
             let history = if frame.needs.history { self.history.texture() } else { None };
             let flow = if frame.needs.flow { network_flow.or_else(|| self.flow.at(pts)) } else { None };
             let plate = if frame.needs.plate { self.plate.texture() } else { None };
-            let restyled = if frame.restyle.is_some() { self.restyle.draw(gl, version, vao, video_texture, flow, size, rect, pts) } else { None };
+            let restyled = match (&frame.restyle, &frame.texture) {
+                (Some(_), _) => self.restyle.draw(gl, version, vao, video_texture, flow, size, rect, pts),
+                (None, Some(link)) => self.nca.draw(gl, version, vao, link, video_texture, flow, size, rect, dt),
+                (None, None) => None,
+            };
             gl.bind_vertex_array(Some(vao));
             gl.active_texture(glow::TEXTURE5);
             gl.bind_texture(glow::TEXTURE_2D_ARRAY, history);
@@ -1296,6 +1306,7 @@ impl Renderer {
             self.motion.release(gl);
             self.camera.release(gl);
             self.restyle.release(gl);
+            self.nca.release(gl);
             self.plate.release(gl);
             self.last_paint = None;
             if let Some(vao) = self.vao.take() {

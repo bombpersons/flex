@@ -487,6 +487,9 @@ impl Player {
             if let Some(restyle) = &frame.restyle {
                 lines.push(format!("Effect style: {}", restyle.status().describe()));
             }
+            if let Some(texture) = &frame.texture {
+                lines.push(format!("Effect texture: {}", texture.status().describe()));
+            }
             lines.extend(crate::gpu::describe());
             if frame.needs.scene {
                 lines.extend(crate::shot_type::describe());
@@ -725,12 +728,17 @@ impl Player {
                     sh.camera.wanted(sh.depth.clone());
                     sh.camera.clone()
                 });
-                let restyle = needs.restyle.as_deref().map(|style| {
+                // A living texture grows on the GL side; any other style is a network's.
+                let texture = needs.restyle.as_deref().filter(|s| crate::nca::texture(s).is_some()).map(|id| {
+                    sh.texture.wanted(id);
+                    sh.texture.clone()
+                });
+                let restyle = needs.restyle.as_deref().filter(|_| texture.is_none()).map(|style| {
                     sh.restyle.wanted(style);
                     sh.restyle.clone()
                 });
                 let fading = sh.effects.fading();
-                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts() || needs.cuts || needs.flow || needs.stats || needs.plate || needs.depth || needs.faces || needs.camera || restyle.is_some(), needs, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces, motion, camera, restyle, subtitles: self.effect_inputs.subtitles() })
+                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts() || needs.cuts || needs.flow || needs.stats || needs.plate || needs.depth || needs.faces || needs.camera || restyle.is_some(), needs, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces, motion, camera, restyle, texture, subtitles: self.effect_inputs.subtitles() })
             }
             _ => {
                 self.effect_inputs.stop(&self.mpv);

@@ -1400,6 +1400,7 @@ dependencies = [
  "libloading 0.9.0",
  "log",
  "serde",
+ "serde_json",
  "toml 0.8.2",
  "tray-icon",
  "ureq",

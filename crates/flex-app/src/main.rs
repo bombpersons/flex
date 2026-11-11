@@ -24,6 +24,7 @@ mod instance;
 mod logging;
 mod mpv;
 mod music_player;
+mod nca;
 mod picture;
 mod restyle;
 mod player;

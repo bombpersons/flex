@@ -1,5 +1,5 @@
 name = "Drawn People"
-description = "Drawn or painted people in the real world: only people redrawn in the style picked, as anime by AnimeGANv3 (Asher Chan's network, free for non-commercial use only) painted by fast neural style (Johnson et al.'s, from the ONNX Model Zoo; BSD licence) or line-drawn by Informative Drawings (Chan, Durand and Isola's; MIT licence). The style is downloaded the first time (4–17 MB)."
+description = "Drawn or painted people in the real world: only people redrawn in the style picked, as anime by AnimeGANv3 (Asher Chan's network, free for non-commercial use only) painted by fast neural style (Johnson et al.'s, from the ONNX Model Zoo; BSD licence) line-drawn by Informative Drawings (Chan, Durand and Isola's; MIT licence), or grown over with a living texture (Self-Organising Textures, Distill; CC BY 4.0). The style is downloaded the first time (4–17 MB)."
 restyle = "style"
 segment = true
 
@@ -23,6 +23,11 @@ options = [
     { id = "pointilism", label = "Painted: pointillism" },
     { id = "lines", label = "Line drawing" },
     { id = "lines-anime", label = "Line drawing, anime" },
+    { id = "tex-honeycomb", label = "Living texture: honeycomb" },
+    { id = "tex-chrome", label = "Living texture: liquid chrome" },
+    { id = "tex-scales", label = "Living texture: rainbow scales" },
+    { id = "tex-feathers", label = "Living texture: psychedelic feathers" },
+    { id = "tex-eyes", label = "Living texture: eyes" },
 ]
 
 [[settings]]

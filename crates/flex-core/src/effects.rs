@@ -212,6 +212,10 @@ pub struct Needs {
 /// The networks `Manifest::restyle` can pick from, by id.
 pub const RESTYLES: [&str; 14] = ["hayao", "hayao-warm", "hayao-vivid", "shinkai", "shinkai-bold", "ghibli", "sketch", "mosaic", "candy", "rain-princess", "udnie", "pointilism", "lines", "lines-anime"];
 
+/// The living textures `Manifest::restyle` can pick too, by id: grown on the GL side, not by a
+/// network worker (see flex-app's nca.rs).
+pub const TEXTURES: [&str; 20] = ["tex-honeycomb", "tex-cobwebs", "tex-bubbles", "tex-swirls", "tex-marble", "tex-cracked", "tex-chrome", "tex-fingerprints", "tex-candy", "tex-zebra", "tex-foam", "tex-mondrian", "tex-leopard", "tex-feathers", "tex-scales", "tex-eyes", "tex-staring", "tex-maze", "tex-coils", "tex-cells"];
+
 /// What a manifest's `suits` can have in it.
 pub const SUITS: [&str; 5] = ["close", "wide", "action", "dialogue", "quiet"];
 /// How much of the shuffle (one in this many) stays out for having had a turn lately.
@@ -711,7 +715,7 @@ impl Effects {
         let spec = e.settings().find(|s| s.key == key);
         let picked = self.value(id, key).and_then(serde_json::Value::as_str).map(str::to_owned);
         let first = spec.and_then(|s| s.default.as_ref()?.as_str().map(str::to_owned)).or_else(|| spec?.options.first().map(|o| o.id.clone()));
-        picked.or(first).filter(|m| RESTYLES.contains(&m.as_str()))
+        picked.or(first).filter(|m| RESTYLES.contains(&m.as_str()) || TEXTURES.contains(&m.as_str()))
     }
 
     fn roll(&mut self) -> f32 {

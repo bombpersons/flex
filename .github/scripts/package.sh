@@ -187,6 +187,14 @@ Line Art, Drawn World and Drawn People effects)
   License: MIT.
   Source: https://github.com/carolineec/informative-drawings
 
+Self-Organising Textures by Eyvind Niklasson, Alexander Mordvintsev, Ettore Randazzo and Michael
+Levin (the living textures grown for the Living Textures, Drawn World and Drawn People effects)
+  Not included: the article's trained models are downloaded the first time a texture is used.
+  License: CC BY 4.0 (the article and its models; its demo's code, which Flex's follows, is
+  Apache 2.0).
+  Source: https://distill.pub/selforg/2021/textures and
+  https://github.com/distillpub/post--selforg-textures
+
 JASSUB $JASSUB_VERSION (built into flex.exe; draws subtitles in the web UI's player)
   JASSUB itself: MIT (licenses/jassub-LICENSE.txt). Its WebAssembly contains libass
   (ISC), FreeType (FTL or GPL 2), HarfBuzz (MIT), FriBidi (LGPL 2.1 or later) and their

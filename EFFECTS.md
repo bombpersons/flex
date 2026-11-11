@@ -53,6 +53,9 @@ Flex comes with these to start from, in [`effects`](effects):
   stained-glass mosaic, pop colours, brushstrokes, flat cubist planes or pointillist dots.
 - **Line Art**: the film as a line drawing by a neural network, in ink on paper or over the
   film's own colours in flat comic-book bands.
+- **Living Textures**: the film grown over with a living texture (honeycomb, cobwebs, chrome,
+  rainbow scales, eyes…) by neural cellular automata that crawl over the picture in real time,
+  carried along with what moves.
 - **Drawn World**: real people in an anime, painted or line-drawn world: everything but people
   redrawn.
 - **Drawn People**: anime, painted or line-drawn people in the real world: only people redrawn.
@@ -394,6 +397,15 @@ style picked by its choice setting `<key>`, whose options' ids name the networks
   dark lines on white, the same in all three channels. MIT licence; downloaded from the copy
   ControlNet's annotators use (17 MB each) the first time a style is wanted. It's about
   2.4 times the work a pixel, so it's drawn smaller.
+- Living textures, `tex-honeycomb`, `tex-cobwebs`, `tex-bubbles`, `tex-swirls`, `tex-marble`,
+  `tex-cracked`, `tex-chrome`, `tex-fingerprints`, `tex-candy`, `tex-zebra`, `tex-foam`,
+  `tex-mondrian`, `tex-leopard`, `tex-feathers`, `tex-scales`, `tex-eyes`, `tex-staring`,
+  `tex-maze`, `tex-coils` and `tex-cells`: not a network redrawing each frame but the neural
+  cellular automata of [Self-Organising Textures](https://distill.pub/selforg/2021/textures)
+  (Niklasson, Mordvintsev, Randazzo and Levin; CC BY 4.0), grown on the GPU over the picture a
+  few steps every frame, fed a little of the film's colours and carried along with its movement.
+  Their weights (all of them, 0.4 MB) are downloaded from the article the first time one is
+  wanted.
 
 ```toml
 restyle = "style"
