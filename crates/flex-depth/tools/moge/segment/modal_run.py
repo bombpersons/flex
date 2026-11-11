@@ -31,7 +31,7 @@ image = (
 )
 
 
-@app.function(image=image, gpu=GPU, cpu=8, memory=32768, ephemeral_disk=120 * 1024, volumes={"/out": out}, timeout=(MINUTES + 60) * 60)
+@app.function(image=image, gpu=GPU, cpu=8, memory=32768, volumes={"/out": out}, timeout=(MINUTES + 60) * 60)
 def train():
     env = dict(
         os.environ,
