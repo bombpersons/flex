@@ -12,6 +12,8 @@
 //! Output is relative inverse depth ("disparity"): bigger is nearer, in no fixed units.
 
 pub mod face;
+pub mod models;
+pub mod sound;
 pub mod moge;
 mod torch_file;
 pub mod flow;
@@ -88,7 +90,7 @@ const HEAD: usize = 32;
 const POS_GRID: usize = 37;
 /// The network that finds people, walls and sky (`tools/segment`), which runs on the depth
 /// model's features.
-const MASK_HEAD: &[u8] = include_bytes!("segment.safetensors");
+const MASK_HEAD: &str = "segment.safetensors";
 const MASK_CLASSES: usize = 4;
 /// What the softmax kernel has room for.
 const MAX_TOKENS: usize = 64 * 32;
@@ -1147,7 +1149,7 @@ impl Depth {
         let head2 = conv(&mut up, &wt, "head.conv2")?;
         let head3 = linear(&mut up, &wt, "head.conv3", None)?;
         let mask_head = if with_masks {
-            let wt = Weights { t: read_safetensors(MASK_HEAD)? };
+            let wt = Weights { t: read_safetensors(&models::load(MASK_HEAD)?)? };
             Some(MaskHead {
                 token9: linear(&mut up, &wt, "token9", None)?,
                 token12: linear(&mut up, &wt, "token12", None)?,

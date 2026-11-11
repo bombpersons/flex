@@ -155,6 +155,14 @@ pub struct Inputs {
     tapped: bool,
     samples: audio::SampleBands,
     heard: VecDeque<(f64, Levels)>,
+    /// The computer's own sound, recorded back: what effects hear when it can be had.
+    system: Option<crate::system_sound::SystemSound>,
+    system_samples: audio::SampleBands,
+    /// When the recording last brought any sound (some outputs send nothing during silence).
+    system_heard: Option<Instant>,
+    /// What kind of sound it is: told the same sound, and eased here.
+    sound_kind: Option<crate::sound_kind::SoundKind>,
+    kinds: [f32; flex_depth::sound::KINDS.len()],
 }
 
 impl Inputs {
@@ -173,6 +181,9 @@ impl Inputs {
             self.filter = Some((0, "tap".into()));
         }
         for chunk in crate::audio_tap::take() {
+            if let Some(kind) = &self.sound_kind {
+                kind.push(chunk.rate, &chunk.mono);
+            }
             self.samples.push(chunk.pts, chunk.rate, &chunk.mono);
         }
         while let Some(heard) = self.samples.measure() {
@@ -183,6 +194,41 @@ impl Inputs {
         while self.heard.front().is_some_and(|(pts, _)| *pts <= now) {
             let Some((_, levels)) = self.heard.pop_front() else { break };
             // Between frames there are several readings: the loudest of each keeps the beats.
+            latest = Some(match latest {
+                Some(l) => l.loudest_of(&levels),
+                None => levels,
+            });
+        }
+        if latest.is_some() {
+            self.levels = latest;
+        }
+    }
+
+    /// Takes in the computer's sound, recorded since the last frame. It's already being heard,
+    /// so it's used as it comes.
+    fn collect_system(&mut self, now: Instant, dt: f64) {
+        let Some(system) = &self.system else { return };
+        let chunks = system.take();
+        if chunks.is_empty() {
+            // Nothing comes while nothing plays: that's silence.
+            if system.recording() && self.system_heard.is_none_or(|t| now.duration_since(t) > Duration::from_millis(150)) {
+                let silence = vec![0.0; (dt.min(0.1) * 48_000.0) as usize];
+                if let Some(kind) = &self.sound_kind {
+                    kind.push(48_000, &silence);
+                }
+                self.system_samples.push(-1.0, 48_000, &silence);
+            }
+        } else {
+            self.system_heard = Some(now);
+        }
+        for chunk in chunks {
+            if let Some(kind) = &self.sound_kind {
+                kind.push(chunk.rate, &chunk.mono);
+            }
+            self.system_samples.push(-1.0, chunk.rate, &chunk.mono);
+        }
+        let mut latest: Option<Levels> = None;
+        while let Some((_, levels)) = self.system_samples.measure() {
             latest = Some(match latest {
                 Some(l) => l.loudest_of(&levels),
                 None => levels,
@@ -218,6 +264,11 @@ impl Inputs {
         self.levels = None;
         self.samples = Default::default();
         self.heard.clear();
+        self.system = None;
+        self.system_samples = Default::default();
+        self.system_heard = None;
+        self.sound_kind = None;
+        self.kinds = Default::default();
     }
 
     /// Call once per frame while an effect is on.
@@ -243,12 +294,20 @@ impl Inputs {
             self.analyser = None;
             return (self.clock as f32, None);
         }
-        if self.tapped {
+        // The computer's sound where it can be recorded, so effects follow whatever plays;
+        // otherwise mpv's, from Flex's patched libmpv or from a filter inside mpv.
+        let system = self.system.get_or_insert_with(crate::system_sound::SystemSound::start);
+        let from_mpv = system.failed();
+        self.sound_kind.get_or_insert_with(crate::sound_kind::SoundKind::start);
+        if !from_mpv {
+            let _ = crate::audio_tap::take();
+            self.collect_system(now, dt);
+        } else if self.tapped {
             self.collect_samples(mpv);
         } else {
             self.keep_filter(mpv);
         }
-        if let Some((channels, _)) = self.filter.as_ref().filter(|_| !self.tapped).cloned() {
+        if let Some((channels, _)) = self.filter.as_ref().filter(|_| from_mpv && !self.tapped).cloned() {
             let metadata = mpv.get_string(&format!("af-metadata/{}", audio::FILTER_LABEL));
             if metadata.is_some() && metadata != self.metadata {
                 if let Some(levels) = metadata.as_deref().and_then(|m| audio::read_levels(m, channels)) {
@@ -261,8 +320,16 @@ impl Inputs {
             self.levels = self.waiting.pop_front().map(|(_, levels)| levels);
         }
         let analyser = self.analyser.get_or_insert_with(Analyser::new);
-        let features = analyser.update(self.levels.as_ref(), self.clock, dt as f32);
-        (self.clock as f32, Some(Arc::new(features.clone())))
+        let mut features = analyser.update(self.levels.as_ref(), self.clock, dt as f32).clone();
+        // It's heard every half second: eased so effects don't jump, quicker in than out.
+        let heard = self.sound_kind.as_ref().map(|k| k.heard()).unwrap_or_default();
+        for (k, target) in self.kinds.iter_mut().zip(heard.kinds) {
+            let rate = if target > *k { 6.0 } else { 2.0 };
+            *k += (target - *k) * (1.0 - (-dt as f32 * rate).exp());
+        }
+        features.kinds = self.kinds.to_vec();
+        features.heard = heard.described;
+        (self.clock as f32, Some(Arc::new(features)))
     }
 }
 
@@ -346,9 +413,18 @@ pub fn window(ctx: &egui::Context, open: &mut bool, sh: &mut Shared, frame: Opti
             if let Some(a) = frame.and_then(|f| f.audio.as_deref()) {
                 ui.separator();
                 ui.label("Sound");
+                let height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
                 for (name, v) in [("level", a.level), ("bass", a.bass), ("mid", a.mid), ("treble", a.treble), ("beat", a.beat)] {
-                    let height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
                     ui.add(egui::ProgressBar::new(v.clamp(0.0, 1.0)).desired_height(height).text(format!("{name} {v:.2}")));
+                }
+                // The kinds it most sounds like, and the classes behind them.
+                let mut kinds: Vec<(&str, f32)> = flex_depth::sound::KINDS.iter().map(|k| k.0).zip(a.kinds.iter().copied()).collect();
+                kinds.sort_by(|a, b| b.1.total_cmp(&a.1));
+                for (name, v) in kinds.into_iter().take(4).filter(|k| k.1 >= 0.05) {
+                    ui.add(egui::ProgressBar::new(v.clamp(0.0, 1.0)).desired_height(height).text(format!("{name} {v:.2}")));
+                }
+                if !a.heard.is_empty() {
+                    ui.weak(format!("Hears: {}", a.heard));
                 }
             }
 
@@ -430,6 +506,9 @@ fn setting(ui: &mut egui::Ui, sh: &mut Shared, id: &str, spec: &SettingSpec) {
     }
 }
 
+/// `u_sound_<kind>` for each of `sound::KINDS`, as `HEADER` declares them.
+static SOUND_UNIFORMS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| flex_depth::sound::KINDS.iter().map(|(name, _)| format!("u_sound_{name}")).collect());
+
 /// Uniforms every effect gets.
 const HEADER: &str = "\
 uniform sampler2D u_video;
@@ -446,6 +525,30 @@ uniform float u_mid;
 uniform float u_treble;
 uniform float u_beat;
 uniform sampler2D u_spectrum;
+// What kind of sound is playing (with `audio = true`), 0 to 1, from about the last second.
+uniform float u_sound_speech;
+uniform float u_sound_shouting;
+uniform float u_sound_laughter;
+uniform float u_sound_crying;
+uniform float u_sound_singing;
+uniform float u_sound_music;
+uniform float u_sound_crowd;
+uniform float u_sound_animals;
+uniform float u_sound_vehicles;
+uniform float u_sound_explosions;
+uniform float u_sound_thunder;
+uniform float u_sound_water;
+uniform float u_sound_wind;
+uniform float u_sound_fire;
+uniform float u_sound_alarms;
+uniform float u_sound_impacts;
+uniform float u_sound_silence;
+uniform float u_sound_happy_music;
+uniform float u_sound_sad_music;
+uniform float u_sound_tender_music;
+uniform float u_sound_exciting_music;
+uniform float u_sound_angry_music;
+uniform float u_sound_scary_music;
 uniform sampler2D u_depth;
 uniform float u_has_depth;
 // The floor or other level surface, found from depth: its depth is x, y, 1 dotted with xyz, over
@@ -1391,6 +1494,9 @@ impl Slot {
             gl.uniform_1_f32(at("u_treble").as_ref(), level(|a| a.treble));
             gl.uniform_1_f32(at("u_beat").as_ref(), level(|a| a.beat));
             gl.uniform_1_i32(at("u_spectrum").as_ref(), 2);
+            for (i, name) in SOUND_UNIFORMS.iter().enumerate() {
+                gl.uniform_1_f32(at(name).as_ref(), given.audio.and_then(|a| a.kinds.get(i).copied()).unwrap_or(0.0));
+            }
             gl.uniform_1_i32(at("u_depth").as_ref(), 3);
             gl.uniform_1_f32(at("u_has_depth").as_ref(), if given.has_depth { 1.0 } else { 0.0 });
             gl.uniform_4_f32(at("u_ground").as_ref(), given.ground[0], given.ground[1], given.ground[2], given.ground[3]);
@@ -2691,6 +2797,14 @@ mod tests {
         assert!(src.trim_end().ends_with("void main() { flex_color = effect(v_uv); }"));
         let es = fragment_source("#version 300 es", true, &[], body);
         assert!(es.starts_with("#version 300 es\nprecision highp float;"));
+    }
+
+    #[test]
+    fn the_header_declares_every_kind_of_sound() {
+        for name in SOUND_UNIFORMS.iter() {
+            assert!(HEADER.contains(&format!("uniform float {name};\n")), "{name}");
+        }
+        assert_eq!(HEADER.matches("uniform float u_sound_").count(), SOUND_UNIFORMS.len());
     }
 
     #[test]

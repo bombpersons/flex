@@ -28,6 +28,7 @@ float talking(int face) {
 vec3 bubbles(vec3 c, vec2 uv) {
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     vec2 p = uv * aspect;
+    float shout = clamp(u_sound_shouting * s_react / 40.0, 0.0, 1.5);
     float biggest = 0.0;
     for (int i = 0; i < u_face_count; i++) biggest = max(biggest, u_faces[i].w - u_faces[i].y);
     for (int i = 0; i < u_face_count; i++) {
@@ -45,6 +46,9 @@ vec3 bubbles(vec3 c, vec2 uv) {
         middle.y = clamp(middle.y, u_video_rect.y + radius.y * 1.1, u_video_rect.w - radius.y * 1.1);
         vec2 q = (p - middle) / max(radius, vec2(1e-4));
         float d = length(q);
+        // Shouting gives the bubble spikes, the more so the surer it is.
+        float spikes = abs(fract(atan(q.y, q.x) * 2.2282 + 0.25) - 0.5) * 2.0;
+        d /= 1.0 + shout * 0.22 * spikes;
         // The tail, a thin triangle back to the mouth.
         vec2 to_mouth = mouth - middle;
         float along = clamp(dot(p - middle, to_mouth) / dot(to_mouth, to_mouth), 0.0, 0.92);
@@ -76,7 +80,9 @@ float remembered(vec2 uv) {
     int i = pixel.x;
     bool here = i < u_face_count && u_face_seen[i] > 0.5 && meshed(i);
     if (!here) return 0.0;
-    return u_face_open[i].z > 0.2 ? 1.0 : talking(i) * pow(0.25, u_dt);
+    // While speech is heard a bubble lasts longer between words, so it doesn't keep popping away.
+    float heard = clamp(u_sound_speech * s_react / 40.0, 0.0, 1.0);
+    return u_face_open[i].z > 0.2 ? 1.0 : talking(i) * pow(0.25, u_dt * (1.0 - 0.8 * heard));
 }
 
 vec4 effect(vec2 uv) {

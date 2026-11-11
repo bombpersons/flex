@@ -58,11 +58,19 @@ vec4 effect(vec2 uv) {
     float size = 0.14;
     vec2 cell = floor(p / size);
     float chosen = hash(cell + 11.0);
-    if (chosen < s_eyes / 100.0) {
+    // Quiet and scary music wake more of the walls, and a scream snaps every eye open.
+    float uneasy = max(u_sound_silence, u_sound_scary_music);
+    float scream = u_sound_shouting;
+    float eyes = s_eyes / 100.0;
+    float more = eyes * 0.8 * max(uneasy, scream);
+    if (chosen < eyes + more) {
+        // The extra eyes fade in as the sound grows, rather than all appearing at once.
+        float woken = chosen < eyes ? 1.0 : clamp((eyes + more - chosen) / 0.1, 0.0, 1.0);
         float rhythm = sin(t * (0.4 + 0.5 * hash(cell)) + 30.0 * hash(cell + 2.0));
-        float open = smoothstep(0.1, 0.6, rhythm);
+        float open = smoothstep(0.1 - 0.9 * uneasy, 0.6 - 0.5 * uneasy, rhythm);
         // A blink now and then.
-        open *= 1.0 - smoothstep(0.96, 1.0, sin(t * 2.3 + 9.0 * hash(cell + 4.0)));
+        open *= 1.0 - smoothstep(0.96, 1.0, sin(t * 2.3 + 9.0 * hash(cell + 4.0))) * (1.0 - scream);
+        open = mix(open, 1.0, scream) * woken;
         if (open > 0.0) {
             vec2 centre = (cell + 0.5) * size;
             vec2 target = u_face_count > 0 ? face_point(0, 2) * aspect : vec2(aspect.x * 0.5 + 0.3 * sin(t * 0.7), 0.4);

@@ -57,6 +57,10 @@ vec4 effect(vec2 uv) {
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     float t = u_time * s_speed / 100.0;
     float react = s_react / 100.0;
+    // Singing, choirs above all, and tender or happy music brighten and widen the beams, and
+    // thunder flashes them.
+    float hymn = clamp(u_sound_singing + 0.7 * (u_sound_tender_music + u_sound_happy_music), 0.0, 1.0) * react;
+    float flash = u_sound_thunder * react * smoothstep(0.66, 0.85, noise(vec2(u_time * 14.0, 3.0)));
 
     vec2 above = vec2(0.5 + 0.36 * sin(t * 0.5), 1.14);
     float found = clamp(u_light.z * 1.8, 0.0, 1.0) * s_find / 100.0;
@@ -108,7 +112,7 @@ vec4 effect(vec2 uv) {
     float angle = atan(from_light.x, -from_light.y);
     float wide = noise(vec2(angle * 4.0 + t * 0.09, t * 0.07));
     float fine = noise(vec2(angle * 13.0 - t * 0.14, t * 0.11 + 5.0));
-    float shafts = 0.16 + 0.84 * smoothstep(0.28, 0.72, wide * 0.65 + fine * 0.35);
+    float shafts = 0.16 + 0.84 * smoothstep(0.28 - 0.2 * hymn, 0.72 - 0.1 * hymn, wide * 0.65 + fine * 0.35);
     // Close to the light they all run together, instead of meeting at a point.
     shafts = mix(1.0, shafts, smoothstep(0.03, 0.4, length(from_light)));
 
@@ -130,7 +134,7 @@ vec4 effect(vec2 uv) {
     vec3 tint = mix(hue(s_colour / 360.0) * 0.5 + 0.55, film_light(), s_film / 100.0);
     tint = mix(tint, hue(uv.x * 2.0 - t * 0.1) * 1.1, s_rainbow / 100.0);
 
-    float strength = s_strength / 100.0 * (1.0 + 0.9 * u_bass * react) * mix(1.4, 0.85, clamp(u_brightness * 2.0, 0.0, 1.0));
+    float strength = s_strength / 100.0 * (1.0 + 0.9 * u_bass * react + 0.8 * hymn + 3.0 * flash) * mix(1.4, 0.85, clamp(u_brightness * 2.0, 0.0, 1.0));
 
     // Where the light lands on things.
     float e = 0.006;

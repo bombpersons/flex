@@ -2,15 +2,15 @@
 //! model zoo) gives each face a box and five points. MediaPipe's Face Mesh V2 (Apache 2.0) then
 //! gives one with 478 points, and a MobileNetV2 trained for head pose (MIT, by yakhyo, as used
 //! by UniFace) says which way it's turned, even side-on where the mesh gives up. The plans and
-//! weights are in `.bin` files, made by `tools/face/convert.py` and `convert_detail.py`.
+//! weights are in `.bin` files in `models`, made by `tools/face/convert.py` and `convert_detail.py`.
 
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 
-const YUNET: &[u8] = include_bytes!("yunet.bin");
-const FACE_MESH: &[u8] = include_bytes!("face_mesh.bin");
-const HEAD_ANGLE: &[u8] = include_bytes!("head_angle.bin");
+const YUNET: &str = "yunet.bin";
+const FACE_MESH: &str = "face_mesh.bin";
+const HEAD_ANGLE: &str = "head_angle.bin";
 /// The picture it takes.
 pub const WIDTH: usize = 640;
 pub const HEIGHT: usize = 352;
@@ -431,7 +431,7 @@ impl Face {
     pub fn new() -> Result<Self> {
         let (gpu, adapter) = Gpu::new()?;
         let wanted: Vec<String> = STRIDES.iter().flat_map(|s| ["cls", "obj", "bbox", "kps"].map(|k| format!("{k}_{s}"))).collect();
-        let yunet = Net::new(&gpu, YUNET, (3, HEIGHT, WIDTH), &wanted)?;
+        let yunet = Net::new(&gpu, &super::models::load(YUNET)?, (3, HEIGHT, WIDTH), &wanted)?;
         let at = |scale: usize, kind: usize| yunet.outputs[scale * 4 + kind];
         let shapes = [0, 1, 2].map(|s| [0, 1, 2, 3].map(|k| at(s, k)));
         Ok(Self { gpu, yunet, mesh: None, head: None, adapter, shapes })
@@ -453,7 +453,7 @@ impl Face {
             bail!("expected a {MESH_SIZE} square of RGB, got {} bytes", rgb.len());
         }
         if self.mesh.is_none() {
-            self.mesh = Some(Net::new(&self.gpu, FACE_MESH, (3, MESH_SIZE, MESH_SIZE), &["points".to_owned(), "present".to_owned()])?);
+            self.mesh = Some(Net::new(&self.gpu, &super::models::load(FACE_MESH)?, (3, MESH_SIZE, MESH_SIZE), &["points".to_owned(), "present".to_owned()])?);
         }
         let mut input = vec![0.0f32; 3 * MESH_SIZE * MESH_SIZE];
         for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
@@ -472,7 +472,7 @@ impl Face {
             bail!("expected a {HEAD_SIZE} square of RGB, got {} bytes", rgb.len());
         }
         if self.head.is_none() {
-            self.head = Some(Net::new(&self.gpu, HEAD_ANGLE, (3, HEAD_SIZE, HEAD_SIZE), &["six".to_owned()])?);
+            self.head = Some(Net::new(&self.gpu, &super::models::load(HEAD_ANGLE)?, (3, HEAD_SIZE, HEAD_SIZE), &["six".to_owned()])?);
         }
         let mut input = vec![0.0f32; 3 * HEAD_SIZE * HEAD_SIZE];
         for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {

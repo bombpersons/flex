@@ -73,12 +73,20 @@ vec4 effect(vec2 uv) {
     vec3 looking = origin + normalize(ahead) * min(LOOKING, 0.6 * room);
     float spacing = LOOKING * u_world_lens.y / u_world_lens.x / 1.6;
     vec3 middle = floor(looking / spacing);
+    // Silence, scary or sad music and crying bring the ghosts out, and more of them; a bang or an
+    // explosion makes them flinch and fade.
+    float haunted = clamp(u_sound_silence + u_sound_crying + u_sound_scary_music + 0.6 * u_sound_sad_music, 0.0, 1.0);
+    float startled = clamp(u_sound_explosions + u_sound_impacts, 0.0, 1.0);
+    float count = s_count / 100.0, more = count * 0.6 * haunted;
     float pale = 0.0;
     for (int x = -1; x <= 1; x++) {
         for (int z = -1; z <= 1; z++) {
             vec3 cell = middle + vec3(float(x), 0.0, float(z));
             vec3 seed = cell + vec3(shot, 0.0, shot * 0.5);
-            if (hash(seed) > s_count / 100.0) continue;
+            float chosen = hash(seed);
+            if (chosen > count + more) continue;
+            // The extra ones fade in as the sound grows, rather than all appearing at once.
+            float woken = chosen <= count ? 1.0 : clamp((count + more - chosen) / 0.1, 0.0, 1.0);
             float phase = 6.2831853 * hash(seed + 3.1);
             vec3 world = (cell + vec3(0.5, 0.5, 0.5)) * spacing + spacing * vec3(0.35 * sin(t * 0.13 + phase), 0.1 * sin(t * 0.4 + phase), 0.35 * cos(t * 0.11 + phase));
             vec3 from_middle = abs(world - looking) / spacing;
@@ -88,10 +96,12 @@ vec4 effect(vec2 uv) {
             if (place.z < 0.15) continue;
             float tall = screen_size(0.22 * s_size / 100.0, place.z);
             vec2 q = (uv - place.xy) * aspect / tall;
+            q.x += startled * 0.08 * sin(t * 37.0 + phase * 5.0);
             if (abs(q.x) > 0.6 || abs(q.y) > 0.6) continue;
             float seen = smoothstep(place.z * 0.9, place.z * 1.1, scene_distance);
             float flicker = 0.8 + 0.2 * sin(t * 2.3 + phase * 3.0);
-            pale = max(pale, ghost(q, t, hash(seed + 7.0)) * seen * kept * flicker);
+            float shown = woken * (1.0 + 0.5 * haunted) * (1.0 - 0.8 * startled);
+            pale = max(pale, ghost(q, t, hash(seed + 7.0)) * seen * kept * flicker * shown);
         }
     }
     float grey = dot(film, vec3(0.3, 0.59, 0.11));

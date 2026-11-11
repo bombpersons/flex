@@ -32,6 +32,13 @@ vec4 effect(vec2 uv) {
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     vec2 p = uv * aspect;
     float level = s_listen < 0.5 ? u_mid : (s_listen < 1.5 ? u_level : u_bass);
+    // Listening to voices, jaws hold still for music, bangs and engines with nobody talking,
+    // singing, laughing or shouting over them. Singing counts as music too, so a voice wins.
+    if (s_listen < 0.5) {
+        float voice = clamp(u_sound_speech + u_sound_singing + u_sound_laughter + u_sound_shouting, 0.0, 1.0);
+        float other = clamp(u_sound_music + u_sound_explosions + u_sound_impacts + u_sound_vehicles + u_sound_thunder + u_sound_alarms, 0.0, 1.0);
+        level *= 1.0 - 0.85 * other * (1.0 - voice);
+    }
     float open = pow(clamp(level, 0.0, 1.0), 1.5) * s_flap / 100.0;
     for (int i = 0; i < u_face_count; i++) {
         float seen = u_face_seen[i];

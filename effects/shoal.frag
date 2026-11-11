@@ -63,7 +63,12 @@ vec4 effect(vec2 uv) {
     vec3 glow = vec3(0.0);
     vec3 fish_colour = vec3(0.0);
     float covered = 0.0;
-    float pulse = 1.0 + 0.6 * u_beat * s_react / 100.0;
+    float react = s_react / 100.0;
+    float pulse = 1.0 + 0.6 * u_beat * react;
+    // Bangs, explosions and shouting startle them: they dart on and scatter apart, and gather
+    // again as it passes. In silence they close up and swim calmly.
+    float startle = min(max(max(u_sound_impacts, u_sound_explosions), u_sound_shouting) * react, 1.0);
+    float calm = u_sound_silence * min(react, 1.0) * (1.0 - min(startle, 1.0));
     for (int x = -1; x <= 1; x++) {
         for (int z = -1; z <= 1; z++) {
             vec3 cell = middle + vec3(float(x), 0.0, float(z));
@@ -79,8 +84,9 @@ vec4 effect(vec2 uv) {
                 float k = float(i);
                 vec3 seed = shoal + vec3(k * 1.7, 2.0, 0.0);
                 // Round a loop in the cell, each fish a little behind the one before.
-                float phase = turning * (t * 0.5 - k * 0.12) + 0.3 * hash(seed);
+                float phase = turning * (t * 0.5 - k * 0.12 + 0.5 * startle * (0.6 + 0.8 * hash(seed + 6.0))) + 0.3 * hash(seed);
                 vec3 spread = (vec3(hash(seed + 1.0), hash(seed + 2.0), hash(seed + 3.0)) - 0.5) * spacing * vec3(0.25, 0.15, 0.25);
+                spread *= 1.0 + 2.2 * startle - 0.35 * calm;
                 vec3 world = centre + spacing * vec3(0.38 * cos(phase), 0.08 * sin(2.0 * phase), 0.3 * sin(phase)) + spread;
                 vec3 next = centre + spacing * vec3(0.38 * cos(phase + turning * 0.05), 0.08 * sin(2.0 * phase + turning * 0.1), 0.3 * sin(phase + turning * 0.05)) + spread;
                 vec3 place = world_to_screen(world);
@@ -93,7 +99,7 @@ vec4 effect(vec2 uv) {
                 if (abs(q.x) > 1.2 || abs(q.y) > 0.6) continue;
                 float seen = smoothstep(place.z * 0.93, place.z * 1.07, scene_distance) * kept;
                 // The tail swishes, and the body with it.
-                q.y -= 0.06 * sin(t * 11.0 + k) * clamp(-q.x, 0.0, 1.0);
+                q.y -= 0.06 * (1.0 + 0.8 * startle - 0.5 * calm) * sin(t * 11.0 + k) * clamp(-q.x, 0.0, 1.0);
                 float body = 1.0 - smoothstep(0.85, 1.0, length(q / vec2(0.5, 0.17)));
                 float tail = step(q.x, -0.42) * step(-0.78, q.x) * (1.0 - smoothstep(0.0, 0.02, abs(q.y) - (-q.x - 0.42) * 0.75));
                 float shape = max(body, tail) * seen;

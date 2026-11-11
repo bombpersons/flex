@@ -1,5 +1,5 @@
 name = "Comic Book People"
-description = "People are printed in halftone dots with thick outlines, in an ordinary world, and get speech bubbles while they talk."
+description = "People are printed in halftone dots with thick outlines, in an ordinary world, and get speech bubbles while they talk, spiky ones when they shout."
 suits = ["dialogue"]
 segment = true
 mesh = true

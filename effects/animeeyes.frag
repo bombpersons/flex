@@ -33,8 +33,9 @@ float glint(vec2 q, float size) {
 }
 
 // One eye, with x running outwards from the nose and y up, in units of the eye. `side` is which
-// way outwards is on screen, so the highlights land on the same side of both eyes.
-vec4 draw_eye(vec2 l, vec2 look, float open, vec3 colour, float side, float pulse, float px) {
+// way outwards is on screen, so the highlights land on the same side of both eyes. `shine` adds
+// twinkling stars to the highlights, and `shock` shrinks the iris and pupil to startled dots.
+vec4 draw_eye(vec2 l, vec2 look, float open, vec3 colour, float side, float pulse, float shine, float shock, float px) {
     vec2 tall = vec2(1.0, l.y > 0.0 ? max(1.08 * open, 0.03) : 0.8);
     float round_d = length(l / tall);
     float inside = inside_of(1.0 - round_d, px);
@@ -43,7 +44,11 @@ vec4 draw_eye(vec2 l, vec2 look, float open, vec3 colour, float side, float puls
     white = mix(white, vec3(0.62, 0.66, 0.88), smoothstep(0.35, 1.0, l.y / max(tall.y, 0.05)) * step(0.0, l.y));
 
     vec2 centre = vec2(look.x, look.y + 0.06);
-    vec2 ir = (l - centre) / vec2(0.74, 1.1);
+    // Everything in the iris is drawn in its own units, so a shocked iris shrinks as a piece.
+    float shrink = 1.0 - 0.45 * shock;
+    vec2 li = (l - centre) / shrink;
+    float ipx = px / shrink;
+    vec2 ir = li / vec2(0.74, 1.1);
     float d = length(ir);
     vec3 dark = colour * 0.2, mid = colour * 0.8, bright = mix(colour, vec3(1.0), 0.4) * 1.25;
     vec3 iris = mix(bright, mid, smoothstep(-0.95, -0.1, ir.y));
@@ -52,19 +57,27 @@ vec4 draw_eye(vec2 l, vec2 look, float open, vec3 colour, float side, float puls
     iris *= 0.86 + 0.28 * (0.5 + 0.5 * sin(angle * 23.0 + 1.3 * sin(angle * 5.0))) * smoothstep(0.25, 0.9, d);
     iris += bright * 0.55 * smoothstep(0.55, 0.92, d) * (1.0 - smoothstep(-0.8, -0.1, ir.y));
     iris = mix(iris, dark * 0.45, smoothstep(0.84, 0.98, d));
-    float pupil = length((l - centre - vec2(0.0, 0.1)) / (vec2(0.27, 0.44) * (1.0 + 0.12 * (pulse - 1.0))));
+    float pupil = length((li - vec2(0.0, 0.1)) / (vec2(0.27, 0.44) * (1.0 + 0.12 * (pulse - 1.0)) * (1.0 - 0.5 * shock)));
     iris = mix(iris, vec3(0.02, 0.01, 0.05), 1.0 - smoothstep(0.92, 1.08, pupil));
 
-    vec3 eye = mix(white, iris, inside_of(1.0 - d, px / 0.74));
+    vec3 eye = mix(white, iris, inside_of(1.0 - d, ipx / 0.74));
 
-    float amount = s_sparkle / 100.0;
-    vec2 q1 = l - centre - vec2(-0.26 * side, 0.4);
-    float highlight = inside_of(1.0 - length(q1 / (vec2(0.27, 0.34) * pulse)), px / 0.27);
-    vec2 q2 = l - centre - vec2(0.3 * side, -0.5);
-    highlight = max(highlight, inside_of(1.0 - length(q2) / (0.14 * pulse), px / 0.14));
-    vec2 q3 = l - centre - vec2(-0.05 * side, -0.68);
-    highlight = max(highlight, 0.8 * inside_of(1.0 - length(q3) / 0.07, px / 0.07));
+    // A shocked eye keeps only a little of its shine.
+    float amount = s_sparkle / 100.0 * (1.0 - 0.6 * shock);
+    vec2 q1 = li - vec2(-0.26 * side, 0.4);
+    float highlight = inside_of(1.0 - length(q1 / (vec2(0.27, 0.34) * pulse)), ipx / 0.27);
+    vec2 q2 = li - vec2(0.3 * side, -0.5);
+    highlight = max(highlight, inside_of(1.0 - length(q2) / (0.14 * pulse), ipx / 0.14));
+    vec2 q3 = li - vec2(-0.05 * side, -0.68);
+    highlight = max(highlight, 0.8 * inside_of(1.0 - length(q3) / 0.07, ipx / 0.07));
     highlight = max(highlight, glint(q1 + vec2(0.1 * side, -0.1), 0.25 + 0.6 * (pulse - 1.0)));
+    // Starry-eyed: more glints, twinkling in turn.
+    if (shine > 0.0) {
+        float twinkle = 0.5 + 0.5 * sin(u_time * 5.0 + side * 1.7);
+        highlight = max(highlight, shine * glint(li - vec2(0.36 * side, -0.1), 0.1 + 0.16 * twinkle));
+        highlight = max(highlight, shine * glint(li - vec2(-0.34 * side, -0.4), 0.08 + 0.12 * (1.0 - twinkle)));
+        highlight = max(highlight, shine * glint(q1 + vec2(0.1 * side, -0.1), 0.4 + 0.25 * twinkle));
+    }
     eye = mix(eye, vec3(1.0), highlight * amount);
 
     vec4 out_colour = vec4(eye, inside);
@@ -93,6 +106,12 @@ vec4 effect(vec2 uv) {
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     vec2 p = uv * aspect;
     float pulse = 1.0 + 0.45 * u_beat * s_react / 100.0;
+    // What kind of sound it is: crying brings tears, singing and sweet music make eyes shine, and
+    // shouts and bangs shock them.
+    float react = s_react / 50.0;
+    float cry = clamp(u_sound_crying * react, 0.0, 1.0);
+    float shine = clamp((u_sound_singing + u_sound_tender_music + u_sound_happy_music) * react, 0.0, 1.0);
+    float shock = clamp(max(u_sound_shouting, u_sound_explosions) * react, 0.0, 1.0);
     for (int i = 0; i < u_face_count; i++) {
         float seen = u_face_seen[i];
         if (seen <= 0.0) continue;
@@ -144,9 +163,25 @@ vec4 effect(vec2 uv) {
 
             vec2 rel = p - centre;
             vec2 l = vec2(dot(rel, outward) / (size * squash), dot(rel, up) / size);
-            if (dot(l, l) > 6.0) continue;
             float px = 1.6 / (u_resolution.y * size);
-            vec4 drawn = draw_eye(l, gaze, eye_open, iris_colour(i), out_x * sign(across.x + 1e-5), pulse, px);
+
+            // Tears stream down from under the eye, running further the harder it sounds like crying.
+            if (cry > 0.0) {
+                float run = -l.y - 0.72;
+                float reach = 2.6 * cry;
+                if (run > -0.2 && run < reach + 0.3) {
+                    float wobble = 0.06 * sin(run * 3.0 - u_time * 4.0 + float(e) * 2.0);
+                    float x = (l.x - 0.4) * squash - wobble;
+                    float width = 0.12 + 0.04 * run;
+                    float stream = inside_of(width - abs(x), px) * smoothstep(-0.2, 0.05, run) * (1.0 - smoothstep(reach, reach + 0.3, run));
+                    float flow = 0.8 + 0.2 * sin(run * 7.0 - u_time * 9.0);
+                    vec3 tear = mix(vec3(0.55, 0.8, 1.0) * flow, vec3(0.95, 0.98, 1.0), 1.0 - smoothstep(0.0, 0.35 * width, abs(x + 0.4 * width)));
+                    c = mix(c, tear, stream * 0.75 * smoothstep(0.0, 0.4, cry) * seen);
+                }
+            }
+
+            if (dot(l, l) > 6.0) continue;
+            vec4 drawn = draw_eye(l, gaze, eye_open, iris_colour(i), out_x * sign(across.x + 1e-5), pulse, shine, shock, px);
             c = mix(c, drawn.rgb, drawn.a * seen);
         }
     }

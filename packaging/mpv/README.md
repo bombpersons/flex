@@ -5,7 +5,8 @@ Flex can use any libmpv, but these two patches let it do things an ordinary one 
 - `0001`: draws subtitles into a framebuffer of their own, so video effects leave them alone
   and they can be laid on top.
 - `0002`: a `flextap` audio filter and `mpv_flex_set_audio_tap`, which hand the samples being
-  played to Flex, so effects can react to the real sound about a hundred times a second.
+  played to Flex. Effects now record the computer's own sound instead (`system_sound.rs` in
+  flex-app), and only use this where that can't be done.
 
 `v0.40.0/` is built on Debian 13 for the Linux package. `windows/` is the same change against the
 commit in `windows/COMMIT`, which needs newer libraries than Debian has. It isn't built yet, and the

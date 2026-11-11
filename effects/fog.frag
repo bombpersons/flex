@@ -69,10 +69,17 @@ vec4 effect(vec2 uv) {
     // Along the ground, for the billows.
     vec3 across = normalize(cross(up, vec3(0.0, 0.0, 1.0)) + vec3(1e-4));
     vec2 flat_at = vec2(dot(at, across), dot(at, cross(up, across))) / eye;
-    float billow = 0.55 + 0.9 * fbm(flat_at * 0.7 + vec2(t * 0.06, t * 0.025));
+    // Wind heard in the film churns it, and blows a quicker layer of it through.
+    float wind = u_sound_wind;
+    vec2 churn = vec2(fbm(flat_at * 1.6 + vec2(t * 0.21, 3.7)), fbm(flat_at * 1.6 + vec2(8.3, -t * 0.17))) - 0.5;
+    float slow = fbm(flat_at * 0.7 + vec2(t * 0.06, t * 0.025) + churn * 1.2 * wind);
+    float quick = fbm(flat_at * 0.9 + vec2(t * 0.42, t * 0.12) + churn * 1.5);
+    float billow = 0.55 + 0.9 * mix(slow, quick, 0.6 * wind);
     // Thicker the further down into it.
     float depth_in = clamp(1.0 - dot(at - g0, up) / max(top, 1e-3), 0.0, 1.0);
-    float fog = 1.0 - exp(-inside * 2.0 * s_thick / 100.0 * billow * (0.5 + depth_in));
+    // It thickens a little in silence, and in frightening music.
+    float settle = 1.0 + 0.3 * u_sound_silence + 0.4 * u_sound_scary_music;
+    float fog = 1.0 - exp(-inside * 2.0 * s_thick / 100.0 * settle * billow * (0.5 + depth_in));
     float light = dot(film, vec3(0.3, 0.59, 0.11));
     vec3 mist = mix(vec3(0.62, 0.66, 0.72), vec3(0.85, 0.88, 0.92), billow - 0.55) * (0.6 + 0.5 * light);
     return vec4(mix(film, mist, fog * u_world_ready), 1.0);

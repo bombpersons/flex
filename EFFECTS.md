@@ -36,6 +36,15 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Kaleidoscope**: every part of a kaleidoscope on a slider: arms, nested folds, tiling, tunnels,
   which part of the film it sees, colour and trails.
 - **Melt**: a turning kaleidoscope with glowing trails that change colour; beats kick it.
+- **Synesthesia**: the picture shows what kind of sound it hears: explosions send out shockwaves,
+  music lights up neon edges, singing glows gold, laughter throws confetti, rain falls, fire burns,
+  thunder flashes, crowds snap cameras, engines rush and silence goes still.
+- **Kapow**: comic-book sound effects burst out of the picture as you hear them (BOOM, POW, HA HA,
+  SPLASH, VROOM and more), with notes floating up from the music.
+- **Mood Ring**: the film's colours follow how its music feels: warm when it's happy, cold when
+  it's sad, a pink glow when it's tender, loud, red or ghostly when it's exciting, angry or scary.
+- **Studio Audience**: sitcom LAUGH, APPLAUSE, ON AIR and QUIET signs light up as Flex hears
+  laughter, clapping, talking and silence.
 - **Dream**: a DeepDream-like feedback loop where edges curl into tendrils, bright
   patches blossom and details sprout texture.
 - **Depth**: uses a neural network's guess at how far away everything is, for rainbow
@@ -202,6 +211,7 @@ don't declare them yourself:
 | `float u_level`, `u_bass`, `u_mid`, `u_treble` | how loud the sound is overall, below 150 Hz, 150 Hz–2 kHz and above 2 kHz (0–1, with `audio = true`) |
 | `float u_beat` | 1 on a beat (a jump in the bass), fading to 0 in about half a second |
 | `sampler2D u_spectrum` | the sound's spectrum: x is frequency (30 Hz to 11 kHz, log-spaced, 64 bands), y is age (0 is now, 1 is about two seconds ago); values 0–1 in `.r` |
+| `float u_sound_speech`, `u_sound_music`, … | what kind of sound it is, 0–1, with `audio = true` (see [Sound](#sound)) |
 | `float depth_at(vec2 uv)` | a function: how near that point of the screen is, from 0 (far) to 1 (near) (with `depth = true`; 0 until the first depth map arrives) |
 | `vec4 u_ground` | with `depth = true`: the floor, a table or whatever else is flat and level, found from depth. At a point of the picture (0 to 1, y up) its depth is `dot(vec3(x, y, 1.0), u_ground.xyz)`, and `u_ground.w` is how sure that is, from 0 to 1 |
 | `sampler2D u_depth`, `float u_has_depth` | the depth map itself, covering the picture rather than the screen, and 1 once there is one |
@@ -282,13 +292,49 @@ the shader gets the chosen option's position (0, 1, ...).
 
 ### Sound
 
-With `audio = true`, a filter inside mpv measures how loud each of 32 frequency bands is, so
-it works for anything Flex can play, YouTube included, and nothing reads the file a second
-time. It reports about 5 to 10 times a second and values ease between reports, so sound
-moves things a little less sharply than the picture changes, and very short sounds can be
-missed. `u_spectrum` is stretched to its 64 bands from those 32. Levels are against the
-loudest sound of the last few seconds, so quiet scenes still move things and explosions
-don't max everything out for long.
+With `audio = true`, effects hear whatever the computer is playing, recorded back from the
+default output: the video, and also music from anywhere else, so they keep reacting with the
+video muted. That works on Windows, on macOS 14.6 and later, and on Linux with a PulseAudio or
+PipeWire sound server. It can take a couple of seconds to start. Where it can't be recorded,
+effects hear the video's own sound from mpv instead: through Flex's patched libmpv, or else a
+filter inside mpv that reports only 5 to 10 times a second, so very short sounds can be missed.
+
+Flex measures how loud each of 32 frequency bands is; `u_spectrum` is stretched to its 64 bands
+from those. Levels are against the loudest sound of the last few seconds, so quiet scenes still
+move things and explosions don't max everything out for long.
+
+The `u_sound_*` values say what kind of sound it is. YAMNet (Google's, trained on AudioSet)
+listens to the last second, every half second, on the CPU, and each value is the likeliest of a
+group of AudioSet's 521 kinds of sound, eased so it doesn't jump. Several can be high at once
+(singing is also music), and film soundtracks mix things, so treat them as hints: fade things
+in with them rather than switching on a threshold. They need the recording or the patched
+libmpv, and stay 0 with only mpv's filter.
+
+Synesthesia, Kapow, Mood Ring and Studio Audience are built around them. Many others use them
+too: the storm pours with heard rain and flashes with thunder, snow, fog, lanterns and fish
+answer wind and bangs, ghosts and wall eyes come out in silence and scary music, puppet jaws
+follow voices rather than music, anime eyes cry when someone does, and so on.
+
+| Value | What counts |
+|---|---|
+| `u_sound_speech` | talking, narration, a speech synthesizer |
+| `u_sound_shouting` | shouts, yells, screams |
+| `u_sound_laughter` | laughing, giggling |
+| `u_sound_crying` | crying, sobbing, wailing |
+| `u_sound_singing` | singing, choirs, rapping, humming |
+| `u_sound_music` | any music |
+| `u_sound_crowd` | cheering, applause, a crowd, chatter |
+| `u_sound_animals` | any animal, birds and insects included |
+| `u_sound_vehicles` | cars, trains, boats, aircraft, engines |
+| `u_sound_explosions` | explosions, gunfire, fireworks, booms |
+| `u_sound_thunder` | thunder and thunderstorms |
+| `u_sound_water` | water, rain, streams, the sea |
+| `u_sound_wind` | wind, rustling leaves |
+| `u_sound_fire` | fire, crackling |
+| `u_sound_alarms` | alarms, sirens, phones, whistles |
+| `u_sound_impacts` | thuds, bangs, smashes, things breaking |
+| `u_sound_silence` | silence |
+| `u_sound_happy_music`, `u_sound_sad_music`, `u_sound_tender_music`, `u_sound_exciting_music`, `u_sound_angry_music`, `u_sound_scary_music` | how the music feels, as shares of `u_sound_music`: together they come to about as much as it does, split by which mood it sounds most like. They're rougher guesses than the rest, so lean on them gently |
 
 ### Depth
 
@@ -389,8 +435,8 @@ from 0 to 1 over the picture alone. Subtitles can still sit in the bars.
 ### Subtitles
 
 With Flex's patched libmpv (`packaging/mpv`), subtitles are kept out of `u_video` and laid over
-the finished effect, so effects never distort them, and sound reactions come from the real
-samples. With an ordinary libmpv, subtitles go through the effect as part of the picture.
+the finished effect, so effects never distort them. With an ordinary libmpv, subtitles go through
+the effect as part of the picture.
 
 ## Testing
 
@@ -400,6 +446,6 @@ samples. With an ordinary libmpv, subtitles go through the effect as part of the
   log (Settings → "Open logs folder").
 - F3 while a video plays opens a window for choosing the effect and changing its
   settings with sliders while you watch (plus Anime4K and SVP), with meters for the
-  sound levels. Changes are kept, the same as in Settings.
+  sound levels and what kind of sound it hears. Changes are kept, the same as in Settings.
 - F2 shows which effect is on, the time it's given, and the sound levels.
 - `flex --windowed some-video.mkv` starts Flex straight into a video.

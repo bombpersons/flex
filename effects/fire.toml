@@ -1,5 +1,5 @@
 name = "Fire People"
-description = "People burn from the feet up, with flames that follow them around."
+description = "People burn from the feet up, with flames that follow them around and flare up at the sound of fire, explosions or wild music."
 suits = ["action"]
 segment = true
 feedback = true

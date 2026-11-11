@@ -1,5 +1,5 @@
 name = "Blush Meter"
-description = "Faces go redder the louder the scene gets, until steam comes out of their ears."
+description = "Faces go redder the louder the scene gets, until steam comes out of their ears; laughter makes them blush, and shouting makes them boil."
 suits = ["close", "dialogue"]
 faces = true
 mesh = true

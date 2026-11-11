@@ -1,5 +1,5 @@
 name = "Wallpaper Crawl"
-description = "Walls writhe, and now and then eyes open in them and watch the people in the room."
+description = "Walls writhe, and now and then eyes open in them and watch the people in the room: more of them when it goes quiet or the music turns scary, and all at once at a scream."
 suits = ["wide"]
 camera = true
 segment = true

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Turns the two networks that look closer at a face into the files face.rs runs.
 
-    convert_detail.py mesh face_landmarks_detector.tflite ../../src/face_mesh.bin
-    convert_detail.py head mobilenetv2.onnx ../../src/head_angle.bin
+    convert_detail.py mesh face_landmarks_detector.tflite ../../../../models/face_mesh.bin
+    convert_detail.py head mobilenetv2.onnx ../../../../models/head_angle.bin
     convert_detail.py mesh face_landmarks_detector.tflite --reference picture.png out.rgb out.bin
     convert_detail.py head mobilenetv2.onnx --reference picture.png out.rgb out.bin
 

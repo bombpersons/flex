@@ -1,5 +1,6 @@
 // Googly Eyes: each pupil is a little physics simulation. It stays put as the head moves, falls,
-// and bounces off the rim. Its state is six numbers an eye in the alpha of the bottom row of u_prev.
+// and bounces off the rim, and bangs and explosions rattle it. Its state is six numbers an eye in the
+// alpha of the bottom row of u_prev.
 
 struct Face {
     vec2 right, left, eyes, nose, mouth, up, across;
@@ -37,6 +38,7 @@ vec4 effect(vec2 uv) {
     vec2 p = uv * aspect;
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     float alpha = 1.0;
+    float rattle = clamp(u_sound_impacts + u_sound_explosions, 0.0, 1.0);
     for (int i = 0; i < MAX_FACES; i++) {
         for (int e = 0; e < 2; e++) {
             int base = (i * 2 + e) * 6;
@@ -56,6 +58,8 @@ vec4 effect(vec2 uv) {
                 vec2 o = offset - (at - last) / radius * 0.8;
                 vec2 v = speed * 0.985 + vec2(0.0, -0.02);
                 v += vec2(sin(u_time * 31.0 + float(base)), cos(u_time * 23.0 + float(base))) * u_beat * s_react / 100.0 * 0.05;
+                // Bangs shake them faster and harder than the beat does.
+                v += vec2(sin(u_time * 67.0 + float(base) * 1.3), cos(u_time * 53.0 + float(base) * 0.7)) * rattle * s_react / 100.0 * 0.08;
                 o += v;
                 float out_by = length(o);
                 if (out_by > 0.62) {

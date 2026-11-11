@@ -1,5 +1,5 @@
 name = "Fish Shoal"
-description = "A shoal of glowing fish swims loops through the room, weaving behind and in front of people, and stays there as the camera moves."
+description = "A shoal of glowing fish swims loops through the room, weaving behind and in front of people, and stays there as the camera moves, scattering when something bangs or someone shouts."
 suits = ["wide"]
 camera = true
 cuts = true

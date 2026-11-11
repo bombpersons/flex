@@ -1,5 +1,5 @@
 name = "Snow Globe"
-description = "Snow falls through the scene behind whatever's near, drifts on the air, settles on things, and a beat knocks it off again."
+description = "Snow falls through the scene behind whatever's near, drifts on the air and blows in any wind it hears, settles on things, and a beat or a bang knocks it off again."
 suits = ["wide"]
 camera = true
 depth = true

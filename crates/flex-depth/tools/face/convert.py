@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Turns YuNet's ONNX file into src/yunet.bin, the plan and weights face.rs runs.
+"""Turns YuNet's ONNX file into models/yunet.bin, the plan and weights face.rs runs.
 
-    convert.py face_detection_yunet_2026may.onnx ../../src/yunet.bin
+    convert.py face_detection_yunet_2026may.onnx ../../../../models/yunet.bin
     convert.py face_detection_yunet_2026may.onnx --reference picture.png out.rgb out.bin
 
 The file is a little-endian u32 giving the length of a JSON plan, the plan, then the weights

@@ -23,10 +23,17 @@ vec4 effect(vec2 uv) {
     float shot = mod(u_shot_start * 100.0, 971.0);
     float scene_distance = world_distance(depth_at(uv));
     vec3 tint = s_colour > 40.0 ? hue(s_colour / 360.0) * 1.3 : vec3(1.0, 0.72, 0.38);
+    float react = s_react / 100.0;
+    // Singing or tender music warms them and turns them up.
+    float warm = min(u_sound_singing + u_sound_tender_music, 1.0) * react;
+    tint = mix(tint, tint * vec3(1.15, 0.9, 0.65), min(0.5 * warm, 1.0)) * (1.0 + 0.3 * warm);
+    // Wind heard in the film sways them further, and bangs and explosions jolt them.
+    float wind = u_sound_wind * react;
+    float jolt = max(u_sound_explosions, u_sound_impacts) * react;
     vec3 glow = vec3(0.0);
     vec3 paper = vec3(0.0);
     float covered = 0.0;
-    float pulse = 1.0 + 0.5 * u_beat * s_react / 100.0;
+    float pulse = 1.0 + 0.5 * u_beat * react;
     // Where the camera is and which way it's looking, in the world.
     mat3 to_world = transpose(u_world_rotation);
     vec3 camera = -(to_world * u_world_offset);
@@ -50,7 +57,9 @@ vec4 effect(vec2 uv) {
                 if (away < 0.15) continue;
                 vec2 at = place.xy;
                 // They sway a little on their strings.
-                at.x += sin(u_time * (0.6 + 0.5 * hash(seed + 8.0)) + seed.x * 3.0) * 0.006 / away;
+                at.x += sin(u_time * (0.6 + 0.5 * hash(seed + 8.0)) + seed.x * 3.0) * (0.006 + 0.012 * wind) / away;
+                at.x += (0.5 + 0.5 * sin(u_time * 0.4 + seed.y)) * 0.01 * wind / away;
+                at += vec2(sin(u_time * 13.0 + seed.z * 5.0), sin(u_time * 17.0 + seed.x * 7.0)) * 0.005 * jolt / away;
                 vec2 d = (uv - at) * aspect;
                 float radius = 0.03 * s_size / 100.0 / away;
                 // Something nearer than the lantern is in front of it.

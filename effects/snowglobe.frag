@@ -1,6 +1,6 @@
 // Snow Globe: flakes in layers at different distances, hidden by anything nearer. Where the top
-// of something is, snow builds up in the alpha of u_prev, and a beat knocks it off again. The falling flakes take no
-// notice of the sound: they just drift on the air.
+// of something is, snow builds up in the alpha of u_prev, and a beat knocks it off again. The falling flakes drift on
+// the air, blown sideways by wind heard in the film, and bangs and explosions knock them about.
 
 float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -30,9 +30,10 @@ vec2 eddy(vec2 p, float t) {
 }
 
 // One layer of flakes, each drifting on the air and turning slowly around its own path.
-float flakes(vec2 p, float scale, float t, float layer) {
-    vec2 q = p * scale;
-    q += (eddy(p + layer * 4.3, t) + 0.4 * eddy(p * 2.6 + layer, t * 1.7)) * scale * 0.2;
+float flakes(vec2 p, float scale, float t, float layer, float wind, float knock) {
+    // Sheared, so that falling straight down here carries them sideways on the screen.
+    vec2 q = p * scale - vec2((p.y - 0.5) * wind * scale, 0.0);
+    q += (eddy(p + layer * 4.3, t) + 0.4 * eddy(p * 2.6 + layer, t * 1.7)) * scale * 0.2 * (1.0 + 1.0 * knock);
     q.y += t * (0.55 + 0.35 * hash(vec2(scale)));
     vec2 cell = floor(q);
     if (hash(cell + 2.0) > s_snow / 100.0) return 0.0;
@@ -60,7 +61,11 @@ vec4 effect(vec2 uv) {
     // Wrapped, so the sums below don't run out of precision over a long film.
     float t = mod(u_time, 900.0);
     float near = depth_at(at);
-    float kick = u_beat * s_shake / 100.0;
+    // Bangs and explosions knock the snow off things as a beat does.
+    float knock = max(u_sound_explosions, u_sound_impacts) * s_shake / 100.0;
+    float kick = max(u_beat * s_shake / 100.0, 0.6 * knock);
+    // Wind heard in the film blows the flakes sideways, in gusts.
+    float wind = u_sound_wind * 1.1 * (0.6 + 0.7 * noise(vec2(t * 0.23, 5.0)));
 
     // The top of something: nearer here than just above.
     float step_up = 3.0 / u_resolution.y;
@@ -80,7 +85,7 @@ vec4 effect(vec2 uv) {
         float layer = 0.2 + f * 0.25;
         // Each layer stays put in the air as the camera moves.
         vec2 at_layer = p - (world_pin(vec2(0.5), world_distance(layer)) - vec2(0.5)) * vec2(u_resolution.x / u_resolution.y, 1.0);
-        fall += flakes(at_layer, 46.0 - f * 11.0, t, f) * step(near, layer + 0.1) * (0.5 + f * 0.17);
+        fall += flakes(at_layer, 46.0 - f * 11.0, t, f, wind, knock) * step(near, layer + 0.1) * (0.5 + f * 0.17);
     }
     c += vec3(0.95, 0.97, 1.0) * fall;
     if (s_glass < 0.5) {

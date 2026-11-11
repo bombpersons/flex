@@ -1,5 +1,5 @@
 name = "Thunderstorm"
-description = "Rain sheets down through the scene behind whatever's close, lit by lightning that catches the distance first."
+description = "Rain sheets down through the scene behind whatever's close, lit by lightning that catches the distance first, and it pours and flashes harder when the film sounds stormy."
 suits = ["wide"]
 camera = true
 depth = true

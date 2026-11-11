@@ -57,6 +57,10 @@ jobs:
         run: cargo build --release --locked --workspace
       - name: Test
         run: cargo test --release --locked --workspace
+      # The networks video effects use, which go next to flex.exe.
+      - name: Models
+        shell: bash
+        run: mkdir -p target/release/models && cp models/*.bin models/*.safetensors target/release/models/
       - uses: actions/upload-artifact@v4
         with:
           name: flex-windows-x64
@@ -64,6 +68,7 @@ jobs:
             target/release/flex.exe
             target/release/flex.pdb
             target/release/flex-*.exe
+            target/release/models/
           retention-days: 14
 
   linux:
@@ -77,6 +82,9 @@ jobs:
         with:
           name: flex-libmpv-linux
           path: libmpv-linux
+      - name: What the build needs
+        # ALSA's headers, for recording the computer's sound (cpal).
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build

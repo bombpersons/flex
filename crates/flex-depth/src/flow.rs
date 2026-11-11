@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 
 use super::{Params, Tensors, read_safetensors, wino_u};
 
-const WEIGHTS: &[u8] = include_bytes!("flow.safetensors");
+const WEIGHTS: &str = "flow.safetensors";
 /// The picture it takes.
 pub const WIDTH: usize = 512;
 pub const HEIGHT: usize = 288;
@@ -588,7 +588,7 @@ pub struct Flow {
 
 impl Flow {
     pub fn new() -> Result<Self> {
-        let mut wt = Weights { t: read_safetensors(WEIGHTS)?, data: Vec::new() };
+        let mut wt = Weights { t: read_safetensors(&super::models::load(WEIGHTS)?)?, data: Vec::new() };
         let mut memory = Memory::default();
         let plane16 = TOKENS;
         let pictures = [0, 1].map(|_| Picture { input: memory.take(3 * HEIGHT * WIDTH), s16: memory.take(D * plane16), s8: memory.take(D * PIXELS8) });

@@ -1,8 +1,9 @@
 name = "Ghosts"
-description = "Pale see-through figures drift slowly through the room, staying where they are as the camera moves, and fading when anyone passes in front of them."
+description = "Pale see-through figures drift slowly through the room, staying where they are as the camera moves, and fading when anyone passes in front of them. They come out in silence and with sad or scary music, and flinch away from bangs."
 suits = ["wide", "quiet"]
 camera = true
 cuts = true
+audio = true
 
 [[settings]]
 key = "count"

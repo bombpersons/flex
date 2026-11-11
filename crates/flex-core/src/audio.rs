@@ -1,7 +1,7 @@
-//! Sound for video effects. Flex's patched libmpv hands over the samples it plays, which
-//! `SampleBands` measures about a hundred times a second. An ordinary libmpv can't do that, so
-//! there a filter inside mpv splits the sound into frequency bands and reports how loud each
-//! one is, several times a second (`filter_graph`, `read_levels`). `Analyser` turns either into
+//! Sound for video effects. The computer's own sound, recorded back, or the samples Flex's
+//! patched libmpv hands over, are measured by `SampleBands` about a hundred times a second.
+//! Without either, a filter inside mpv splits the sound into frequency bands and reports how loud
+//! each one is, several times a second (`filter_graph`, `read_levels`). `Analyser` turns any of them into
 //! levels, a beat and a spectrum. Nothing reads the file a second time, and it works for
 //! anything mpv can play.
 
@@ -205,11 +205,16 @@ pub struct Features {
     pub beat: f32,
     /// `HISTORY` rows of `BANDS` values, row 0 the newest.
     pub spectrum: Vec<f32>,
+    /// What kind of sound it is, 0 to 1 for each of flex-depth's `sound::KINDS`, eased. Empty
+    /// until it's known.
+    pub kinds: Vec<f32>,
+    /// The likeliest kinds of sound, for showing.
+    pub heard: String,
 }
 
 impl Default for Features {
     fn default() -> Self {
-        Self { level: 0.0, bass: 0.0, mid: 0.0, treble: 0.0, beat: 0.0, spectrum: vec![0.0; BANDS * HISTORY] }
+        Self { level: 0.0, bass: 0.0, mid: 0.0, treble: 0.0, beat: 0.0, spectrum: vec![0.0; BANDS * HISTORY], kinds: Vec::new(), heard: String::new() }
     }
 }
 

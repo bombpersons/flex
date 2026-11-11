@@ -1,5 +1,5 @@
 """Turns NeuFlow v2's checkpoint (github.com/neufieldrobotics/NeuFlow_v2, Apache 2.0, the "mixed" weights)
-into the half-precision file src/flow.rs embeds. Batch norms are folded into the convolutions before
+into models/flow.safetensors, the half-precision file src/flow.rs runs. Batch norms are folded into the convolutions before
 them, and the upscaling layers, which Flex doesn't use, are left out.
 
     python convert.py <NeuFlow_v2 checkout> <out.safetensors>

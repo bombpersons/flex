@@ -68,7 +68,11 @@ vec4 effect(vec2 uv) {
     }
 
     float flick = noise(vec2(t * 9.0, 1.0)) * 0.6 + noise(vec2(t * 23.0, 4.0)) * 0.4;
-    c *= 1.0 - s_flicker / 100.0 * 0.45 * smoothstep(0.35, 0.8, flick);
+    // Thunder, screams, alarms and scary music make the light stutter harder and more often.
+    float dread = clamp(u_sound_thunder + u_sound_shouting + u_sound_alarms + 0.7 * u_sound_scary_music, 0.0, 1.0);
+    c *= 1.0 - s_flicker / 100.0 * 0.45 * (1.0 + 0.75 * dread) * smoothstep(0.35 - 0.2 * dread, 0.8 - 0.25 * dread, flick);
+    // Thunder brings flashes of lightning too.
+    c *= 1.0 + s_flicker / 100.0 * 1.2 * u_sound_thunder * smoothstep(0.62, 0.8, noise(vec2(t * 14.0, 7.0)));
     vec2 off = uv - 0.5;
     c *= 1.0 - dot(off, off) * 1.3;
     c += (hash(uv * 311.0 + fract(t) * 91.0) - 0.5) * s_grain / 100.0 * 0.22;

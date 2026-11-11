@@ -38,6 +38,8 @@ done
 
 # Video effects: shaders and their settings, offered in Settings → Picture.
 cp -R "$ROOT/effects" "$DIR/effects"
+# The networks video effects use (flex checks they're the ones it was built with), and their licenses.
+cp -R "$ROOT/models" "$DIR/models"
 LICENSE_FILE=$(ls "$ROOT"/LICENSE* 2>/dev/null | head -1 || true)
 [[ -n $LICENSE_FILE ]] && cp "$LICENSE_FILE" "$DIR/LICENSE.txt"
 (cd "$ROOT" && cargo about generate --fail about.hbs) >"$DIR/licenses/rust-crates.txt"

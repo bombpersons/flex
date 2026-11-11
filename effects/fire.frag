@@ -40,10 +40,12 @@ vec4 effect(vec2 uv) {
     vec2 curl = vec2(fbm(p * 8.0 + vec2(0.0, -t * 1.6)) - 0.47, 0.0);
     vec2 from = uv - vec2(curl.x * 0.012, 0.0045 + 0.0015 * s_height / 100.0);
     float heat = u_frame < 2 ? 0.0 : texture(u_prev, from).a;
-    float cooling = mix(0.93, 0.975, clamp(s_height / 200.0, 0.0, 1.0)) * (0.985 + 0.012 * u_bass * s_react / 100.0);
-    heat *= cooling;
-    float tongues = smoothstep(0.42, 0.7, fbm(p * 14.0 + vec2(0.0, -t * 2.5)));
-    heat = max(heat, burning * tongues * (1.0 + 0.5 * u_beat * s_react / 100.0));
+    // The sound of fire, explosions and angry or exciting music make the flames flare up higher.
+    float roar = clamp(u_sound_fire + u_sound_explosions + 0.7 * (u_sound_angry_music + u_sound_exciting_music), 0.0, 1.0) * s_react / 100.0;
+    float cooling = mix(0.93, 0.975, clamp(s_height / 200.0, 0.0, 1.0)) * (0.985 + 0.012 * u_bass * s_react / 100.0 + 0.012 * roar);
+    heat *= min(cooling, 0.99);
+    float tongues = smoothstep(0.42 - 0.1 * roar, 0.7, fbm(p * 14.0 + vec2(0.0, -t * 2.5)));
+    heat = max(heat, burning * tongues * (1.0 + 0.5 * u_beat * s_react / 100.0 + 0.4 * roar));
 
     float char = burning * s_char / 100.0;
     vec3 shown = c * (1.0 - char * 0.75) + vec3(0.25, 0.05, 0.0) * char * smoothstep(0.55, 0.8, fbm(p * 30.0 + t));
