@@ -32,8 +32,8 @@ Scored separately on each dataset's validation set, as IoU (ATR's: its last 500 
 DensePose's: its minival set), and for CENTRES, how many people's centres are found and how
 many person pixels point within 6 pixels of theirs. SEG_ROOT, SEG_OUT, SEG_PANOPTIC,
 SEG_DENSEPOSE (where DensePose's files go), SEG_DENSEPOSE_TRAIN and SEG_DENSEPOSE_VAL (which of
-them), SEG_MINUTES, SEG_BATCH, SEG_EVAL_MINUTES and SEG_LIMIT (only the first that many pictures
-of each set) are for trying it out away from Kaggle; with SEG_FETCH=1 it downloads the datasets
+them), SEG_MINUTES, SEG_BATCH, SEG_EVAL_MINUTES and SEG_LIMIT (only that many pictures of each
+set, spread through it) are for trying it out away from Kaggle; with SEG_FETCH=1 it downloads the datasets
 itself (as on Colab and Modal).
 """
 
@@ -384,6 +384,8 @@ def centres(scene, people):
         return t
     t[3] = scene != IGNORE
     for m in people:
+        if not m.any():
+            continue  # cropped out
         cy, cx = YS[m].mean(), XS[m].mean()
         t[0] = np.maximum(t[0], np.exp(-((XS - cx) ** 2 + (YS - cy) ** 2) / (2 * CENTRE_SIGMA**2)))
         t[1][m] = (cx - XS[m]) / HEIGHT
@@ -737,7 +739,7 @@ def main():
     if os.environ.get("SEG_LIMIT"):
         n = int(os.environ["SEG_LIMIT"])
         coco_train, coco_val, ade_train, ade_val, atr_train, atr_val, dp_train, dp_val = (
-            x[:n] for x in (coco_train, coco_val, ade_train, ade_val, atr_train, atr_val, dp_train, dp_val)
+            x[:: max(1, len(x) // n)][:n] for x in (coco_train, coco_val, ade_train, ade_val, atr_train, atr_val, dp_train, dp_val)
         )
 
     check_labels("COCO", coco_train)
@@ -767,7 +769,7 @@ def main():
     began = time.time()
     total = MINUTES * 60 - (began - START)
     print(f"setup took {(began - START) / 60:.1f} min, training for {total / 60:.0f} min", flush=True)
-    history, best, step, running, shown = [], -1.0, 0, 0.0, time.time()
+    history, best, step, running, shown, skipped = [], -1.0, 0, 0.0, time.time(), 0
     next_eval = began + EVAL_MINUTES * 60
 
     def checkpoint():
@@ -808,6 +810,11 @@ def main():
             g["lr"] = lr
         rgb, y, t = rgb.to(device, non_blocking=True), y.to(device, non_blocking=True), t.to(device, non_blocking=True)
         loss = loss_of(logits_of(head, features(depth, rgb)), y, t)
+        if not torch.isfinite(loss):
+            skipped += 1
+            assert skipped <= 20, "the loss keeps coming out as NaN or infinite"
+            print(f"step {step}: loss {loss.item()}, batch skipped", flush=True)
+            continue
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
