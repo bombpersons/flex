@@ -25,6 +25,7 @@ mod logging;
 mod mpv;
 mod music_player;
 mod picture;
+mod restyle;
 mod player;
 mod scenery;
 mod screens;

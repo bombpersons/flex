@@ -70,6 +70,11 @@ pub struct Manifest {
     /// `u_camera`, `u_handheld`, `u_pace`, `u_scene`). Runs depth, masks, faces and the sound.
     #[serde(default)]
     pub scene: bool,
+    /// Redraw the whole picture with a network (an anime style, say) before the shader sees it:
+    /// `u_video` is the redrawn picture, and `u_original` the real one. Names the choice setting
+    /// that picks the network: its options' ids are the networks' (see `RESTYLES`).
+    #[serde(default)]
+    pub restyle: Option<String>,
     /// Size to work at, relative to the screen (0.25–1): lower is lighter on the GPU.
     #[serde(default = "full")]
     pub scale: f32,
@@ -90,7 +95,7 @@ fn yes() -> bool {
 
 impl Default for Manifest {
     fn default() -> Self {
-        Self { name: String::new(), description: String::new(), suits: Vec::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, camera: false, scale: 1.0, shuffle: true, settings: Vec::new() }
+        Self { name: String::new(), description: String::new(), suits: Vec::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, camera: false, restyle: None, scale: 1.0, shuffle: true, settings: Vec::new() }
     }
 }
 
@@ -174,13 +179,15 @@ pub struct ActiveEffect {
     pub depth: bool,
     pub segment: bool,
     pub faces: bool,
+    /// Whether it draws on a restyled picture (see `Manifest::restyle`).
+    pub restyle: bool,
     pub scale: f32,
     /// `s_<key>` = number, bool (0/1) or choice (its index).
     pub uniforms: Vec<(String, f32)>,
 }
 
 /// What drawing the video needs, across every effect that's on or about to be.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Needs {
     pub audio: bool,
     /// Depth, which masks are made on top of.
@@ -195,9 +202,15 @@ pub struct Needs {
     pub stats: bool,
     pub scene: bool,
     pub camera: bool,
+    /// The network to restyle the picture with (see `Manifest::restyle`): the chosen effect's,
+    /// or the one fading out's. One at a time: shuffle doesn't start them ahead.
+    pub restyle: Option<String>,
     /// The largest size any of them works at (0.25–1).
     pub scale: f32,
 }
+
+/// The networks `Manifest::restyle` can pick from, by id.
+pub const RESTYLES: [&str; 7] = ["hayao", "hayao-warm", "hayao-vivid", "shinkai", "shinkai-bold", "ghibli", "sketch"];
 
 /// What a manifest's `suits` can have in it.
 pub const SUITS: [&str; 5] = ["close", "wide", "action", "dialogue", "quiet"];
@@ -664,7 +677,7 @@ impl Effects {
             let id = Some(e.id.as_str());
             self.on && (id == self.chosen.as_deref() || id == fading || (self.shuffle.on && self.in_shuffle(&e.id)))
         });
-        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, camera: false, scale: 0.25 };
+        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, camera: false, restyle: None, scale: 0.25 };
         for e in counted {
             let m = &e.manifest;
             // Shuffle needs to know about the shot to choose an effect that suits it.
@@ -683,7 +696,22 @@ impl Effects {
             needs.scene |= scene;
             needs.scale = needs.scale.max(usable_scale(m.scale));
         }
+        if self.on {
+            needs.restyle = [self.chosen.as_deref(), fading].into_iter().flatten().find_map(|id| self.restyle_for(id));
+            // Restyled pictures are steadied along the movement.
+            needs.flow |= needs.restyle.is_some();
+        }
         needs
+    }
+
+    /// The network an effect restyles the picture with, if it does.
+    fn restyle_for(&self, id: &str) -> Option<String> {
+        let e = self.effects.iter().find(|e| e.id == id)?;
+        let key = e.manifest.restyle.as_deref()?;
+        let spec = e.settings().find(|s| s.key == key);
+        let picked = self.value(id, key).and_then(serde_json::Value::as_str).map(str::to_owned);
+        let first = spec.and_then(|s| s.default.as_ref()?.as_str().map(str::to_owned)).or_else(|| spec?.options.first().map(|o| o.id.clone()));
+        picked.or(first).filter(|m| RESTYLES.contains(&m.as_str()))
     }
 
     fn roll(&mut self) -> f32 {
@@ -794,6 +822,7 @@ impl Effects {
             depth: e.manifest.depth,
             segment: e.manifest.segment,
             faces: e.manifest.faces,
+            restyle: e.manifest.restyle.is_some(),
             scale: usable_scale(e.manifest.scale),
             uniforms,
         }
@@ -902,6 +931,34 @@ mod tests {
         assert!(effects.chosen().is_none(), "after the last comes off");
         effects.cycle(&db);
         assert_eq!(effects.chosen().map(|e| e.id.as_str()), Some("dream"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_restyled_effect_asks_for_the_style_its_setting_picks() {
+        let root = std::env::temp_dir().join(format!("flex-effects-restyle-{}", std::process::id()));
+        write(&root, "anime.frag", "");
+        write(
+            &root,
+            "anime.toml",
+            "restyle = \"style\"\n[[settings]]\nkey = \"style\"\nlabel = \"Style\"\ntype = \"choice\"\ndefault = \"hayao\"\n\
+             options = [{ id = \"hayao\", label = \"Hayao\" }, { id = \"shinkai\", label = \"Shinkai\" }]\n",
+        );
+        write(&root, "plain.frag", "");
+        let db = Db::open_in_memory().unwrap();
+        let mut effects = Effects::new(std::slice::from_ref(&root), &db);
+        effects.choose(Some("plain"), &db);
+        assert_eq!(effects.needs().restyle, None);
+        assert!(!effects.active().unwrap().restyle);
+        effects.choose(Some("anime"), &db);
+        let needs = effects.needs();
+        assert_eq!(needs.restyle.as_deref(), Some("hayao"));
+        assert!(needs.flow, "restyled pictures are moved along with the picture");
+        assert!(effects.active().unwrap().restyle);
+        effects.set_setting("anime", "style", serde_json::json!("shinkai"), &db);
+        assert_eq!(effects.needs().restyle.as_deref(), Some("shinkai"));
+        effects.set_setting("anime", "style", serde_json::json!("nonsense"), &db);
+        assert_eq!(effects.needs().restyle, None, "only styles there are");
         let _ = std::fs::remove_dir_all(&root);
     }
 

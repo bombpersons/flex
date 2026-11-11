@@ -344,6 +344,8 @@ pub struct Shared {
     pub faces: crate::faces::Link,
     pub motion: crate::flow::Link,
     pub camera: crate::camera::Link,
+    /// The picture redrawn in a style, for effects that ask for one.
+    pub restyle: crate::restyle::Link,
     /// The effect's GL side, used in the player's paint callback.
     pub effect_renderer: std::sync::Arc<std::sync::Mutex<crate::effects::Renderer>>,
     /// The last playback state sent to plugins.
@@ -406,6 +408,7 @@ impl Shared {
             faces: Default::default(),
             motion: Default::default(),
             camera: Default::default(),
+            restyle: Default::default(),
             playback_sent: None,
             playback_last: None,
             awake: Default::default(),

@@ -1,0 +1,52 @@
+name = "Drawn World"
+description = "Real people in an anime world: everything but people redrawn by AnimeGANv3 (Asher Chan's network, free for non-commercial use only), in the style picked. The style is downloaded the first time (4–7 MB)."
+restyle = "style"
+segment = true
+
+[[settings]]
+key = "style"
+label = "Style"
+type = "choice"
+default = "ghibli"
+options = [
+    { id = "hayao", label = "Hayao" },
+    { id = "hayao-warm", label = "Hayao, warmer" },
+    { id = "hayao-vivid", label = "Hayao, more vivid" },
+    { id = "shinkai", label = "Shinkai" },
+    { id = "shinkai-bold", label = "Shinkai, bolder" },
+    { id = "ghibli", label = "Ghibli" },
+    { id = "sketch", label = "Ink sketch" },
+]
+
+[[settings]]
+key = "strength"
+label = "Strength"
+type = "number"
+detail = "How much of the drawing"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 100
+
+[[settings]]
+key = "edge"
+label = "Edge softness"
+type = "number"
+detail = "How gently the drawing fades into the real picture"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 30
+
+[[settings]]
+key = "outline"
+label = "Outline"
+type = "number"
+detail = "Ink around people, where the drawing meets the real picture"
+min = 0
+max = 100
+step = 10
+unit = "%"
+default = 40

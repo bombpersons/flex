@@ -12,10 +12,11 @@ pub enum Net {
     Faces,
     Flow,
     Camera,
+    Restyle,
 }
 
-const NETS: usize = 4;
-const NAMES: [&str; NETS] = ["depth", "faces", "movement", "camera"];
+const NETS: usize = 5;
+const NAMES: [&str; NETS] = ["depth", "faces", "movement", "camera", "restyle"];
 /// The most of the GPU's time the networks get between them.
 const BUDGET: f32 = 0.8;
 /// How quickly the averages follow.
@@ -132,14 +133,14 @@ mod tests {
     #[test]
     fn room_to_spare_changes_nothing() {
         let now = Instant::now();
-        let nets = [net(10.0, 40.0, Some(now)), net(5.0, 40.0, Some(now)), Seen::default(), Seen::default()];
+        let nets = [net(10.0, 40.0, Some(now)), net(5.0, 40.0, Some(now)), Seen::default(), Seen::default(), Seen::default()];
         assert_eq!(stretch(&nets, now), 1.0);
     }
 
     #[test]
     fn too_much_work_is_spread_out_to_fit_the_budget() {
         let now = Instant::now();
-        let nets = [net(40.0, 40.0, Some(now)), net(40.0, 40.0, Some(now)), Seen::default(), Seen::default()];
+        let nets = [net(40.0, 40.0, Some(now)), net(40.0, 40.0, Some(now)), Seen::default(), Seen::default(), Seen::default()];
         // Each wants all of the GPU: together that's twice it, over the budget.
         assert!((stretch(&nets, now) - 2.0 / BUDGET).abs() < 1e-4);
     }
@@ -148,7 +149,7 @@ mod tests {
     fn a_network_thats_stopped_doesnt_count() {
         let now = Instant::now();
         let long_ago = now.checked_sub(ACTIVE * 2);
-        let nets = [net(40.0, 40.0, Some(now)), net(40.0, 40.0, long_ago), Seen::default(), Seen::default()];
+        let nets = [net(40.0, 40.0, Some(now)), net(40.0, 40.0, long_ago), Seen::default(), Seen::default(), Seen::default()];
         assert!((stretch(&nets, now) - 1.0 / BUDGET).abs() < 1e-4);
     }
 

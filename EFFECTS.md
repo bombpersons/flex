@@ -47,6 +47,10 @@ Flex comes with these to start from, in [`effects`](effects):
   laughter, clapping, talking and silence.
 - **Dream**: a DeepDream-like feedback loop where edges curl into tendrils, bright
   patches blossom and details sprout texture.
+- **Anime**: the whole film redrawn as anime by a neural network, in the style of Hayao
+  Miyazaki's films, Makoto Shinkai's or Studio Ghibli's, or as an ink sketch, with inked outlines.
+- **Drawn World**: real people in an anime world: everything but people redrawn.
+- **Drawn People**: anime people in the real world: only people redrawn.
 - **Depth**: uses a neural network's guess at how far away everything is, for rainbow
   contours rippling through the scene, or fog.
 - **Distance**: an effect that grows with distance, or closeness: fog (in any two colours), prisms, heat haze,
@@ -134,7 +138,7 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Moustache Everyone**: a curly handlebar moustache under every nose.
 - **Love Beams**: hearts stream out of people's eyes the way they're facing.
 - **Kaleidoface**: a kaleidoscope of someone's face, centred on their nose as they move.
-- **Anime Eyes**: big drawn anime eyes, inked and shining, that blink when the real ones do, look where they look and sparkle on the beat.
+- **Anime Face**: an anime face for everyone: a smaller nose and mouth, a narrower jaw and a smaller chin (with a mesh), skin evened into flat cel shading, thin arched brows that rise and frown with the real ones, and big drawn eyes in several styles (drawn from the side in profile, where the face is reshaped too), inked and shining, that blink when the real ones do, look where they look and sparkle on the beat.
 - **Hypno Eyes**: eyes turn into spinning spirals.
 - **Perfect Symmetry**: each face is one half mirrored, which is more unsettling than you'd think.
 - **Spinning Features**: eyes and mouths turn round and round where they are.
@@ -221,7 +225,7 @@ don't declare them yourself:
 | `float ground_at(vec2 uv)`, `ceiling_at`, `water_at`, `plant_at`, `window_at` | functions: how much of that point is ground (floors, roads, grass, sand, snow: anything underfoot), ceiling, water, plants and trees, or a window, from 0 to 1 (with `segment = true`, from MoGe-2's head; 0 without it, and `u_has_more_masks` says which) |
 | `float body_skin_at(vec2 uv)`, `clothes_at` | functions: how much of that point is a person's bare skin, or their clothes (with `segment = true`, from MoGe-2's head). With `hair_at` they add up to `person_at`. `skin_at` is the face's skin, from the face mesh |
 | `int u_face_count`, `vec4 u_faces[MAX_FACES]` | how far through the arrays to look, and each face's box on screen: x0, y0, x1, y1 (with `faces = true`) |
-| `float u_face_seen[MAX_FACES]` | 0 to 1, fading as a face comes and goes; multiply by it so faces don't pop. It's 0 for empty slots |
+| `float u_face_seen[MAX_FACES]` | 1 while a face is found, blending in over a moment when it's first found, and 0 as soon as it's lost (a face's slot is kept for a moment in case it comes back, so don't draw it there). Multiply by it. It's 0 for empty slots |
 | `vec2 face_point(int face, int point)` | where on the screen a face's point is: 0 right eye, 1 left eye, 2 nose, 3 right corner of the mouth, 4 left (the person's own right and left) |
 | `float face_at(vec2 uv)` | a function: how much of any face is at that point of the screen, from 0 to 1, soft at the edges |
 | `vec3 mesh_point(int face, int n)`, `float u_face_mesh[MAX_FACES]` | a function: the mesh's point `n` (0 to 477, MediaPipe's numbering): x, y on screen and z, smaller nearer, in picture widths (with `mesh = true`). `u_face_mesh` says how much of a mesh that face has, from 0 for faces side-on |
@@ -267,6 +271,8 @@ cuts = true                    # scene cuts; default false
 stats = true                   # the picture's palette and brightness; default false
 scene = true                   # what sort of shot and scene this is; default false
 camera = true                  # where the camera is, for world_at (runs depth and masks); default false
+restyle = "style"              # draw on the picture redrawn by a network, picked by this choice
+                               # setting (see Restyled pictures); default none
 shuffle = false                # leave it out of shuffle unless someone adds it; default true
 suits = ["close", "dialogue"]  # with shuffle at scene cuts, come up more in these: close, wide,
                                # action, dialogue, quiet, if Suit the shot is on; default none
@@ -313,7 +319,7 @@ libmpv, and stay 0 with only mpv's filter.
 Synesthesia, Kapow, Mood Ring and Studio Audience are built around them. Many others use them
 too: the storm pours with heard rain and flashes with thunder, snow, fog, lanterns and fish
 answer wind and bangs, ghosts and wall eyes come out in silence and scary music, puppet jaws
-follow voices rather than music, anime eyes cry when someone does, and so on.
+follow voices rather than music, anime faces cry when someone does, and so on.
 
 | Value | What counts |
 |---|---|
@@ -359,6 +365,44 @@ holds the picture and the sound back by that much, usually under a tenth of a se
 each frame is drawn with the depth map made from it. It uses a fair bit of the GPU, so leave
 it off unless the effect uses it; the model is unloaded a little while after the last effect
 that wanted it. F2 and F3 show how long it's taking and at what size.
+
+### Restyled pictures
+
+With `restyle = "<key>"`, the effect draws on the picture redrawn by a neural network, in a
+style picked by its choice setting `<key>`, whose options' ids name the networks:
+
+- [AnimeGANv3](https://github.com/TachibanaYoshino/AnimeGANv3) by Asher Chan, the styles of
+  it that can be downloaded freely: `hayao`, `hayao-warm` and `hayao-vivid` (versions of Hayao
+  Miyazaki's films' style), `shinkai` and `shinkai-bold` (Makoto Shinkai's), `ghibli` (Studio
+  Ghibli's, from a bigger network that takes about half as long again) and `sketch` (black ink
+  on white). Free for non-commercial use only: its weights aren't shipped with Flex, but
+  downloaded from the author's own releases (4 MB each, 7 MB for `ghibli`) the first time a
+  style is wanted.
+
+```toml
+restyle = "style"
+
+[[settings]]
+key = "style"
+label = "Style"
+type = "choice"
+default = "hayao"
+options = [{ id = "hayao", label = "Hayao" }, { id = "shinkai", label = "Shinkai" }]
+```
+
+`u_video` is then the redrawn picture, once the first one has come (`u_has_restyled` is 1;
+until then it's the real one), and `u_original` the real picture, so an effect can show the
+drawing as it is, mix it with the film, or draw on top of it. The network runs on the GPU as
+compute shaders, up to once for every frame of the film, at about 180,000 pixels in the
+picture's own shape, smaller if it can't keep up. In between, the nearest drawing is moved
+along with what's moving in the picture, and the picture and sound are held back the few
+frames it takes, as for depth. Only one style runs at a time; F2 and F3 show which, how long
+it takes and at what size.
+
+```glsl
+uniform sampler2D u_original;  // the real picture (u_video is the drawing)
+uniform float u_has_restyled;  // 1 once there's a drawing
+```
 
 ### People, walls and sky
 

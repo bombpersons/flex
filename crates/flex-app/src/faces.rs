@@ -58,9 +58,10 @@ const MOST_WAITING: usize = 16;
 const SAME_FACE: f32 = 0.2;
 /// Detections in a row before a new face shows, which filters out one-off false ones.
 const CONFIRM: u32 = 2;
-/// How long a face that's gone missing is kept, and how long fading in or out takes (seconds).
+/// How long a face that's gone missing keeps its slot (seconds), so it has the same one if it's
+/// found again. It isn't shown meanwhile: only a single missed detection, with the face found
+/// either side of it, is filled in.
 const HOLD: f64 = 0.3;
-const FADE: f64 = 0.15;
 /// How much the detections around a report count, from the report's own outwards: reports
 /// are this many detections behind the newest, less one. A closer look takes longer, so it
 /// looks only one detection either side, to keep the picture from being held back further.
@@ -99,7 +100,7 @@ impl Status {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Shown {
     pub coords: [f32; COORDS],
-    /// 0 to 1, fading as the face comes and goes.
+    /// 1 where the face was found, 0 where it wasn't (in between when blended between frames).
     pub seen: f32,
 }
 
@@ -560,16 +561,22 @@ struct Track {
     recent: VecDeque<(u64, [f32; COORDS])>,
     updated: f64,
     hits: u32,
-    seen: f32,
 }
 
 impl Track {
     fn new(detection: u64, face: [f32; COORDS], now: f64) -> Self {
-        Self { recent: VecDeque::from([(detection, face)]), updated: now, hits: 1, seen: 0.0 }
+        Self { recent: VecDeque::from([(detection, face)]), updated: now, hits: 1 }
     }
 
     fn newest(&self) -> &[f32; COORDS] {
         &self.recent[self.recent.len() - 1].1
+    }
+
+    /// Whether it's to be shown at `detection`: confirmed, and found there, or found on both
+    /// sides of a single miss there.
+    fn shown_at(&self, detection: u64) -> bool {
+        let found = |d: u64| self.recent.iter().any(|(at, _)| *at == d);
+        self.hits >= CONFIRM && (found(detection) || (detection > 0 && found(detection - 1) && found(detection + 1)))
     }
 
     fn follow(&mut self, detection: u64, target: &[f32; COORDS], now: f64) {
@@ -635,7 +642,6 @@ impl Track {
 #[derive(Default)]
 struct Tracker {
     slots: [Option<Track>; MAX_FACES],
-    last: Option<f64>,
     detections: u64,
     /// Detections not reported yet: which, and the frame's position.
     unreported: VecDeque<(u64, f32)>,
@@ -647,8 +653,6 @@ impl Tracker {
     /// `found` is what's been detected at `now` (seconds) in the frame at `time` in the video.
     /// Returns the report for an earlier frame, now that the frames after it are known.
     fn update(&mut self, found: &[[f32; COORDS]], now: f64, time: f32) -> Option<Report> {
-        let dt = now - self.last.unwrap_or(now);
-        self.last = Some(now);
         let detection = self.detections;
         self.detections += 1;
 
@@ -680,13 +684,8 @@ impl Tracker {
             }
         }
 
-        let step = (dt / FADE) as f32;
         for slot in &mut self.slots {
-            let Some(track) = slot else { continue };
-            let fresh = now - track.updated <= HOLD;
-            let target = if fresh && track.hits >= CONFIRM { 1.0 } else { 0.0 };
-            track.seen = if target > 0.5 { (track.seen + step).min(1.0) } else { (track.seen - step).max(0.0) };
-            if !fresh && track.seen <= 0.0 {
+            if slot.as_ref().is_some_and(|track| now - track.updated > HOLD) {
                 *slot = None;
             }
         }
@@ -704,7 +703,7 @@ impl Tracker {
         let reach = self.reach();
         let mut slots: Slots = [None; MAX_FACES];
         for (slot, out) in self.slots.iter().zip(&mut slots) {
-            *out = slot.as_ref().map(|track| Shown { coords: track.at(detection, reach), seen: track.seen });
+            *out = slot.as_ref().map(|track| Shown { coords: track.at(detection, reach), seen: if track.shown_at(detection) { 1.0 } else { 0.0 } });
         }
         Some(Report { time, after_cut: false, slots })
     }
@@ -715,7 +714,7 @@ impl Tracker {
     }
 
     fn showing(&self) -> usize {
-        self.slots.iter().flatten().filter(|t| t.seen > 0.0).count()
+        self.slots.iter().flatten().filter(|t| t.hits >= CONFIRM && t.recent.back().is_some_and(|(at, _)| *at + 1 >= self.detections)).count()
     }
 }
 
@@ -737,12 +736,11 @@ mod tests {
     }
 
     #[test]
-    fn a_face_shows_after_being_confirmed_and_fades_in() {
+    fn a_face_shows_from_its_first_frame_once_confirmed() {
         let mut t = Tracker::default();
         let reports = feed(&mut t, 0, 16, |_| vec![face(0.2, 0.2)]);
         assert_eq!(reports[0].time, 0.0, "reports start at the first frame");
-        assert!(reports[0].slots[0].unwrap().seen > 0.0, "known to be real by the time it's reported");
-        assert_eq!(reports.last().unwrap().slots[0].unwrap().seen, 1.0);
+        assert!(reports.iter().all(|r| r.slots[0].unwrap().seen == 1.0), "known to be real by the time it's reported");
     }
 
     #[test]
@@ -763,15 +761,14 @@ mod tests {
     }
 
     #[test]
-    fn a_face_missed_briefly_is_held_then_fades() {
+    fn a_single_miss_is_filled_in_but_a_lost_face_goes_at_once() {
         let mut t = Tracker::default();
-        feed(&mut t, 0, 12, |_| vec![face(0.2, 0.2)]);
-        let held = feed(&mut t, 12, 13, |_| vec![]);
-        assert_eq!(held[0].slots[0].unwrap().seen, 1.0, "just one miss");
-        let back = feed(&mut t, 13, 14, |_| vec![face(0.2, 0.2)]);
-        assert_eq!(back[0].slots[0].unwrap().seen, 1.0);
-        feed(&mut t, 14, 40, |_| vec![]);
-        assert!(t.slots[0].is_none(), "should have gone");
+        let reports = feed(&mut t, 0, 40, |i| if i < 12 || i == 13 { vec![face(0.2, 0.2)] } else { vec![] });
+        let seen = |i: usize| reports[i].slots[0].map_or(0.0, |s| s.seen);
+        assert_eq!(seen(12), 1.0, "just one miss");
+        assert_eq!(seen(13), 1.0);
+        assert_eq!(seen(14), 0.0, "lost, so gone straight away");
+        assert!(t.slots[0].is_none(), "and its slot freed after a while");
     }
 
     #[test]

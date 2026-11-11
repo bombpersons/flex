@@ -165,6 +165,13 @@ YAMNet (models/sound.safetensors; what kind of sound is playing, for video effec
   License: Apache 2.0 (licenses/yamnet-LICENSE.txt).
   Source: https://github.com/tensorflow/models/tree/master/research/audioset/yamnet
 
+AnimeGANv3 by Asher Chan (redraws the picture as anime for the Anime, Drawn World and Drawn
+People effects)
+  Not included: downloaded from the author's own releases the first time a style is used.
+  License: free for non-commercial use only; commercial use needs the author's permission.
+  Source: https://github.com/TachibanaYoshino/AnimeGANv3 and
+  https://github.com/TachibanaYoshino/AnimeGANv3_Portrait_Inference (Ghibli and sketch styles)
+
 JASSUB $JASSUB_VERSION (built into flex.exe; draws subtitles in the web UI's player)
   JASSUB itself: MIT (licenses/jassub-LICENSE.txt). Its WebAssembly contains libass
   (ISC), FreeType (FTL or GPL 2), HarfBuzz (MIT), FriBidi (LGPL 2.1 or later) and their

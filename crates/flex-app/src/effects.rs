@@ -88,6 +88,9 @@ pub struct Renderer {
     faces: FaceGl,
     motion: NetFlowGl,
     camera: CameraGl,
+    restyle: RestyleGl,
+    /// How many texture units a fragment shader can have (16 at least): `u_original` is the 17th.
+    units: i32,
     shots: crate::shot_type::Tracker,
     cuts: CutGl,
     history: HistoryGl,
@@ -130,6 +133,8 @@ pub struct Frame {
     pub motion: Option<crate::flow::Link>,
     /// The camera worker, when the effect asked where the camera is.
     pub camera: Option<crate::camera::Link>,
+    /// The restyling worker, when the effect draws on a restyled picture.
+    pub restyle: Option<crate::restyle::Link>,
     /// Subtitles are to be kept out of the effect and laid on top of it.
     pub subtitles: bool,
 }
@@ -410,6 +415,9 @@ pub fn window(ctx: &egui::Context, open: &mut bool, sh: &mut Shared, frame: Opti
             if let Some(faces) = frame.and_then(|f| f.faces.as_ref()) {
                 ui.label(format!("Faces: {}", faces.status().describe()));
             }
+            if let Some(restyle) = frame.and_then(|f| f.restyle.as_ref()) {
+                ui.label(format!("Style: {}", restyle.status().describe()));
+            }
             if let Some(a) = frame.and_then(|f| f.audio.as_deref()) {
                 ui.separator();
                 ui.label("Sound");
@@ -512,6 +520,10 @@ static SOUND_UNIFORMS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::n
 /// Uniforms every effect gets.
 const HEADER: &str = "\
 uniform sampler2D u_video;
+// With restyle = \"<setting>\": u_video is the picture redrawn in the style picked, once one has
+// come (u_has_restyled is 1), and u_original the real one.
+uniform sampler2D u_original;
+uniform float u_has_restyled;
 uniform sampler2D u_prev;
 uniform vec2 u_resolution;
 uniform float u_time;
@@ -682,7 +694,8 @@ float clothes_at(vec2 uv) { return more_masks_at(uv, 1).a; }
 const int MAX_FACES = 8;
 uniform int u_face_count;
 // Each face: x0, y0, x1, y1 on screen. Its five points: right eye, left eye, nose, right and
-// left corners of the mouth. u_face_seen fades from 0 to 1 and back as faces come and go.
+// left corners of the mouth. u_face_seen is 1 while a face is found and 0 once it's lost, with
+// a moment's blend as one is found.
 uniform vec4 u_faces[MAX_FACES];
 uniform vec2 u_face_points[MAX_FACES * 5];
 uniform float u_face_seen[MAX_FACES];
@@ -1024,7 +1037,7 @@ impl Renderer {
             gl.blit_framebuffer(x0, y0, x0 + size.0, y0 + size.1, 0, 0, size.0, size.1, glow::COLOR_BUFFER_BIT, glow::NEAREST);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             let video = &o.cropped;
-            let holding = frame.depth.is_some() || frame.faces.is_some() || frame.motion.is_some() || frame.camera.is_some();
+            let holding = frame.depth.is_some() || frame.faces.is_some() || frame.motion.is_some() || frame.camera.is_some() || frame.restyle.is_some();
             if holding {
                 self.held.push(gl, video, size, frame.pts);
                 if let Some((words, _)) = &self.words {
@@ -1056,6 +1069,10 @@ impl Renderer {
             match &frame.camera {
                 Some(link) => self.camera.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
                 None => self.camera.delay = 0.0,
+            }
+            match &frame.restyle {
+                Some(link) => self.restyle.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
+                None => self.restyle.delay = 0.0,
             }
             // The picture is held back to the frame the networks have caught up with.
             let held_back = self.held_back();
@@ -1152,6 +1169,8 @@ impl Renderer {
             let history = if frame.needs.history { self.history.texture() } else { None };
             let flow = if frame.needs.flow { network_flow.or_else(|| self.flow.at(pts)) } else { None };
             let plate = if frame.needs.plate { self.plate.texture() } else { None };
+            let restyled = if frame.restyle.is_some() { self.restyle.draw(gl, version, vao, video_texture, flow, size, rect, pts) } else { None };
+            gl.bind_vertex_array(Some(vao));
             gl.active_texture(glow::TEXTURE5);
             gl.bind_texture(glow::TEXTURE_2D_ARRAY, history);
             gl.active_texture(glow::TEXTURE6);
@@ -1185,11 +1204,23 @@ impl Renderer {
                 has_face_map,
                 shot,
                 world: if frame.camera.is_some() { self.camera.at(pts) } else { None },
+                has_restyled: restyled.is_some(),
+                original: if self.units > 16 { 16 } else { 0 },
             };
 
-            // The effects, each at its working size.
+            // The effects, each at its working size. One drawing on the restyled picture has it
+            // as u_video, and the real one as u_original.
+            let picture_for = |effect: &ActiveEffect| if effect.restyle { restyled.unwrap_or(video_texture) } else { video_texture };
+            if self.units > 16 {
+                gl.active_texture(glow::TEXTURE16);
+                gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
+            }
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(picture_for(effect)));
             self.slots[front].draw(gl, effect, &given);
             if let Some((from, _)) = &frame.fading {
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(picture_for(from)));
                 self.slots[back].draw(gl, from, &given);
             }
 
@@ -1226,6 +1257,10 @@ impl Renderer {
                 gl.active_texture(unit);
                 gl.bind_texture(glow::TEXTURE_2D, None);
             }
+            if self.units > 16 {
+                gl.active_texture(glow::TEXTURE16);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+            }
             gl.active_texture(glow::TEXTURE5);
             gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
             gl.active_texture(glow::TEXTURE0);
@@ -1260,6 +1295,7 @@ impl Renderer {
             self.flow.release(gl);
             self.motion.release(gl);
             self.camera.release(gl);
+            self.restyle.release(gl);
             self.plate.release(gl);
             self.last_paint = None;
             if let Some(vao) = self.vao.take() {
@@ -1270,7 +1306,7 @@ impl Renderer {
 
     /// How far behind the picture is being held (seconds), which the sound has to match.
     pub fn held_back(&self) -> f32 {
-        self.depth.delay.max(self.faces.delay).max(self.motion.delay).max(self.camera.delay)
+        self.depth.delay.max(self.faces.delay).max(self.motion.delay).max(self.camera.delay).max(self.restyle.delay)
     }
 
     /// Whether a scene cut has reached `shown` in the video since this was last asked.
@@ -1294,6 +1330,7 @@ impl Renderer {
             let copy = compile(gl, &vertex_source(decl), &copy_source(decl, version.is_embedded()))?;
             match gl.create_vertex_array() {
                 Ok(vao) => {
+                    self.units = gl.get_parameter_i32(glow::MAX_TEXTURE_IMAGE_UNITS);
                     self.vao = Some(vao);
                     self.copy = Some(copy);
                     self.spectrum = create_spectrum(gl).map_err(|e| log::warn!("video effects: no spectrum texture: {e}")).ok();
@@ -1348,6 +1385,9 @@ struct Given<'a> {
     has_more_masks: bool,
     faces: &'a FaceUniforms,
     has_face_map: bool,
+    /// Whether there's a restyled picture yet, and the unit the real one's on.
+    has_restyled: bool,
+    original: i32,
 }
 
 impl Slot {
@@ -1520,6 +1560,9 @@ impl Slot {
                 gl.uniform_1_i32(at(name).as_ref(), 9 + i as i32);
             }
             gl.uniform_1_f32(at("u_has_face_map").as_ref(), if given.has_face_map { 1.0 } else { 0.0 });
+            let restyled = effect.restyle && given.has_restyled;
+            gl.uniform_1_i32(at("u_original").as_ref(), if restyled { given.original } else { 0 });
+            gl.uniform_1_f32(at("u_has_restyled").as_ref(), if restyled { 1.0 } else { 0.0 });
             for (name, value) in &effect.uniforms {
                 gl.uniform_1_f32(at(name).as_ref(), *value);
             }
@@ -1931,6 +1974,258 @@ impl DepthGl {
             self.next_map = 0;
             self.delay = 0.0;
             self.last_time = None;
+        }
+    }
+}
+
+/// Restyled pictures kept, so a held-back frame can have the one made from it.
+const RESTYLED: usize = 4;
+
+/// The fragment shader that moves a restyled picture along the movement to the frame shown,
+/// leaving the black bars as they are.
+fn restyle_source(version: &str, embedded: bool) -> String {
+    let precision = if embedded { "precision highp float;\n" } else { "" };
+    format!(
+        "{version}\n{precision}uniform sampler2D u_video;\nuniform sampler2D u_styled;\nuniform sampler2D u_flow;\nuniform float u_has_flow;\nuniform vec4 u_rect;\nuniform float u_dt;\n\
+         in vec2 v_uv;\nout vec4 flex_color;\n\
+         void main() {{\n    vec2 p = (v_uv - u_rect.xy) / max(u_rect.zw - u_rect.xy, vec2(1e-6));\n\
+         if (p != clamp(p, 0.0, 1.0)) {{ flex_color = texture(u_video, v_uv); return; }}\n\
+         // What's here now was here less how far it's moved since the restyled frame.\n\
+         vec2 moved = texture(u_flow, p).rg * u_has_flow * u_dt;\n\
+         flex_color = vec4(texture(u_styled, clamp(p - moved, 0.0, 1.0)).rgb, 1.0);\n}}\n"
+    )
+}
+
+/// Frames read back for the restyling worker (a frame late, so the CPU never waits for the GPU),
+/// the restyled pictures it sends back, and the one for the frame shown, moved along with the
+/// picture to it.
+#[derive(Default)]
+struct RestyleGl {
+    /// What frames are read back into, at the size the worker asked for.
+    capture: Option<(Target, glow::Buffer, (usize, usize))>,
+    failed: bool,
+    pending: Option<Fence>,
+    pending_time: f32,
+    /// The video time of the last frame sent, and of the last handed over.
+    last_time: Option<f32>,
+    handed: Option<f32>,
+    /// Restyled pictures: texture, size, and the position of their frame.
+    pictures: Vec<(glow::Texture, (usize, usize), Option<f32>)>,
+    next: usize,
+    /// The restyled picture for the frame shown, the size of the video.
+    out: Option<(Target, (i32, i32))>,
+    program: Option<glow::Program>,
+    /// How late pictures arrive after their frame (seconds), and the hold to match.
+    arrived: u32,
+    late: f32,
+    delay: f32,
+}
+
+impl RestyleGl {
+    /// Picks up a frame read back last time and hands it over, stores new restyled pictures, and
+    /// reads back this frame if the worker's free. As `DepthGl::update`.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn update(&mut self, gl: &glow::Context, link: &crate::restyle::Link, cuts: &CutGl, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32, clock: f32) {
+        unsafe {
+            if self.failed {
+                return;
+            }
+            if let Some(Fence(fence)) = self.pending.filter(|_| cuts.has_seen(self.pending_time)) {
+                match gl.client_wait_sync(fence, 0, 0) {
+                    glow::TIMEOUT_EXPIRED => {}
+                    status => {
+                        gl.delete_sync(fence);
+                        self.pending = None;
+                        if let (true, Some((_, pbo, (w, h)))) = (status != glow::WAIT_FAILED, &self.capture) {
+                            let bytes = w * h * 4;
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
+                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
+                            if !ptr.is_null() {
+                                let cut = cuts.reset_between(self.handed, self.pending_time);
+                                self.handed = Some(self.pending_time);
+                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), (*w, *h), self.pending_time, cut);
+                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                            }
+                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                        }
+                    }
+                }
+            }
+            for picture in link.take() {
+                let slot = self.next;
+                if self.pictures.len() < RESTYLED {
+                    match gl.create_texture() {
+                        Ok(t) => self.pictures.push((t, (0, 0), None)),
+                        Err(e) => {
+                            log::warn!("restyle: {e}");
+                            self.failed = true;
+                            return;
+                        }
+                    }
+                }
+                self.next = (slot + 1) % RESTYLED;
+                let (texture, kept, at) = &mut self.pictures[slot];
+                let (w, h) = (picture.size.0 as i32, picture.size.1 as i32);
+                gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                let data = glow::PixelUnpackData::Slice(Some(&picture.rgba));
+                if *kept != picture.size {
+                    gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, w, h, 0, glow::RGBA, glow::UNSIGNED_BYTE, data);
+                    for (param, value) in [(glow::TEXTURE_MIN_FILTER, glow::LINEAR), (glow::TEXTURE_MAG_FILTER, glow::LINEAR), (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE), (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE)] {
+                        gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
+                    }
+                    *kept = picture.size;
+                } else {
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, data);
+                }
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                *at = Some(picture.time);
+                let late = clock - picture.time;
+                if (0.0..0.5).contains(&late) {
+                    self.arrived += 1;
+                    self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
+                    if self.arrived >= HOLD_AFTER_MAPS {
+                        self.delay = next_delay(self.delay, self.late);
+                    }
+                }
+            }
+            if self.pending.is_none() && link.ready_for_frame(cuts.reset_between(self.handed, time)) && self.last_time != Some(time) {
+                // Just the picture, without black bars, at the size the worker wants for its shape.
+                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
+                let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
+                let wanted = link.size_for((x1 - x0) as f32 / (y1 - y0) as f32);
+                if self.capture.as_ref().is_none_or(|c| c.2 != wanted) {
+                    self.free_capture(gl);
+                    let made = create_target(gl, (wanted.0 as i32, wanted.1 as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|target| {
+                        let pbo = gl.create_buffer()?;
+                        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
+                        gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (wanted.0 * wanted.1 * 4) as i32, glow::STREAM_READ);
+                        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                        Ok((target, pbo, wanted))
+                    });
+                    match made {
+                        Ok(c) => self.capture = Some(c),
+                        Err(e) => {
+                            log::warn!("restyle: {e}");
+                            self.failed = true;
+                            return;
+                        }
+                    }
+                }
+                let Some((target, pbo, (w, h))) = &self.capture else { return };
+                self.last_time = Some(time);
+                self.pending_time = time;
+                gl.disable(glow::SCISSOR_TEST);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target.fbo));
+                gl.blit_framebuffer(x0, y0, x1, y1, 0, 0, *w as i32, *h as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.fbo));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
+                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+                gl.read_pixels(0, 0, *w as i32, *h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
+                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+                    self.pending = Some(Fence(fence));
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+        }
+    }
+
+    /// The restyled picture for the frame at `time`, the size of the video (`size`): the one
+    /// nearest it, moved along `flow` (if there's any) to it. None until there is one.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw(&mut self, gl: &glow::Context, version: egui_glow::ShaderVersion, vao: glow::VertexArray, video: glow::Texture, flow: Option<glow::Texture>, size: (i32, i32), rect: [f32; 4], time: f32) -> Option<glow::Texture> {
+        unsafe {
+            let (texture, at) = self.pictures.iter().filter_map(|(t, _, at)| at.map(|at| (*t, at))).min_by(|a, b| (a.1 - time).abs().total_cmp(&(b.1 - time).abs()))?;
+            if self.program.is_none() {
+                let decl = version.version_declaration();
+                match compile(gl, &vertex_source(decl), &restyle_source(decl, version.is_embedded())) {
+                    Ok(p) => self.program = Some(p),
+                    Err(e) => {
+                        log::warn!("restyle: {e}");
+                        self.failed = true;
+                        return None;
+                    }
+                }
+            }
+            if self.out.as_ref().is_none_or(|(_, s)| *s != size) {
+                if let Some((t, _)) = self.out.take() {
+                    gl.delete_framebuffer(t.fbo);
+                    gl.delete_texture(t.texture);
+                }
+                match create_target(gl, size, &[(glow::RGBA8, glow::UNSIGNED_BYTE)]) {
+                    Ok(t) => self.out = Some((t, size)),
+                    Err(e) => {
+                        log::warn!("restyle: {e}");
+                        self.failed = true;
+                        return None;
+                    }
+                }
+            }
+            let (Some(program), Some((out, _))) = (self.program, &self.out) else { return None };
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::BLEND);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(out.fbo));
+            gl.viewport(0, 0, size.0, size.1);
+            gl.use_program(Some(program));
+            gl.bind_vertex_array(Some(vao));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(video));
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, flow);
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_1_i32(u("u_video").as_ref(), 0);
+            gl.uniform_1_i32(u("u_styled").as_ref(), 1);
+            gl.uniform_1_i32(u("u_flow").as_ref(), 2);
+            gl.uniform_1_f32(u("u_has_flow").as_ref(), if flow.is_some() { 1.0 } else { 0.0 });
+            gl.uniform_4_f32(u("u_rect").as_ref(), rect[0], rect[1], rect[2], rect[3]);
+            gl.uniform_1_f32(u("u_dt").as_ref(), time - at);
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            Some(out.texture)
+        }
+    }
+
+    unsafe fn free_capture(&mut self, gl: &glow::Context) {
+        unsafe {
+            if let Some((target, pbo, _)) = self.capture.take() {
+                gl.delete_framebuffer(target.fbo);
+                gl.delete_texture(target.texture);
+                gl.delete_buffer(pbo);
+            }
+        }
+    }
+
+    unsafe fn release(&mut self, gl: &glow::Context) {
+        unsafe {
+            if let Some(Fence(fence)) = self.pending.take() {
+                gl.delete_sync(fence);
+            }
+            self.free_capture(gl);
+            for (texture, _, _) in self.pictures.drain(..) {
+                gl.delete_texture(texture);
+            }
+            if let Some((t, _)) = self.out.take() {
+                gl.delete_framebuffer(t.fbo);
+                gl.delete_texture(t.texture);
+            }
+            if let Some(p) = self.program.take() {
+                gl.delete_program(p);
+            }
+            self.next = 0;
+            self.arrived = 0;
+            self.delay = 0.0;
+            self.last_time = None;
+            self.handed = None;
+            self.failed = false;
         }
     }
 }
@@ -2488,7 +2783,8 @@ fn faces_between(reports: &VecDeque<crate::faces::Report>, time: f32) -> crate::
                         _ => *v += (to - *v) * along,
                     }
                 }
-                mixed.seen += (b.seen - a.seen) * along;
+                // Found: blended in. Lost: gone halfway between, rather than fading.
+                mixed.seen = if b.seen >= a.seen { a.seen + (b.seen - a.seen) * along } else if along < 0.5 { a.seen } else { b.seen };
                 Some(mixed)
             }
             (a, b) => a.or(*b),

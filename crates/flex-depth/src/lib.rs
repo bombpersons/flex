@@ -11,6 +11,7 @@
 //!
 //! Output is relative inverse depth ("disparity"): bigger is nearer, in no fixed units.
 
+pub mod animegan;
 pub mod face;
 pub mod models;
 pub mod sound;
@@ -107,6 +108,11 @@ const B_MEM: u32 = 16;
 /// Edges repeated in a 3x3 convolution, pixel centres in a resize, and from the weights in a
 /// copy with ACCUMULATE (see depth.wgsl).
 const EDGE: u32 = 32;
+/// Mirrored edges in a 3x3 convolution (see depth.wgsl).
+const REFLECT: u32 = 128;
+/// Leaky ReLU (slope 0.2) after the bias, or after ACCUMULATE's add (see depth.wgsl).
+const LEAKY2: u32 = 1024;
+const LEAKY2_LAST: u32 = 2048;
 /// Bytes per uniform slot (wgpu's minimum dynamic-offset alignment).
 const SLOT: u64 = 256;
 const MAX_OPS: usize = 1024;
@@ -165,10 +171,22 @@ enum Kernel {
     ConvTranspose,
     Resize,
     Copy,
+    // AnimeGANv3's (animegan.wgsl).
+    Conv7,
+    Conv5,
+    ConvK3,
+    Stats,
+    Join,
+    Layer,
+    AgNorm,
+    RowSoftmax,
+    Columns,
+    Double,
+    Pack,
 }
 
 /// Each `Kernel`'s entry point, and whether its `B_IN_MEM` is set.
-const KERNELS: [(&str, bool); 11] = [
+const KERNELS: [(&str, bool); 22] = [
     ("matmul", false),
     ("matmul", true),
     ("layer_norm", false),
@@ -180,6 +198,17 @@ const KERNELS: [(&str, bool); 11] = [
     ("conv_transpose", false),
     ("resize", false),
     ("copy", false),
+    ("ag_conv7", false),
+    ("ag_conv5", false),
+    ("ag_conv3", false),
+    ("ag_stats", false),
+    ("ag_join", false),
+    ("ag_layer", false),
+    ("ag_norm", false),
+    ("ag_softmax", false),
+    ("ag_columns", false),
+    ("ag_double", false),
+    ("ag_pack", false),
 ];
 
 // ---- Weights --------------------------------------------------------------------------------
@@ -636,7 +665,7 @@ impl Ops {
         let tiles = h.div_ceil(2) * w.div_ceil(2);
         let v = scratch;
         let m = scratch + (16 * cv.cin * tiles) as u32;
-        let input = Params { m: h as u32, k: cv.cin as u32, n: w as u32, a_off: a, c_off: v, flags: flags & (EDGE | RELU_IN), ..Default::default() };
+        let input = Params { m: h as u32, k: cv.cin as u32, n: w as u32, a_off: a, c_off: v, flags: flags & (EDGE | RELU_IN | REFLECT), ..Default::default() };
         self.push(Kernel::WinoIn, input, [groups(tiles, 64), cv.cin as u32, 1]);
         // For each of the 16: M^T [tiles][cout] = V^T [tiles][cin] U [cin][cout].
         let mul = Params {
@@ -660,7 +689,7 @@ impl Ops {
             ..Default::default()
         };
         self.push(Kernel::Matmul, mul, [groups(cv.cout, 32), groups(tiles, 32), 16]);
-        let output = Params { m: h as u32, n: w as u32, x0: cv.cout as u32, a_off: m, c_off: c, bias_off: cv.b, flags: flags & (RELU | ACCUMULATE), ..Default::default() };
+        let output = Params { m: h as u32, n: w as u32, x0: cv.cout as u32, a_off: m, c_off: c, bias_off: cv.b, flags: flags & (RELU | ACCUMULATE | LEAKY2 | LEAKY2_LAST), ..Default::default() };
         self.push(Kernel::WinoOut, output, [groups(tiles, 64), cv.cout as u32, 1]);
     }
 
@@ -732,7 +761,8 @@ impl Ops {
 struct Runner {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipelines: Vec<wgpu::ComputePipeline>,
+    /// Each `Kernel`'s, if the plan uses it.
+    pipelines: Vec<Option<wgpu::ComputePipeline>>,
     mem: wgpu::Buffer,
     bind: wgpu::BindGroup,
     readback: wgpu::Buffer,
@@ -748,7 +778,10 @@ fn cost(kernel: Kernel, p: &Params) -> f64 {
     let (m, k, n) = (f64::from(p.m), f64::from(p.k), f64::from(p.n));
     let work = match kernel {
         Kernel::Matmul | Kernel::MatmulMem => m * k * n * f64::from(p.batch.max(1)),
-        Kernel::Conv3x3 => m * n * k * f64::from(p.x0) * 9.0 / f64::from(p.x1.max(1) * p.x1.max(1)),
+        Kernel::Conv3x3 | Kernel::Conv3x3Wide => m * n * k * f64::from(p.x0) * 9.0 / f64::from(p.x1.max(1) * p.x1.max(1)),
+        Kernel::Conv7 => m * n * k * f64::from(p.x0.next_multiple_of(8)) * 49.0,
+        Kernel::Conv5 => m * n * k * f64::from(p.x0.next_multiple_of(8)) * 25.0,
+        Kernel::ConvK3 => m * n * k * f64::from(p.x0.next_multiple_of(8)) * 9.0,
         Kernel::ConvTranspose => m * n * k * f64::from(p.x0) * f64::from(p.x1 * p.x1),
         _ => 0.0,
     };
@@ -813,21 +846,25 @@ impl Runner {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let source = wgpu::ShaderModuleDescriptor { label: Some("depth.wgsl"), source: wgpu::ShaderSource::Wgsl(include_str!("depth.wgsl").into()) };
+        let code = concat!(include_str!("depth.wgsl"), include_str!("animegan.wgsl"));
+        let source = wgpu::ShaderModuleDescriptor { label: Some("depth.wgsl"), source: wgpu::ShaderSource::Wgsl(code.into()) };
         // SAFETY: these are our own shaders, and every offset and size they use comes from the
         // plan above, which fits `mem` and the weights by construction. The checks wgpu would
         // add go on every array access, and cost 15% of the whole network.
         let module = unsafe { device.create_shader_module_trusted(source, wgpu::ShaderRuntimeChecks::unchecked()) };
         let pipelines = KERNELS
             .iter()
-            .map(|(entry, b_in_mem)| {
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pipeline_layout),
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: wgpu::PipelineCompilationOptions { constants: &[("B_IN_MEM", f64::from(u8::from(*b_in_mem)))], ..Default::default() },
-                    cache: None,
+            .enumerate()
+            .map(|(i, (entry, b_in_mem))| {
+                ops.list.iter().any(|(k, _, _)| *k as usize == i).then(|| {
+                    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some(entry),
+                        layout: Some(&pipeline_layout),
+                        module: &module,
+                        entry_point: Some(entry),
+                        compilation_options: wgpu::PipelineCompilationOptions { constants: &[("B_IN_MEM", f64::from(u8::from(*b_in_mem)))], ..Default::default() },
+                        cache: None,
+                    })
                 })
             })
             .collect();
@@ -850,6 +887,10 @@ impl Runner {
         Ok(Self { device, queue, pipelines, mem, bind, readback, ops, parts, adapter: gpu.0.adapter.clone(), _gpu: gpu })
     }
 
+    fn pipeline(&self, kernel: Kernel) -> &wgpu::ComputePipeline {
+        self.pipelines[kernel as usize].as_ref().expect("a kernel the plan uses")
+    }
+
     /// Puts `data` in `mem` at `at`.
     fn write(&self, at: u32, data: &[f32]) {
         self.queue.write_buffer(&self.mem, at as u64 * 4, bytemuck::cast_slice(data));
@@ -867,7 +908,7 @@ impl Runner {
                     if g.contains(&0) {
                         continue;
                     }
-                    pass.set_pipeline(&self.pipelines[*kernel as usize]);
+                    pass.set_pipeline(self.pipeline(*kernel));
                     let slot = (start + i) as u64 * SLOT;
                     pass.set_bind_group(0, &self.bind, &[slot as u32]);
                     pass.dispatch_workgroups(g[0], g[1], g[2]);
@@ -897,7 +938,7 @@ impl Runner {
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
                 for (i, (kernel, _, g)) in self.ops.list[..n].iter().enumerate() {
-                    pass.set_pipeline(&self.pipelines[*kernel as usize]);
+                    pass.set_pipeline(self.pipeline(*kernel));
                     pass.set_bind_group(0, &self.bind, &[(i as u64 * SLOT) as u32]);
                     pass.dispatch_workgroups(g[0], g[1], g[2]);
                 }
@@ -922,7 +963,7 @@ impl Runner {
                 let mut pass = enc.begin_compute_pass(&Default::default());
                 for (i, (kernel, _, g)) in self.ops.list.iter().enumerate() {
                     for _ in 0..k {
-                        pass.set_pipeline(&self.pipelines[*kernel as usize]);
+                        pass.set_pipeline(self.pipeline(*kernel));
                         pass.set_bind_group(0, &self.bind, &[(i as u64 * SLOT) as u32]);
                         pass.dispatch_workgroups(g[0], g[1], g[2]);
                     }
@@ -948,7 +989,7 @@ impl Runner {
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
                 for _ in 0..n {
-                    pass.set_pipeline(&self.pipelines[*kernel as usize]);
+                    pass.set_pipeline(self.pipeline(*kernel));
                     pass.set_bind_group(0, &self.bind, &[(i as u64 * SLOT) as u32]);
                     pass.dispatch_workgroups(g[0], g[1], g[2]);
                 }

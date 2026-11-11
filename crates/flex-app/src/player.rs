@@ -484,6 +484,9 @@ impl Player {
             if let Some(camera) = &frame.camera {
                 lines.push(format!("Effect camera: {}", camera.status().describe()));
             }
+            if let Some(restyle) = &frame.restyle {
+                lines.push(format!("Effect style: {}", restyle.status().describe()));
+            }
             lines.extend(crate::gpu::describe());
             if frame.needs.scene {
                 lines.extend(crate::shot_type::describe());
@@ -722,8 +725,12 @@ impl Player {
                     sh.camera.wanted(sh.depth.clone());
                     sh.camera.clone()
                 });
+                let restyle = needs.restyle.as_deref().map(|style| {
+                    sh.restyle.wanted(style);
+                    sh.restyle.clone()
+                });
                 let fading = sh.effects.fading();
-                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts() || needs.cuts || needs.flow || needs.stats || needs.plate || needs.depth || needs.faces || needs.camera, needs, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces, motion, camera, subtitles: self.effect_inputs.subtitles() })
+                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts() || needs.cuts || needs.flow || needs.stats || needs.plate || needs.depth || needs.faces || needs.camera || restyle.is_some(), needs, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces, motion, camera, restyle, subtitles: self.effect_inputs.subtitles() })
             }
             _ => {
                 self.effect_inputs.stop(&self.mpv);

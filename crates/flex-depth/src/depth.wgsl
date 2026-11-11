@@ -43,6 +43,23 @@ const EDGE: u32 = 32u;
 override B_IN_MEM: bool = false;
 /// Leaky ReLU (slope 0.1) after: conv3x3_16 and NeuFlow's kernels (flow.wgsl).
 const LEAKY: u32 = 64u;
+/// The 3x3 convolutions mirror the picture outside its edge (TensorFlow's MirrorPad 'REFLECT':
+/// -1 reads 1) instead of reading zeros.
+const REFLECT: u32 = 128u;
+/// Leaky ReLU (slope 0.2) after the bias: the matrix multiply and the 3x3 convolutions
+/// (AnimeGANv3's).
+const LEAKY2: u32 = 1024u;
+/// The same after ACCUMULATE's add: a residual block's end.
+const LEAKY2_LAST: u32 = 2048u;
+
+fn leaky2(x: f32, flags: u32, which: u32) -> f32 {
+    return select(x, select(x * 0.2, x, x >= 0.0), (flags & which) != 0u);
+}
+
+fn reflect(i: i32, n: i32) -> i32 {
+    let j = abs(i);
+    return select(j, 2 * (n - 1) - j, j >= n);
+}
 
 // erf by Abramowitz and Stegun 7.1.26 (absolute error under 1.5e-7): WGSL has no erf.
 fn erf(x: f32) -> f32 {
@@ -101,8 +118,9 @@ fn finish(v: f32, o: u32, col: u32) -> f32 {
     var x = v + bias(col);
     if ((p.flags & GELU) != 0u) { x = gelu(x); }
     if ((p.flags & RELU) != 0u) { x = max(x, 0.0); }
+    x = leaky2(x, p.flags, LEAKY2);
     if ((p.flags & ACCUMULATE) != 0u) { x += mem[o]; }
-    return x;
+    return leaky2(x, p.flags, LEAKY2_LAST);
 }
 
 @compute @workgroup_size(8, 8)
@@ -238,7 +256,7 @@ fn softmax(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l
 
 // 3x3 convolution, padding 1, stride x1 (1 or 2): in [k channels][H = m][W = n] at a_off,
 // weights [x0][k][3][3] at b_off, bias at bias_off (or NONE), out [x0][H'][W'] at c_off where
-// H' = (H - 1) / stride + 1. Flags: RELU_IN, RELU, ACCUMULATE. Each thread makes 8 output
+// H' = (H - 1) / stride + 1. Flags: RELU_IN, RELU, LEAKY2, ACCUMULATE, LEAKY2_LAST, REFLECT. Each thread makes 8 output
 // channels (group wg.z) of one pixel from one read of its 3x3 neighbourhood, with the group's
 // weights for 32 input channels at a time in workgroup memory.
 
@@ -299,9 +317,10 @@ fn conv3x3(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
         if (co >= cout) { break; }
         var s = outs[o] + bias(co);
         if ((p.flags & RELU) != 0u) { s = max(s, 0.0); }
+        s = leaky2(s, p.flags, LEAKY2);
         let at = p.c_off + outer * p.c_os + co * oh * ow + y * ow + x;
         if ((p.flags & ACCUMULATE) != 0u) { s += mem[at]; }
-        mem[at] = s;
+        mem[at] = leaky2(s, p.flags, LEAKY2_LAST);
     }
 }
 
@@ -329,12 +348,15 @@ fn conv3x3_16(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invoc
     // The 9 neighbours' places in a plane, and whether each is inside (the same for every channel).
     var at: array<vec2<u32>, 9>;
     var inside: array<vec2<f32>, 9>;
+    let mirrored = (p.flags & REFLECT) != 0u;
     for (var tap = 0u; tap < 9u; tap++) {
-        let yy = i32(y * stride) + i32(tap / 3u) - 1;
+        var yy = i32(y * stride) + i32(tap / 3u) - 1;
+        if (mirrored) { yy = reflect(yy, i32(p.m)); }
         let row_ok = yy >= 0 && yy < i32(p.m);
         let row = u32(clamp(yy, 0, i32(p.m) - 1)) * p.n;
         for (var j = 0u; j < 2u; j++) {
-            let xx = i32(xs[j] * stride) + i32(tap % 3u) - 1;
+            var xx = i32(xs[j] * stride) + i32(tap % 3u) - 1;
+            if (mirrored) { xx = reflect(xx, i32(p.n)); }
             let ok = edge || (row_ok && xx >= 0 && xx < i32(p.n));
             at[tap][j] = row + u32(clamp(xx, 0, i32(p.n) - 1));
             inside[tap][j] = select(0.0, 1.0, ok);
@@ -382,9 +404,10 @@ fn conv3x3_16(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invoc
             if ((p.flags & RELU) != 0u) { s = max(s, 0.0); }
             if ((p.flags & GELU) != 0u) { s = gelu(s); }
             if ((p.flags & LEAKY) != 0u) { s = select(s * 0.1, s, s >= 0.0); }
+            s = leaky2(s, p.flags, LEAKY2);
             let at = p.c_off + outer * p.c_os + co * oh * ow + y * ow + xs[j];
             if ((p.flags & ACCUMULATE) != 0u) { s += mem[at]; }
-            mem[at] = s;
+            mem[at] = leaky2(s, p.flags, LEAKY2_LAST);
         }
     }
 }
@@ -396,7 +419,7 @@ fn conv3x3_16(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invoc
 // directly, and the multiplies are big ones.
 
 // In [k channels][H = m][W = n] at a_off to V [16][k][tiles] at c_off, tiles = ceil(H / 2) x
-// ceil(W / 2) row by row. Flags: RELU_IN, EDGE (repeat the edge rather than read zeros). One
+// ceil(W / 2) row by row. Flags: RELU_IN, EDGE (repeat the edge rather than read zeros), REFLECT. One
 // thread per tile and channel.
 @compute @workgroup_size(64)
 fn wino_in(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -412,13 +435,16 @@ fn wino_in(@builtin(global_invocation_id) gid: vec3<u32>) {
     let relu_in = (p.flags & RELU_IN) != 0u;
     let src = p.a_off + outer * p.a_os + c * p.m * p.n;
     var d: array<vec4<f32>, 4>;
+    let mirrored = (p.flags & REFLECT) != 0u;
     for (var r = 0; r < 4; r++) {
-        let yy = y0 + r;
+        var yy = y0 + r;
+        if (mirrored) { yy = reflect(yy, i32(p.m)); }
         let row_in = yy >= 0 && yy < i32(p.m);
         let at = src + u32(clamp(yy, 0, i32(p.m) - 1)) * p.n;
         var v: vec4<f32>;
         for (var q = 0; q < 4; q++) {
-            let xx = x0 + q;
+            var xx = x0 + q;
+            if (mirrored) { xx = reflect(xx, i32(p.n)); }
             let inside = edge || (row_in && xx >= 0 && xx < i32(p.n));
             var x = select(0.0, mem[at + u32(clamp(xx, 0, i32(p.n) - 1))], inside);
             if (relu_in) { x = max(x, 0.0); }
@@ -445,7 +471,8 @@ fn wino_in(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // M [16][x0 channels][tiles] at a_off (from the multiplies) to out [x0][H = m][W = n] at c_off,
-// with bias at bias_off. Flags: RELU, ACCUMULATE. One thread per tile and channel.
+// with bias at bias_off. Flags: RELU, GELU, LEAKY, LEAKY2, ACCUMULATE, LEAKY2_LAST. One thread
+// per tile and channel.
 @compute @workgroup_size(64)
 fn wino_out(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tw = (p.n + 1u) / 2u;
@@ -476,9 +503,10 @@ fn wino_out(@builtin(global_invocation_id) gid: vec3<u32>) {
             if ((p.flags & RELU) != 0u) { s = max(s, 0.0); }
             if ((p.flags & GELU) != 0u) { s = gelu(s); }
             if ((p.flags & LEAKY) != 0u) { s = select(s * 0.1, s, s >= 0.0); }
+            s = leaky2(s, p.flags, LEAKY2);
             let at = p.c_off + outer * p.c_os + c * p.m * p.n + y * p.n + x;
             if ((p.flags & ACCUMULATE) != 0u) { s += mem[at]; }
-            mem[at] = s;
+            mem[at] = leaky2(s, p.flags, LEAKY2_LAST);
         }
     }
 }
