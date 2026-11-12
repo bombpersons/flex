@@ -1,7 +1,7 @@
 // Studio Audience: the sitcom treatment. Lit signs along the top tell the audience what to do, and
 // they light up when Flex hears it: LAUGH with laughter, APPLAUSE with clapping and cheering,
 // ON AIR while people talk, QUIET when it goes silent. Laughter also brings up the warm, bright
-// look of a studio set.
+// look of a studio set. Fading in, the signs grow down from the top and the studio light comes up.
 
 // A 5x7 pixel font: each letter's top four rows (20 bits, left to right) and bottom three (15).
 const ivec2 FONT[26] = ivec2[](
@@ -64,13 +64,13 @@ vec4 effect(vec2 uv) {
     float size = s_size / 100.0;
 
     // Laughter: the bright, warm, slightly soft light of a studio set.
-    float laugh = u_sound_laughter * s_studio / 100.0;
+    float laugh = u_sound_laughter * s_studio / 100.0 * u_amount;
     vec3 studio = pow(c, vec3(0.85)) * vec3(1.08, 1.03, 0.95) + vec3(0.03, 0.025, 0.02);
     c = mix(c, studio, clamp(laugh, 0.0, 1.0));
 
     // The signs, spread along the top, each just wide enough for its word.
     // No bigger than lets the widest (APPLAUSE) fit in its quarter of the width.
-    float height = min(0.075 * size, 0.2 * aspect * (u_video_rect.z - u_video_rect.x) / 4.4);
+    float height = min(0.075 * size, 0.2 * aspect * (u_video_rect.z - u_video_rect.x) / 4.4) * u_amount;
     float unit = height * 0.55 / 7.0;
     float top = u_video_rect.w - 0.025 - height * 0.5;
     vec3 glow = vec3(0.0);
@@ -85,7 +85,7 @@ vec4 effect(vec2 uv) {
         on *= 0.8 + 0.2 * step(0.25, hash(vec2(floor(t * 25.0), float(i))));
         vec3 colour = i == 3 ? vec3(1.0, 0.6, 0.1) : vec3(1.0, 0.1, 0.08);
         // Its light on the picture around it.
-        glow += colour * exp(-max(d, 0.0) / (height * 0.6)) * on * 0.35;
+        glow += colour * exp(-max(d, 0.0) / max(height * 0.6, 1e-5)) * on * 0.35;
         if (d < height * 0.12) {
             float frame = smoothstep(0.0, -0.003, d);
             vec3 sign = mix(vec3(0.12, 0.1, 0.1), mix(vec3(0.18, 0.02, 0.02), colour * 0.75, on), smoothstep(-height * 0.07, -height * 0.09, d));
@@ -97,6 +97,6 @@ vec4 effect(vec2 uv) {
             c = mix(c, sign, frame * s_opacity / 100.0);
         }
     }
-    c += glow * s_opacity / 100.0;
+    c += glow * s_opacity / 100.0 * u_amount;
     return vec4(clamp(c, 0.0, 1.0), 1.0);
 }

@@ -8,6 +8,8 @@
 // chin) and the eye is drawn as it's seen from the side. Above them go thin arched brows in place of the real ones,
 // which go up and down with the real ones and frown and worry with the sound. How high each real
 // brow usually sits is learned as a face is watched, in the alpha of the bottom row of u_prev.
+// Fading in, the faces are reshaped and evened more and more, and the drawn eyes, brows and blush
+// swell in from half their size.
 
 float hash(float n) {
     return fract(sin(n * 91.345) * 47453.5453);
@@ -369,7 +371,7 @@ vec4 effect(vec2 uv) {
     vec2 p = uv * aspect;
     // Reshape the faces with meshes, and even their skin.
     vec2 from = p;
-    float shape = s_shape / 100.0;
+    float shape = s_shape / 100.0 * u_amount;
     for (int i = 0; i < u_face_count; i++) {
         if (u_face_seen[i] <= 0.0 || shape <= 0.0) continue;
         vec2 right = face_point(i, 0) * aspect, left = face_point(i, 1) * aspect;
@@ -384,12 +386,12 @@ vec4 effect(vec2 uv) {
     if (there >= 0 && meshed(there) && (s_skin > 0.0 || s_brows > 0.5)) {
         float wide = length(at_mesh(there, 454, aspect) - at_mesh(there, 234, aspect));
         vec3 tone = skin_tone(there);
-        c = even_skin(at, there, s_skin / 100.0 * u_face_seen[there], 0.035 * wide, tone);
+        c = even_skin(at, there, s_skin / 100.0 * u_face_seen[there] * u_amount, 0.035 * wide, tone);
         // The real brows are covered with skin, for the drawn ones.
         if (s_brows > 0.5) {
             vec3 above = texture(u_video, at + vec2(0.0, 0.05 * wide)).rgb;
             vec3 skin = mix(above, tone * clamp(luma(above) / max(luma(tone), 0.02), 0.6, 1.1), 0.8);
-            c = mix(c, skin, smoothstep(0.0, 0.5, brows_at(at)) * u_face_seen[there]);
+            c = mix(c, skin, smoothstep(0.0, 0.5, brows_at(at)) * u_face_seen[there] * u_amount);
         }
     }
 
@@ -432,7 +434,7 @@ vec4 effect(vec2 uv) {
     float frown = clamp((u_sound_shouting + u_sound_angry_music) * react, 0.0, 1.0);
     float worry = clamp((u_sound_crying + u_sound_sad_music + 0.5 * u_sound_scary_music) * react, 0.0, 1.0) * (1.0 - frown);
     for (int i = 0; i < u_face_count; i++) {
-        float seen = u_face_seen[i];
+        float seen = u_face_seen[i] * u_amount;
         if (seen <= 0.0) continue;
         vec2 right = face_point(i, 0) * aspect, left = face_point(i, 1) * aspect;
         vec2 nose = face_point(i, 2) * aspect;
@@ -442,7 +444,7 @@ vec4 effect(vec2 uv) {
         vec2 up = (eyes - mouth) / height;
         vec2 across = vec2(up.y, -up.x);
         float frontal = max(length(left - right), height * 0.95);
-        float size = frontal * 0.17 * s_size / 100.0;
+        float size = frontal * 0.17 * s_size / 100.0 * (0.5 + 0.5 * u_amount);
         float look = clamp(dot(nose - eyes, across) / frontal * 1.3, -0.32, 0.32);
         float side = side_on(i, left, right, height);
         vec2 forward = across * (dot(nose - eyes, across) < 0.0 ? -1.0 : 1.0);

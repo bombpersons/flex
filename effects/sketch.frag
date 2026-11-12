@@ -1,5 +1,6 @@
 // Ink Drawing People: finds edges in the picture inside people and draws them as ink, with
 // diagonal hatching for the shadows, redrawn a few times a second like hand-drawn animation.
+// Fading in, the drawing spreads over people in patches.
 
 // Features drawn crisply from the mesh, where the picture alone would be mush: an inked line at
 // the edge of the lips, eyes and brows.
@@ -39,5 +40,8 @@ vec4 effect(vec2 uv) {
     else if (s_paper > 1.5) { paper = vec3(0.08, 0.22, 0.55); pen = vec3(0.85, 0.92, 1.0); }
     else if (s_paper > 0.5) { paper = vec3(0.98); }
     paper *= 0.96 + 0.08 * noise(p * 0.6);
-    return vec4(mix(c, mix(paper, pen, ink), person), 1.0);
+    // Fading in, patches drawn first and last.
+    float n = noise(p * 0.012 / scale);
+    float drawn = smoothstep(n - 0.1, n, u_amount * 1.2 - 0.1);
+    return vec4(mix(c, mix(paper, pen, ink), person * drawn), 1.0);
 }

@@ -1,5 +1,6 @@
 // Anime: the picture redrawn by AnimeGANv3 in the style picked (u_video, with restyle), its
-// edges inked darker if wanted, over the real picture (u_original).
+// edges inked darker if wanted, over the real picture (u_original). Fading in, the drawing comes up
+// over the real picture.
 
 float luma(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
@@ -19,5 +20,5 @@ vec4 effect(vec2 uv) {
     float ink = smoothstep(0.15, 0.6, length(g)) * s_outlines / 100.0;
     vec3 c = mix(drawn, drawn * 0.2, ink);
     c = max(mix(vec3(luma(c)), c, s_colour / 100.0), 0.0);
-    return vec4(mix(real, c, s_strength / 100.0), 1.0);
+    return vec4(mix(real, c, s_strength / 100.0 * u_amount), 1.0);
 }

@@ -1,5 +1,5 @@
 // Porcelain Dolls: skin turned to glazed china, in the face's own coordinates, with cracks that
-// spread the longer a shot goes on.
+// spread the longer a shot goes on. Fading in, the china creeps up the face from the chin.
 
 vec2 random2(vec2 p) {
     return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453);
@@ -51,16 +51,18 @@ vec4 effect(vec2 uv) {
     float crack = (1.0 - smoothstep(0.0, 0.035, d)) * reach;
     glaze = mix(glaze, vec3(0.05, 0.04, 0.05), crack);
 
+    // How far up the face the china has crept, fading in.
+    float spread = u_amount >= 1.0 ? 1.0 : smoothstep(a.y - 0.15, a.y, u_amount * 1.4 - 0.2);
     float keep = (1.0 - lips_at(uv)) * (1.0 - eye_at(uv)) * (1.0 - mouth_at(uv));
-    c = mix(c, glaze, keep * on);
+    c = mix(c, glaze, keep * on * spread);
     // Small painted lips, in a bow.
     vec2 lip = vec2(abs(a.x - 0.5), a.y - 0.305);
     float bow = 1.0 - smoothstep(0.5, 1.0, length(lip / vec2(0.075, 0.042)));
-    c = mix(c, vec3(0.72, 0.03, 0.1) * (0.5 + luma), max(lips_at(uv), bow * on) * (1.0 - mouth_at(uv)));
+    c = mix(c, vec3(0.72, 0.03, 0.1) * (0.5 + luma), max(lips_at(uv), bow * on) * (1.0 - mouth_at(uv)) * spread);
     // Glass eyes: dark, wet, and the brows painted on thin.
-    float iris = iris_at(uv);
+    float iris = iris_at(uv) * spread;
     c = mix(c, vec3(0.03, 0.12, 0.3) + c * 0.5, iris);
-    c = mix(c, c * vec3(1.15), eye_at(uv) * (1.0 - iris));
-    c = mix(c, vec3(0.2, 0.1, 0.08), brows_at(uv) * 0.7);
+    c = mix(c, c * vec3(1.15), eye_at(uv) * spread * (1.0 - iris));
+    c = mix(c, vec3(0.2, 0.1, 0.08), brows_at(uv) * 0.7 * spread);
     return vec4(c, 1.0);
 }

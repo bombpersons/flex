@@ -1,4 +1,5 @@
 // Long Face: everything below the eyes is pulled downwards, and the chest gives way underneath.
+// Fading in, the pull grows from none.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -22,7 +23,7 @@ vec4 effect(vec2 uv) {
         float from = down < drawn ? down / stretch : mix(face_length, down, smoothstep(0.0, 1.0, (down - drawn) / give));
         if (down >= drawn + give) continue;
         if (down < 0.0) from = down;
-        q += f.up * (down - from) * side;
+        q += f.up * (down - from) * side * u_amount;
     }
     return vec4(texture(u_video, q / aspect).rgb, 1.0);
 }

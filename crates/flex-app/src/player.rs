@@ -768,8 +768,8 @@ impl Player {
                     }
                     sh.restyle.clone()
                 });
-                let fading = sh.effects.fading();
-                Some(crate::effects::Frame { effect: effect.clone(), fading, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts() || needs.cuts || needs.flow || needs.stats || needs.plate || needs.depth || needs.faces || needs.camera || restyle.is_some(), needs, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces, motion, camera, restyle, texture, subtitles: self.effect_inputs.subtitles() })
+                let fade = sh.effects.fade();
+                Some(crate::effects::Frame { effect: effect.clone(), fading: fade.from, faded_in: fade.faded_in, amount: fade.amount, video_scale: needs.scale, find_cuts: sh.effects.wants_cuts() || needs.cuts || needs.flow || needs.stats || needs.plate || needs.depth || needs.faces || needs.camera || restyle.is_some(), needs, rect: [0.0, 0.0, 1.0, 1.0], video_time, pts, audio, depth, faces, motion, camera, restyle, texture, subtitles: self.effect_inputs.subtitles() })
             }
             _ => {
                 self.effect_inputs.stop(&self.mpv);

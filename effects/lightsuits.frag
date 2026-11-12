@@ -1,5 +1,6 @@
 // Light Suits: people go dark, with neon running along their outlines and the seams between body
 // parts; the parts light up one after another, head to feet, on the beat. From MoGe-2's body parts.
+// Fading in, the world dims and the suits come on from the head down to the feet.
 
 int part_at(vec2 uv) {
     vec4 upper = more_masks_at(uv, 3);
@@ -17,7 +18,7 @@ int part_at(vec2 uv) {
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(c, 1.0);
-    float world_dim = 1.0 - s_dim / 100.0;
+    float world_dim = 1.0 - s_dim / 100.0 * u_amount;
     vec3 world = c * world_dim;
     float mask = person_at(uv);
     float rim = smoothstep(0.2, 0.45, mask) * (1.0 - smoothstep(0.45, 0.7, mask));
@@ -34,6 +35,9 @@ vec4 effect(vec2 uv) {
     vec3 neon = hue((who >= 0 ? float(who) * 0.37 : 0.0) + s_hue / 360.0);
     // A wave of light running down the body: head, torso, arms, hands, legs, feet.
     float order = part == 0 ? 0.0 : part == 1 ? 1.0 : part == 2 ? 1.5 : part == 3 ? 2.0 : part == 4 ? 3.0 : 4.0;
+    float on = clamp(u_amount * 2.0 - order / 4.0, 0.0, 1.0);
+    person *= on;
+    rim *= on;
     float wave = fract(u_time * 0.6 * s_speed / 100.0 - order / 5.0);
     float lit = 0.1 + 0.5 * exp(-wave * 6.0) + 0.6 * u_beat * s_react / 100.0;
     vec3 suit = c * 0.12 + neon * lit * 0.35;

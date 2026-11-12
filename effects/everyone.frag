@@ -1,17 +1,18 @@
-// Everyone Is Them: finds the biggest face and copies it over all the others.
+// Everyone Is Them: finds the biggest face and copies it over all the others. Fading in, the copy
+// spreads out over each face from its middle.
 
 // Follows the mesh, so eyes land on eyes and the face turns the way the one it's on is turned.
 vec3 copied_on_mesh(vec3 c, vec2 uv, int to, int from, float seen, vec3 match) {
     if (face_there(uv) != to) return c;
     vec2 a = face_uv(uv);
     vec4 skin = face_texture(from, a);
-    float feather = 1.0 - smoothstep(0.82, 0.98, length((a - vec2(0.5, 0.47)) / vec2(0.5, 0.45)));
-    return mix(c, skin.rgb * match, on_face(uv) * skin.a * feather * seen);
+    float feather = 1.0 - smoothstep(0.82, 0.98, length((a - vec2(0.5, 0.47)) / vec2(0.5, 0.45)) / max(u_amount, 1e-4));
+    return mix(c, skin.rgb * match, on_face(uv) * skin.a * feather * seen * step(1e-4, u_amount));
 }
 
 vec3 copied(vec3 c, vec2 p, Face to, Face from, float seen, vec2 aspect) {
     vec2 to_mid = 0.5 * (to.eyes + to.mouth), from_mid = 0.5 * (from.eyes + from.mouth);
-    float amount = oval(p, to_mid, to, vec2(to.spread * 1.3, to.height * 1.5)) * seen;
+    float amount = oval(p, to_mid, to, vec2(to.spread * 1.3, to.height * 1.5) * max(u_amount, 1e-4)) * seen * step(1e-4, u_amount);
     if (amount <= 0.0) return c;
     vec2 rel = p - to_mid;
     vec2 l = vec2(dot(rel, to.across) / to.spread, dot(rel, to.up) / to.height);

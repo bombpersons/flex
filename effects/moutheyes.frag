@@ -1,5 +1,6 @@
 // Mouth Eyes: the band across the eyes goes where the mouth was, and the mouth where the eyes were.
-// On the mesh where there is one, so they stay on the face however it's turned.
+// On the mesh where there is one, so they stay on the face however it's turned. Fading in, the
+// two slide across to each other's places.
 
 // Where things are on a face, as face_uv has it.
 const vec2 RIGHT_EYE = vec2(0.35, 0.62);
@@ -31,18 +32,18 @@ vec4 effect(vec2 uv) {
     int there = face_there(uv);
     if (there >= 0 && meshed(there)) {
         vec2 a = face_uv(uv);
-        float on = on_face(uv) * u_face_seen[there];
+        float on = on_face(uv) * u_face_seen[there] * u_amount;
         vec2 eyes = 0.5 * (RIGHT_EYE + LEFT_EYE);
-        c = from_face(c, there, a + eyes - MOUTH, blob(a, MOUTH, vec2(0.315, 0.126)) * on);
-        c = from_face(c, there, a + MOUTH - eyes, blob(a, eyes, vec2(0.24, 0.15)) * on);
+        c = from_face(c, there, a + (eyes - MOUTH) * u_amount, blob(a, MOUTH, vec2(0.315, 0.126)) * on);
+        c = from_face(c, there, a + (MOUTH - eyes) * u_amount, blob(a, eyes, vec2(0.24, 0.15)) * on);
     }
     for (int i = 0; i < u_face_count; i++) {
         if (u_face_seen[i] <= 0.0 || meshed(i)) continue;
         Face f = face_frame(i, aspect);
         vec2 eyes = vec2(f.spread * 1.05, f.spread * 0.42);
         vec2 mouth = vec2(f.spread * 0.8, f.height * 0.48);
-        c = moved(c, p, f.mouth, f.eyes, f, eyes, u_face_seen[i], aspect);
-        c = moved(c, p, f.eyes, f.mouth, f, mouth, u_face_seen[i], aspect);
+        c = moved(c, p, f.mouth, mix(f.mouth, f.eyes, u_amount), f, eyes, u_face_seen[i] * u_amount, aspect);
+        c = moved(c, p, f.eyes, mix(f.eyes, f.mouth, u_amount), f, mouth, u_face_seen[i] * u_amount, aspect);
     }
     return vec4(c, 1.0);
 }

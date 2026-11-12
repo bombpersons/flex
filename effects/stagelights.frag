@@ -1,6 +1,8 @@
 // Stage Lights: the house lights go down and each person has their own follow spot, a beam
 // slanting down from the rig through the haze to a pool of light on them. From MoGe-2's who's who.
 //
+// Fading in, the house lights go down slowly as the spots and their beams come up.
+//
 // s_colours: 0 white, 1 a coloured gel each.
 
 vec3 gel(int i) {
@@ -12,7 +14,7 @@ vec4 effect(vec2 uv) {
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(film, 1.0);
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     vec2 p = uv * aspect;
-    float dark = 1.0 - s_dark / 100.0;
+    float dark = 1.0 - s_dark / 100.0 * u_amount;
     vec3 light = vec3(dark);
     vec3 haze = vec3(0.0);
     float beat = u_beat * s_react / 100.0;
@@ -34,8 +36,8 @@ vec4 effect(vec2 uv) {
         float cone = (1.0 - smoothstep(0.0, radius * along * 0.9 + 0.005, off)) * along * step(0.0, dot(p - lamp, to));
         float flicker = 0.95 + 0.05 * sin(u_time * 13.0 + float(i) * 4.0);
         vec3 colour = gel(i) * flicker * (1.0 + 0.5 * beat);
-        light += colour * spot * seen * 1.15;
-        haze += colour * cone * seen * 0.12 * s_haze / 100.0 * (0.7 + 0.3 * noise(p * 6.0 + vec2(u_time * 0.2, 0.0)));
+        light += colour * spot * seen * 1.15 * u_amount;
+        haze += colour * cone * seen * 0.12 * s_haze / 100.0 * u_amount * (0.7 + 0.3 * noise(p * 6.0 + vec2(u_time * 0.2, 0.0)));
     }
     return vec4(film * light + haze, 1.0);
 }

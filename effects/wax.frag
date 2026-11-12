@@ -1,5 +1,6 @@
 // Wax Museum: below each face, columns of the picture are pulled from the face's lower half,
-// each column to its own length, so the chin runs in drips.
+// each column to its own length, so the chin runs in drips. Fading in, the drips run longer
+// from nothing.
 
 float drip(float x, float t) {
     return 0.5 + 0.28 * sin(x * 31.0 + t) + 0.14 * sin(x * 83.0 - t * 1.7) + 0.08 * sin(x * 171.0 + t * 0.6);
@@ -18,7 +19,7 @@ vec4 effect(vec2 uv) {
         float inside = (b.x + b.z) * 0.5;
         float edge = 1.0 - smoothstep(0.32, 0.5, abs(uv.x - inside) / size.x);
         if (edge <= 0.0) continue;
-        float length_of = size.y * 1.8 * s_melt / 100.0 * drip(uv.x / max(size.x, 1e-3), t + float(i)) * u_face_seen[i];
+        float length_of = size.y * 1.8 * s_melt / 100.0 * drip(uv.x / max(size.x, 1e-3), t + float(i)) * u_face_seen[i] * u_amount;
         float chin = b.y + size.y * 0.32;
         float bottom = chin - length_of;
         if (uv.y < chin && uv.y > bottom) {

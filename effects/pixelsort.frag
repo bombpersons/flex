@@ -1,5 +1,6 @@
 // Pixel Sort Waterfall: anything bright above a point falls into it, a little further each frame,
 // at a speed that differs from column to column. Near the bottom it stops falling and piles up.
+// Fading in, more and more of what falls stays, so the falls thicken from nothing.
 
 float luma(vec3 c) {
     return dot(c, vec3(0.3, 0.59, 0.11));
@@ -18,6 +19,6 @@ vec4 effect(vec2 uv) {
     vec3 falling = texture(u_prev, above).rgb;
     float level = s_level / 100.0 + (hash(vec2(column, 3.0)) - 0.5) * 0.1;
     float bright = smoothstep(level, level + 0.1, luma(falling));
-    vec3 c = mix(video, falling, bright * s_stay / 100.0);
+    vec3 c = mix(video, falling, bright * s_stay / 100.0 * u_amount);
     return vec4(c, 1.0);
 }

@@ -1,5 +1,6 @@
 // Tiny Heads: the opposite of Big Heads. The head is drawn small on its chin, and the ring of
-// picture around it is stretched in to fill the gap, so nothing has to be invented.
+// picture around it is stretched in to fill the gap, so nothing has to be invented. Fading in,
+// heads shrink from their own size.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -13,7 +14,7 @@ vec4 effect(vec2 uv) {
         Face f = face_frame(i, aspect);
         vec2 size = (u_faces[i].zw - u_faces[i].xy) * aspect;
         vec2 chin = 0.5 * (u_faces[i].xy + u_faces[i].zw) * aspect - f.up * size.y * 0.5;
-        float zoom = mix(1.0, s_size / 100.0 * (1.0 - 0.25 * u_bass * s_react / 100.0), seen);
+        float zoom = mix(1.0, s_size / 100.0 * (1.0 - 0.25 * u_bass * s_react / 100.0), seen * u_amount);
         vec2 head = size * vec2(0.8, 0.75);
         vec2 real_middle = chin + f.up * size.y * 0.62;
         vec2 drawn_middle = chin + f.up * size.y * 0.62 * zoom;

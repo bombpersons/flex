@@ -268,6 +268,9 @@ pub struct Shuffle {
     pub longest: f32,
     /// How long one effect takes to fade into the next, in seconds: 0 is straight away.
     pub fade: f32,
+    /// Fade through the plain picture: the effect going eases itself away (each in its own way,
+    /// as `u_amount` falls), then the next one eases in, instead of one dissolving into the other.
+    pub through_normal: bool,
     /// Change where the shot changes, once the shortest turn is up, instead of at a random
     /// moment. After the longest turn it changes anyway.
     pub at_cuts: bool,
@@ -283,7 +286,7 @@ pub struct Shuffle {
 
 impl Default for Shuffle {
     fn default() -> Self {
-        Self { on: false, shortest: 20.0, longest: 60.0, fade: 4.0, at_cuts: false, by_shot: true, randomise: 0.0, sounds: 0.0 }
+        Self { on: false, shortest: 20.0, longest: 60.0, fade: 4.0, through_normal: false, at_cuts: false, by_shot: true, randomise: 0.0, sounds: 0.0 }
     }
 }
 
@@ -308,6 +311,16 @@ impl Default for Drift {
 const DRIFT_PERIOD: f64 = 90.0;
 
 /// An effect on its way out.
+/// How to draw the picture during a fade: the effect going (if it's still showing) with how much
+/// of it there is (its `u_amount`, 0 the plain picture to 1 all of it), how far the chosen effect
+/// has faded in over it (0–1), and how much of the chosen effect there is.
+#[derive(Clone, Debug)]
+pub struct Fade {
+    pub from: Option<(ActiveEffect, f32)>,
+    pub faded_in: f32,
+    pub amount: f32,
+}
+
 struct Fading {
     from: String,
     /// The sound effect that was playing.
@@ -739,6 +752,18 @@ impl Effects {
         let from = self.effects.iter().find(|e| e.id == fading.from)?;
         let t = (fading.elapsed / self.shuffle.fade.max(0.01)).clamp(0.0, 1.0);
         Some((self.to_draw(from), t * t * (3.0 - 2.0 * t)))
+    }
+
+    /// How the picture's drawn at this point of a fade (see `Fade`).
+    pub fn fade(&self) -> Fade {
+        let Some((from, t)) = self.fading() else { return Fade { from: None, faded_in: 1.0, amount: 1.0 } };
+        if !self.shuffle.through_normal {
+            return Fade { from: Some((from, 1.0)), faded_in: t, amount: 1.0 };
+        }
+        // The first half eases the old one away, the second eases the new one in.
+        let raw = self.fading.as_ref().map_or(1.0, |f| (f.elapsed / self.shuffle.fade.max(0.01)).clamp(0.0, 1.0));
+        let ease = |t: f32| t * t * (3.0 - 2.0 * t);
+        if raw < 0.5 { Fade { from: Some((from, 1.0 - ease(raw * 2.0))), faded_in: 0.0, amount: 0.0 } } else { Fade { from: None, faded_in: 1.0, amount: ease(raw * 2.0 - 1.0) } }
     }
 
     /// The sound effects there are.
@@ -1288,6 +1313,31 @@ mod tests {
     }
 
     #[test]
+    fn fading_through_normal_eases_one_out_then_the_next_in() {
+        let root = std::env::temp_dir().join(format!("flex-effects-through-{}", std::process::id()));
+        write(&root, "a.frag", "");
+        write(&root, "b.frag", "");
+        let db = Db::open_in_memory().unwrap();
+        let dirs = [root.clone()];
+        let mut effects = Effects::new(&dirs, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, through_normal: true, at_cuts: false, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
+        let first = effects.chosen().unwrap().id.clone();
+        effects.step(10.5, true);
+        assert_ne!(effects.chosen().unwrap().id, first);
+        let fade = effects.fade();
+        assert_eq!(fade.from.as_ref().map(|(e, _)| e.id.clone()), Some(first.clone()));
+        assert_eq!((fade.faded_in, fade.amount), (0.0, 0.0));
+        effects.step(0.5, true);
+        assert!((effects.fade().from.unwrap().1 - 0.5).abs() < 1e-4, "halfway out");
+        effects.step(0.75, true);
+        let fade = effects.fade();
+        assert!(fade.from.is_none() && fade.faded_in == 1.0 && fade.amount > 0.0 && fade.amount < 1.0);
+        effects.step(1.0, true);
+        assert_eq!(effects.fade().amount, 1.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn shuffle_takes_turns_and_fades() {
         let root = std::env::temp_dir().join(format!("flex-effects-shuffle-{}", std::process::id()));
         write(&root, "a.frag", "");
@@ -1302,7 +1352,7 @@ mod tests {
         let mut effects = Effects::new(&dirs, &db);
         assert!(!effects.needs().audio, "nothing's on");
 
-        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, through_normal: false, at_cuts: false, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
         let first = effects.chosen().expect("shuffle starts one").id.clone();
         let needs = effects.needs();
         assert_eq!((needs.audio, needs.depth, needs.faces, needs.scale), (true, true, false, 1.0), "all that it might pick");
@@ -1339,7 +1389,7 @@ mod tests {
         assert!(effects.fading().is_none());
 
         // At cuts: not before the shortest turn, and only when asked to.
-        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 30.0, fade: 2.0, at_cuts: true, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 30.0, fade: 2.0, through_normal: false, at_cuts: true, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
         let before = effects.chosen().unwrap().id.clone();
         effects.step(9.0, true);
         effects.scene_changed(ShotHint::default());
@@ -1354,18 +1404,18 @@ mod tests {
         effects.step(2.0, true);
         assert_ne!(effects.chosen().unwrap().id, at_cut);
         // A fade of 0 switches at once, whichever way it's changing.
-        effects.set_shuffle(Shuffle { on: true, shortest: 1.0, longest: 30.0, fade: 0.0, at_cuts: true, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 1.0, longest: 30.0, fade: 0.0, through_normal: false, at_cuts: true, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
         effects.step(2.0, true);
         let sharp = effects.chosen().unwrap().id.clone();
         effects.scene_changed(ShotHint::default());
         assert_ne!(effects.chosen().unwrap().id, sharp);
         assert!(effects.fading().is_none());
-        effects.set_shuffle(Shuffle { on: true, shortest: 5.0, longest: 5.0, fade: 0.0, at_cuts: false, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 5.0, longest: 5.0, fade: 0.0, through_normal: false, at_cuts: false, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
         let sharp = effects.chosen().unwrap().id.clone();
         effects.step(6.0, true);
         assert_ne!(effects.chosen().unwrap().id, sharp);
         assert!(effects.fading().is_none());
-        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, through_normal: false, at_cuts: false, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
         effects.step(2.0, false);
         effects.step(11.0, true);
         let moved = effects.chosen().unwrap().id.clone();
@@ -1432,7 +1482,7 @@ mod tests {
         let dirs = [root.clone()];
         let mut effects = Effects::new(&dirs, &db);
         effects.choose(Some("one"), &db);
-        let on = Shuffle { on: true, shortest: 1.0, longest: 1.0, fade: 0.0, at_cuts: false, by_shot: false, randomise: 100.0, sounds: 0.0 };
+        let on = Shuffle { on: true, shortest: 1.0, longest: 1.0, fade: 0.0, through_normal: false, at_cuts: false, by_shot: false, randomise: 100.0, sounds: 0.0 };
         effects.set_shuffle(on, &db);
 
         let mut seen = std::collections::HashSet::new();
@@ -1485,7 +1535,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let mut effects = Effects::new(std::slice::from_ref(&root), &db);
         effects.choose(Some("one"), &db);
-        effects.set_shuffle(Shuffle { on: true, shortest: 1.0, longest: 1.0, fade: 0.0, at_cuts: false, by_shot: false, randomise: 100.0, sounds: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 1.0, longest: 1.0, fade: 0.0, through_normal: false, at_cuts: false, by_shot: false, randomise: 100.0, sounds: 0.0 }, &db);
         let mut modes = std::collections::HashSet::new();
         for _ in 0..100 {
             effects.step(2.0, true);

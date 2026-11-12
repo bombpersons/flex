@@ -1,6 +1,7 @@
 // Googly Eyes: each pupil is a little physics simulation. It stays put as the head moves, falls,
 // and bounces off the rim, and bangs and explosions rattle it. Its state is six numbers an eye in the
-// alpha of the bottom row of u_prev.
+// alpha of the bottom row of u_prev. Fading in, the eyes swell up from nothing; the pupils' physics
+// carries on as it is.
 
 vec2 kept(int at) {
     return vec2(texelFetch(u_prev, ivec2(at, 0), 0).a, texelFetch(u_prev, ivec2(at + 1, 0), 0).a);
@@ -44,19 +45,21 @@ vec4 effect(vec2 uv) {
                 int k = pixel.x - base;
                 if (k < 2) alpha = o[k]; else if (k < 4) alpha = v[k - 2]; else alpha = at[k - 4];
             }
-            if (!here) continue;
-            float d = length(p - at) / radius;
+            if (!here || u_amount <= 0.0) continue;
+            // Drawn at their size by u_amount, though the pupil moves as it would at full size.
+            float drawn = radius * u_amount;
+            float d = length(p - at) / drawn;
             if (d > 1.15) continue;
             vec3 eye = mix(vec3(0.0), vec3(0.97, 0.97, 0.95) * (1.0 - 0.12 * d * d), 1.0 - smoothstep(0.93, 0.98, d));
-            float pupil = length((p - at) / radius - offset);
+            float pupil = length((p - at) / drawn - offset);
             eye = mix(eye, vec3(0.02), 1.0 - smoothstep(0.34, 0.38, pupil));
-            eye += vec3(0.9) * (1.0 - smoothstep(0.08, 0.12, length((p - at) / radius - vec2(-0.32, 0.38))));
+            eye += vec3(0.9) * (1.0 - smoothstep(0.08, 0.12, length((p - at) / drawn - vec2(-0.32, 0.38))));
             // Blinks are a skin-coloured lid coming down over the plastic.
             if (meshed(i)) {
                 float open = e == 0 ? u_face_open[i].x : u_face_open[i].y;
                 float lid_at = mix(-1.05, 1.1, smoothstep(0.03, 0.45, open));
-                if (dot(p - at, f.up) / radius > lid_at) {
-                    vec3 skin = texture(u_video, (at + f.up * radius * 1.7) / aspect).rgb;
+                if (dot(p - at, f.up) / drawn > lid_at) {
+                    vec3 skin = texture(u_video, (at + f.up * drawn * 1.7) / aspect).rgb;
                     eye = mix(skin, skin * 0.55, smoothstep(0.75, 1.0, d));
                 }
             }

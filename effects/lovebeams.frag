@@ -1,6 +1,7 @@
 // Love Beams: hearts leave each eye along the way the face is pointing, growing and fading as they
 // go. Straight at the camera, they float upwards instead. Singing, laughter and sweet music send
 // out more and bigger hearts; crying and sad music turn them blue, and they crack and sink.
+// Fading in, the hearts grow from nothing.
 
 // Which way a face points on screen: length 0 straight at the camera, nearing 1 side on.
 vec2 facing(Face f) {
@@ -28,7 +29,7 @@ vec4 effect(vec2 uv) {
     float sad = clamp((u_sound_crying + u_sound_sad_music) * react, 0.0, 1.0);
     vec3 colour = mix(vec3(1.0, 0.16, 0.42), vec3(0.25, 0.45, 1.0), sad);
     for (int i = 0; i < u_face_count; i++) {
-        float seen = u_face_seen[i];
+        float seen = u_face_seen[i] * step(1e-3, u_amount);
         if (seen <= 0.0) continue;
         Face f = face_frame(i, aspect);
         vec2 aim = u_face_turn[i].w > 0.5 ? u_face_turn[i].xy : facing(f);
@@ -46,7 +47,7 @@ vec4 effect(vec2 uv) {
                 vec2 at = eye + d * along * 1.1 + side * sin(along * 14.0 + slot * 2.0) * 0.03;
                 // Sad hearts sink as they go.
                 at.y -= sad * along * along * 0.35;
-                float size = f.spread * (0.14 + 0.5 * along) * s_size / 100.0 * (1.0 + 0.4 * u_beat * s_react / 100.0) * (1.0 + 0.35 * love);
+                float size = f.spread * (0.14 + 0.5 * along) * s_size / 100.0 * (1.0 + 0.4 * u_beat * s_react / 100.0) * (1.0 + 0.35 * love) * max(u_amount, 1e-3);
                 vec2 q = (p - at) / size;
                 if (dot(q, q) > 3.0) continue;
                 // A sad heart breaks down a zigzag, its halves drifting apart. Unbroken, the two halves

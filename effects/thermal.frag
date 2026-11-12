@@ -1,7 +1,8 @@
 // Thermal Vision: heat made up from brightness, nearness, people and faces, through a false-colour
 // palette, with three red dots hunting each face. With MoGe-2's head, bodies aren't evenly warm
 // (heads and middles hottest, hands and feet cooler, clothes cooler than skin), animals are as
-// warm as people, vehicles a little warm, and sky and water cold.
+// warm as people, vehicles a little warm, and sky and water cold. Fading in, the palette comes
+// over the film and the dots come up.
 
 vec3 ramp(float t, vec3 a, vec3 b, vec3 c, vec3 d, vec3 e) {
     t = clamp(t, 0.0, 1.0) * 4.0;
@@ -47,6 +48,7 @@ vec4 effect(vec2 uv) {
     h += (eye_at(uv) * 0.1 + mouth_at(uv) * 0.2 + lips_at(uv) * 0.05 - nose_at(uv) * 0.16) * people;
     h += u_bass * 0.04 + (noise(uv * u_resolution * 0.4 + u_time * 37.0) - 0.5) * 0.02;
     vec3 c = colours(h);
+    if (u_amount < 1.0) c = mix(texture(u_video, uv).rgb, c, u_amount);
     if (s_sights < 0.5) {
         vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
         vec2 p = uv * aspect;
@@ -59,7 +61,7 @@ vec4 effect(vec2 uv) {
                 dots = max(dots, u_face_seen[i] * (1.0 - smoothstep(0.006, 0.012, length(p - centre - vec2(cos(a), sin(a)) * size))));
             }
         }
-        c = mix(c, vec3(1.0, 0.0, 0.0), dots);
+        c = mix(c, vec3(1.0, 0.0, 0.0), dots * u_amount);
     }
     return vec4(c, 1.0);
 }

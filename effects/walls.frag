@@ -1,6 +1,7 @@
 // Breathing Walls: the room is the inside of something alive. The walls swell in and out with
 // each breath, in a wave from the far end, buckling along folds that the light catches, with a
-// wet sheen and veins that throb. Nobody in the room moves with them.
+// wet sheen and veins that throb. Nobody in the room moves with them. Fading in, the walls start
+// to breathe more and more deeply as they turn to flesh.
 
 float fbm4(vec2 p) {
     float sum = 0.0, amount = 0.5;
@@ -64,7 +65,7 @@ vec4 effect(vec2 uv) {
     float hy = flesh(s + vec2(0.0, e), t, full) - flesh(s - vec2(0.0, e), t, full);
     vec2 slope = vec2(hx, hy) / (2.0 * e);
 
-    float amount = s_breath / 100.0 * room * (0.5 + near * 0.8);
+    float amount = s_breath / 100.0 * u_amount * room * (0.5 + near * 0.8);
     float dist = max(length(q), 1e-3);
     float gather = (full - 0.5) * (0.05 + 0.03 * height);
     float ripple = 0.006 * s_folds / 100.0;
@@ -73,25 +74,25 @@ vec4 effect(vec2 uv) {
 
     vec3 w = texture(u_video, from).rgb;
     // People shouldn't get dragged along with the wall behind them.
-    float over = smoothstep(0.25, 0.6, person_at(from)) * plate_known(from);
+    float over = smoothstep(0.25, 0.6, person_at(from)) * plate_known(from) * u_amount;
     if (over > 0.0) w = mix(w, plate_at(from), over);
 
-    float folds = s_folds / 100.0;
+    float folds = s_folds / 100.0 * u_amount;
     float shade = 1.0 + clamp(dot(slope, normalize(vec2(-0.45, 0.9))) * 0.22, -0.65, 0.6) * folds;
     w *= shade * mix(1.0, 0.62 + 0.55 * clamp(height, 0.0, 1.0), folds);
 
     float luma = dot(w, vec3(0.3, 0.59, 0.11));
     vec3 meat = mix(vec3(0.5, 0.08, 0.1), vec3(1.0, 0.55, 0.47), clamp(luma * 1.4, 0.0, 1.0)) * (0.3 + luma * 1.3);
-    w = mix(w, meat, s_flesh / 100.0);
+    w = mix(w, meat, s_flesh / 100.0 * u_amount);
 
     vec2 vp = s * 2.1 + 0.4 * vec2(fbm4(s * 2.0 + 5.0), fbm4(s * 2.0 + 19.0));
     float veins = pow(1.0 - abs(2.0 * fbm4(vp) - 1.0), 26.0) + 0.6 * pow(1.0 - abs(2.0 * fbm4(vp * 2.3 + 8.0) - 1.0), 40.0);
     float throb = 0.55 + 0.45 * full + 0.6 * u_beat * react;
-    w = mix(w, vec3(0.32, 0.02, 0.1) * (0.6 + 1.6 * throb), clamp(veins * throb, 0.0, 1.0) * s_veins / 100.0);
+    w = mix(w, vec3(0.32, 0.02, 0.1) * (0.6 + 1.6 * throb), clamp(veins * throb, 0.0, 1.0) * s_veins / 100.0 * u_amount);
 
     vec3 normal = normalize(vec3(-slope * 0.35, 1.0));
     float gloss = pow(max(dot(normal, normalize(vec3(-0.3, 0.55, 0.78))), 0.0), 48.0);
-    w += vec3(1.0, 0.92, 0.9) * gloss * s_wet / 100.0 * (0.4 + 1.2 * luma);
+    w += vec3(1.0, 0.92, 0.9) * gloss * s_wet / 100.0 * u_amount * (0.4 + 1.2 * luma);
 
     return vec4(mix(c, w, smoothstep(0.0, 0.25, room)), 1.0);
 }

@@ -1,4 +1,5 @@
 // Giraffe Necks: each head is lifted off and the bit of neck under the chin is stretched to reach it.
+// Fading in, the necks grow from their own length.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -11,8 +12,8 @@ vec4 effect(vec2 uv) {
         Face f = face_frame(i, aspect);
         vec2 size = (u_faces[i].zw - u_faces[i].xy) * aspect;
         vec2 chin = 0.5 * (u_faces[i].xy + u_faces[i].zw) * aspect - f.up * size.y * 0.5;
-        float lift = size.y * s_lift / 100.0 * 1.4 * (1.0 + 0.3 * u_bass * s_react / 100.0) * seen;
-        float swing = sin(t * 1.3 + float(i) * 2.0) * s_sway / 100.0 * size.x * 0.9;
+        float lift = size.y * s_lift / 100.0 * 1.4 * (1.0 + 0.3 * u_bass * s_react / 100.0) * seen * u_amount;
+        float swing = sin(t * 1.3 + float(i) * 2.0) * s_sway / 100.0 * size.x * 0.9 * u_amount;
         vec2 rel = p - chin;
         float up = dot(rel, f.up);
         float along = clamp(up / max(lift, 1e-4), 0.0, 1.0);
@@ -23,8 +24,9 @@ vec4 effect(vec2 uv) {
         float low = size.y * 0.3;
         if (up > -low && up < lift + size.y * 0.1 && abs(x) < neck) {
             float reach = (up + low) / (lift + low);
-            vec2 from = chin + f.across * x + f.up * (-low + reach * low * 0.95);
-            float shade = 0.8 + 0.25 * cos(x / neck * 1.57);
+            // Short of all of it, the neck is drawn from more of itself, all of itself at none.
+            vec2 from = chin + f.across * x + f.up * (-low + reach * low * 0.95 + reach * (lift + low * 0.05) * (1.0 - u_amount));
+            float shade = mix(1.0, 0.8 + 0.25 * cos(x / neck * 1.57), u_amount);
             c = mix(c, texture(u_video, from / aspect).rgb * shade, (1.0 - smoothstep(neck * 0.9, neck, abs(x))) * seen);
         }
         // The head, on top of it.

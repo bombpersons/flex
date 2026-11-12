@@ -1,7 +1,7 @@
 // Night City: the shot turned to night. The sky goes deep blue and fills with stars, buildings
 // go dark with their windows lit one by one (some going on and off as the night goes by), real
 // windows glow, streetlight slides over vehicles, and people are lit by the moon. The stars and
-// windows stay put as the camera moves (camera = true).
+// windows stay put as the camera moves (camera = true). Fading in, night comes down gradually.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -10,7 +10,7 @@ vec4 effect(vec2 uv) {
     vec2 pinned = shot_uv(uv) * aspect;
     float shot = mod(u_shot_start * 100.0, 971.0);
     float luma = dot(c, vec3(0.3, 0.59, 0.11));
-    float night = s_dark / 100.0;
+    float night = s_dark / 100.0 * u_amount;
     // Everything: dark and blue, the brightest things kept a little.
     vec3 shown = mix(c, vec3(luma) * vec3(0.35, 0.45, 0.8), night * 0.8) * mix(1.0, 0.28 + 0.5 * luma, night);
     // People: moonlight from above, so they stand out a little.

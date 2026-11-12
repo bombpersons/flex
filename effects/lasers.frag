@@ -1,6 +1,7 @@
 // Laser Eyes: a beam from each eye, drawn as light added to the picture. Beams go the way the
 // face is pointing, worked out from where the nose sits between the eyes and mouth. Someone
-// looking straight at the camera is firing at you, so their beams shrink into a flare.
+// looking straight at the camera is firing at you, so their beams shrink into a flare. Fading in,
+// the beams shoot out from the eyes as they brighten.
 
 // Where the nose tip sits between the eyes and the mouth when the head is level.
 const float LEVEL_NOSE = 0.53;
@@ -56,7 +57,7 @@ vec4 effect(vec2 uv) {
         vec2 aim = u_face_turn[i].w > 0.5 ? u_face_turn[i].xy : facing(i, aspect);
         // Close to head-on the direction means little, so the beam is short or not there at all.
         float out_of_screen = smoothstep(0.08, 0.3, length(aim));
-        float reach = 3.0 * out_of_screen * out_of_screen;
+        float reach = 3.0 * out_of_screen * out_of_screen * u_amount;
         float wander = 0.25 * s_sweep / 100.0 * sin(t * 1.3 + float(i) * 2.1);
         vec2 d = normalize(aim + vec2(0.0, 1e-5));
         d = vec2(d.x * cos(wander) - d.y * sin(wander), d.x * sin(wander) + d.y * cos(wander));
@@ -72,7 +73,7 @@ vec4 effect(vec2 uv) {
             // A beam starts at the face, so anything nearer than that hides it.
             float b = beam(p, eye, d, width, reach) * (1.0 - smoothstep(0.04, 0.12, depth_at(uv) - depth_at(0.5 * (right + left) / aspect)));
             float flash = 1.0 / (1.0 + pow(length(p - eye) / (spread * 0.14 * flare * (2.2 - 1.2 * out_of_screen)), 2.0));
-            light += (b * power + flash * 0.9 * power) * u_face_seen[i] * lit;
+            light += (b * power + flash * 0.9 * power) * u_face_seen[i] * lit * u_amount;
         }
     }
     vec3 colour = tint();

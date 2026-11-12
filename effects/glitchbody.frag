@@ -1,5 +1,6 @@
 // Glitch Bodies: the picture is cut into strips, each pushed sideways a random amount that changes
 // on the beat, but only what's a person gets moved. Where someone has moved off, the signal drops out.
+// Fading in, the tears and the colour split widen from nothing.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -7,7 +8,7 @@ vec4 effect(vec2 uv) {
     float t = u_video_time;
     float strip = floor(uv.y * u_resolution.y / (s_strips * u_resolution.y / 720.0));
     float moment = floor(t * 9.0);
-    float strength = (s_always / 100.0 * step(0.55, hash(vec2(strip, moment + 3.0))) + u_beat) * s_tear / 100.0;
+    float strength = (s_always / 100.0 * step(0.55, hash(vec2(strip, moment + 3.0))) + u_beat) * s_tear / 100.0 * u_amount;
     float shift = (hash(vec2(strip, moment)) - 0.5) * 0.28 * strength;
     float person_here = smoothstep(0.4, 0.65, person_at(uv));
     vec2 from = uv + vec2(shift, 0.0);
@@ -20,7 +21,7 @@ vec4 effect(vec2 uv) {
         shown = mix(c, mix(plate_at(uv) * 0.8, vec3(n) * vec3(0.3, 0.9, 1.0), 0.35), person_here);
     }
     if (there > 0.0) {
-        float apart = (0.004 + abs(shift) * 0.2) * s_split / 50.0;
+        float apart = (0.004 + abs(shift) * 0.2) * s_split / 50.0 * u_amount;
         vec3 body = vec3(texture(u_video, from + vec2(apart, 0.0)).r, texture(u_video, from).g, texture(u_video, from - vec2(apart, 0.0)).b);
         shown = mix(shown, body, there);
     }

@@ -1,5 +1,6 @@
 // Silhouette Cosmos: a nebula and three layers of stars, either inside people's outlines or
-// everywhere except inside them.
+// everywhere except inside them. Fading in, the nebula seeps in through its thinnest clouds first
+// and the rim lights up.
 
 vec3 stars(vec2 p, float scale, float t) {
     vec2 q = p * scale;
@@ -29,9 +30,10 @@ vec4 effect(vec2 uv) {
         vec3 sky = nebula * (1.0 + u_bass * s_react / 100.0);
         vec3 lights = stars(p + t * 0.02, 18.0, u_time) + stars(p + t * 0.04, 34.0, u_time) * 0.7 + stars(p + t * 0.08, 60.0, u_time) * 0.5;
         sky += lights * s_stars / 50.0 * (1.0 + 2.0 * u_treble * s_react / 100.0);
-        c = mix(c, sky, inside);
+        float seeped = smoothstep(0.0, 1.0, u_amount * 1.6 - clamp(cloud, 0.0, 1.0) * 0.6);
+        c = mix(c, sky, inside * seeped);
     }
     float edge = smoothstep(0.15, 0.5, mask) * (1.0 - smoothstep(0.5, 0.85, mask));
-    c += edge * vec3(0.5, 0.7, 1.0) * s_rim / 60.0;
+    c += edge * vec3(0.5, 0.7, 1.0) * s_rim / 60.0 * u_amount;
     return vec4(c, 1.0);
 }

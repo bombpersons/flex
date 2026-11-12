@@ -1,5 +1,6 @@
 // Clone Army: copies people, smaller and further up the screen with each row, drawn from the
-// back forwards, with the real people in front of them all.
+// back forwards, with the real people in front of them all. Fading in, the clones drop down into
+// their places from above.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -14,7 +15,7 @@ vec4 effect(vec2 uv) {
         float bounce = abs(sin(u_video_time * 3.0 + r)) * 0.02 * (0.3 + u_beat * s_react / 50.0);
         for (int column = -row; column <= row; column++) {
             float shifted = (float(column) + (mod(r, 2.0) > 0.5 ? 0.0 : 0.5)) * 0.42;
-            vec2 from = (uv - horizon - vec2(shifted * size, bounce)) / size + horizon;
+            vec2 from = (uv - horizon - vec2(shifted * size, bounce + (1.0 - u_amount) * 1.2)) / size + horizon;
             if (from != clamp(from, u_video_rect.xy, u_video_rect.zw)) continue;
             float there = smoothstep(0.4, 0.7, person_at(from));
             if (there <= 0.0) continue;

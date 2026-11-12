@@ -1,5 +1,6 @@
 // Deal With It: chunky pixel sunglasses, on a grid that turns with the face. When each face turned
-// up is kept in the alpha of the bottom row, to time the drop.
+// up is kept in the alpha of the bottom row, to time the drop. Fading in, the shades drop in from
+// above the picture; the timing's remembered as it is.
 
 float recalled(int x) {
     return texelFetch(u_prev, ivec2(x, 0), 0).a;
@@ -37,10 +38,10 @@ vec4 effect(vec2 uv) {
         bool here = i < u_face_count && u_face_seen[i] > 0.02;
         if (!here || born > t) born = t;
         if (pixel.y == 0 && pixel.x >= i * 3 && pixel.x < i * 3 + 3) alpha = remember(born, pixel.x - i * 3);
-        if (!here) continue;
+        if (!here || u_amount <= 0.0) continue;
         Face f = face_frame(i, aspect);
         float landed = clamp((t - born) / (s_drop / 10.0), 0.0, 1.0);
-        float fall = 1.0 - landed * landed * (3.0 - 2.0 * landed);
+        float fall = mix(1.0, 1.0 - landed * landed * (3.0 - 2.0 * landed), u_amount);
         vec2 rel = p - f.eyes - f.up * (fall * 1.5 + 0.02 * u_beat * s_react / 100.0);
         float cell = f.spread / 10.5 * s_size / 100.0;
         int s = shades(vec2(dot(rel, f.across), dot(rel, f.up)) / cell);

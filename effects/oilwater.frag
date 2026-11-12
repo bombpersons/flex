@@ -1,5 +1,6 @@
 // Oil on Water: colours from light interfering in a thin film whose thickness flows about and
-// piles up around people, as an oil slick's bands bunch round a stone.
+// piles up around people, as an oil slick's bands bunch round a stone. Fading in, the slick's
+// colours come up from nothing.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -16,6 +17,6 @@ vec4 effect(vec2 uv) {
     float order = film * 7.0 * s_bands / 100.0;
     vec3 colour = 0.5 + 0.5 * cos(6.2831853 * order * vec3(1.0, 1.22, 1.45));
     float shine = 0.35 + 0.65 * (1.0 - dot(c, vec3(0.33)));
-    float amount = s_strength / 100.0 * shine * (1.0 - smoothstep(0.3, 0.7, person) * s_people / 100.0);
+    float amount = s_strength / 100.0 * u_amount * shine * (1.0 - smoothstep(0.3, 0.7, person) * s_people / 100.0);
     return vec4(c + (colour - 0.5) * amount * (0.4 + dot(c, vec3(0.5))), 1.0);
 }

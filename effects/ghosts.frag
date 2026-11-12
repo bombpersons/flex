@@ -1,5 +1,6 @@
 // Ghosts: hung through the air of the shot's world, a few to each cell of a grid around where the
 // camera is looking, each drifting on a slow loop of its own. Whatever's nearer stands in front.
+// Fading in, the ghosts swell out of the air and the chill comes over the picture.
 
 // Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
 float noise_h3(vec2 p) {
@@ -85,18 +86,18 @@ vec4 effect(vec2 uv) {
             if (kept <= 0.0) continue;
             vec3 place = world_to_screen(world);
             if (place.z < 0.15) continue;
-            float tall = picture_size(0.22 * s_size / 100.0, place.z);
+            float tall = picture_size(0.22 * s_size / 100.0, place.z) * max(u_amount, 1e-3);
             vec2 q = (uv - place.xy) * aspect / tall;
             q.x += startled * 0.08 * sin(t * 37.0 + phase * 5.0);
             if (abs(q.x) > 0.6 || abs(q.y) > 0.6) continue;
             float seen = smoothstep(place.z * 0.9, place.z * 1.1, scene_distance);
             float flicker = 0.8 + 0.2 * sin(t * 2.3 + phase * 3.0);
-            float shown = woken * (1.0 + 0.5 * haunted) * (1.0 - 0.8 * startled);
+            float shown = woken * (1.0 + 0.5 * haunted) * (1.0 - 0.8 * startled) * step(1e-3, u_amount);
             pale = max(pale, ghost(q, t, hash(seed + 7.0)) * seen * kept * flicker * shown);
         }
     }
     float grey = dot(film, vec3(0.3, 0.59, 0.11));
-    vec3 cold = mix(film, vec3(grey) * vec3(0.85, 0.95, 1.05), s_chill / 100.0 * u_world_ready);
+    vec3 cold = mix(film, vec3(grey) * vec3(0.85, 0.95, 1.05), s_chill / 100.0 * u_world_ready * u_amount);
     vec3 c = mix(cold, vec3(0.82, 0.95, 1.0) * (0.75 + 0.5 * grey), pale * 0.6 * u_world_ready);
     c += vec3(0.5, 0.75, 0.9) * pale * pale * 0.25 * u_world_ready;
     return vec4(c, 1.0);

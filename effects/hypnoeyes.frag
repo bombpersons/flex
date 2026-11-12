@@ -1,4 +1,5 @@
-// Hypno Eyes: a spiral in each eye, with rings of light spreading from it on the beat.
+// Hypno Eyes: a spiral in each eye, with rings of light spreading from it on the beat. Fading in,
+// the spirals and their rings grow out of the middle of each eye.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -7,10 +8,10 @@ vec4 effect(vec2 uv) {
     float t = u_time * s_spin / 100.0;
     vec3 light = vec3(0.0);
     for (int i = 0; i < u_face_count; i++) {
-        float seen = u_face_seen[i];
+        float seen = u_face_seen[i] * step(1e-3, u_amount);
         if (seen <= 0.0) continue;
         Face f = face_frame(i, aspect);
-        float radius = f.spread * 0.33 * s_size / 100.0;
+        float radius = f.spread * 0.33 * s_size / 100.0 * max(u_amount, 1e-3);
         for (int e = 0; e < 2; e++) {
             vec2 eye = e == 0 ? f.right : f.left;
             vec2 rel = (p - eye) / radius;

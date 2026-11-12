@@ -1,4 +1,5 @@
 // Mind Bloom: the picture folded into a kaleidoscope, added to a zoomed copy of the last frame.
+// Fading in, the picture bends into its folds and the copies start to build up.
 
 vec4 effect(vec2 uv) {
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) {
@@ -20,9 +21,10 @@ vec4 effect(vec2 uv) {
     fold *= 1.0 - (depth_at(q) - 0.5) * s_relief / 100.0 * 0.6;
     q = abs(mod(fold / size + 0.5, 2.0));
     q = u_video_rect.xy + size * min(q, 2.0 - q);
+    q = q * u_amount + uv * (1.0 - u_amount);
     vec3 scope = texture(u_video, q).rgb;
     vec2 inward = centre + (uv - centre) * (0.985 - 0.02 * u_beat);
     vec3 past = hue_rotate(texture(u_prev, inward).rgb, 0.05 + 0.2 * u_beat);
-    float keep = 0.6 + 0.37 * s_bloom / 100.0;
-    return vec4(max(scope * (1.05 - keep * 0.55), past * keep), 1.0);
+    float keep = (0.6 + 0.37 * s_bloom / 100.0) * u_amount;
+    return vec4(max(scope * (1.05 - 0.05 * (1.0 - u_amount) - keep * 0.55), past * keep), 1.0);
 }

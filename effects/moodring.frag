@@ -1,7 +1,8 @@
 // Mood Ring: the film's colours follow how its music feels. Each mood has a grade of its own, and
 // they mix in the shares Flex hears them in, so a score that turns from tender to scary takes the
 // picture with it. Without music the film looks as it is. A ring in the corner shows the mood's
-// colour, like the stone in a mood ring.
+// colour, like the stone in a mood ring. Fading in, the grades come up to strength and the ring
+// grows from a point.
 
 float luma(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
@@ -16,7 +17,7 @@ vec3 contrast(vec3 c, float amount, float pivot) {
 }
 
 vec4 effect(vec2 uv) {
-    float k = s_strength / 100.0;
+    float k = s_strength / 100.0 * u_amount;
     float aspect = u_resolution.x / u_resolution.y;
     float t = u_time;
     vec2 centre = mix(u_video_rect.xy, u_video_rect.zw, 0.5);
@@ -65,7 +66,7 @@ vec4 effect(vec2 uv) {
     c = mix(c, g, clamp(scary, 0.0, 1.0));
 
     // The ring: a glossy stone in the corner, in the mood's colour.
-    if (s_ring > 0.5) {
+    if (s_ring > 0.5 && u_amount > 0.0) {
         float total = happy + sad + tender + exciting + angry + scary;
         vec3 mood = vec3(0.12, 0.1, 0.1);
         if (total > 0.02) {
@@ -74,7 +75,7 @@ vec4 effect(vec2 uv) {
             mood = mix(vec3(0.12, 0.1, 0.1), mood, smoothstep(0.02, 0.3, total));
         }
         vec2 at = vec2(u_video_rect.z * aspect - 0.09, u_video_rect.y + 0.09);
-        vec2 q = (vec2(uv.x * aspect, uv.y) - at) / 0.05;
+        vec2 q = (vec2(uv.x * aspect, uv.y) - at) / (0.05 * u_amount);
         float d = length(q);
         // A gold band round an oval stone, lit from the top left.
         float band = smoothstep(1.02, 0.98, d) * smoothstep(0.78, 0.82, d);

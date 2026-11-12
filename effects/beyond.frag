@@ -1,5 +1,6 @@
 // Beyond the Veil: whatever's further than the veil is replaced by the film folded into a slowly
-// flowing kaleidoscope, with a burning edge where the two meet.
+// flowing kaleidoscope, with a burning edge where the two meet. Fading in, the veil comes forward
+// from beyond the furthest thing.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -9,6 +10,7 @@ vec4 effect(vec2 uv) {
     float t = u_time * s_flow / 100.0;
     float far = 1.0 - depth_at(uv);
     float veil = s_distance / 100.0 + (fbm(p * 5.0 + t * 0.2) - 0.5) * 0.3 * s_shimmer / 100.0 - u_bass * 0.06 * s_react / 100.0;
+    veil += (1.0 - u_amount) * 1.2;
     float beyond = smoothstep(veil - 0.02, veil + 0.02, far);
     if (beyond > 0.0) {
         vec2 rel = (uv - 0.5) * aspect;

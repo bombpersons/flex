@@ -1,4 +1,5 @@
-// Masks: tints the picture by what's where, for checking it and for working on an effect.
+// Masks: tints the picture by what's where, for checking it and for working on an effect. Fading
+// in, the tints and marks come up over the picture.
 //
 // s_show: 0 what's where, 1 people's skin, hair and clothes, 2 body parts, 3 who's who.
 
@@ -42,7 +43,7 @@ vec4 effect(vec2 uv) {
                 shown = mix(shown, vec3(1.0, 0.4, 1.0), ring(uv, u_person_feet[i * 2 + n]));
             }
         }
-        return vec4(shown, 1.0);
+        return vec4(mix(c, shown, u_amount), 1.0);
     }
     if (s_show > 1.5) {
         vec4 upper = more_masks_at(uv, 3);
@@ -66,5 +67,5 @@ vec4 effect(vec2 uv) {
             + things.a * vec3(0.55, 0.3, 0.15);
         amount = clamp(m.r + m.g + m.b + more.r + more.g + more.b + more.a + window + things.r + things.g + things.b + things.a, 0.0, 1.0) * 0.55;
     }
-    return vec4(mix(c, tint, amount), 1.0);
+    return vec4(mix(c, tint, amount * u_amount), 1.0);
 }

@@ -1,13 +1,16 @@
 // Living Static: inside people the picture is thresholded against fresh noise every frame, so
-// they keep their shape but are made of snow, with rolling bars and faces coming through.
+// they keep their shape but are made of snow, with rolling bars and faces coming through. Fading
+// in, people turn to snow a grain at a time.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(c, 1.0);
     float person = smoothstep(0.4, 0.7, person_at(uv));
+    vec2 grain = floor(uv * u_resolution / 2.0);
+    float turned = hash(grain + 41.0);
+    person *= smoothstep(turned, turned + 0.2, u_amount * 1.2);
     if (person <= 0.0) return vec4(c, 1.0);
     float t = u_time;
-    vec2 grain = floor(uv * u_resolution / 2.0);
     float n = hash(grain + fract(t) * 137.0);
     float luma = dot(c, vec3(0.3, 0.59, 0.11));
     float bars = 0.75 + 0.25 * sin(uv.y * 26.0 + t * 6.0) * (1.0 + u_bass * s_react / 50.0);

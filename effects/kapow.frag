@@ -1,7 +1,8 @@
 // Kapow: comic-book sound effects. Each kind of sound Flex hears has a couple of words, and while
 // it's heard they keep bursting out of spiky balloons somewhere new, popping in, holding and fading.
 // Music sends notes floating up. The words are drawn from a tiny pixel font, rounded off and
-// outlined in ink.
+// outlined in ink. Fading in, the balloons and notes grow from nothing and the printed look comes
+// over the picture.
 
 // A 5x7 pixel font: each letter's top four rows (20 bits, left to right) and bottom three (15).
 const ivec2 FONT[26] = ivec2[](
@@ -87,7 +88,7 @@ vec4 balloon(int k, float amount, vec2 s, float t, float aspect) {
     // Pops in past full size, settles, then fades.
     float pop = phase < 0.12 ? sin(phase / 0.12 * 1.9) * 1.12 : 1.0;
     float fade = 1.0 - smoothstep(0.72, 0.95, phase);
-    float size = (0.13 + 0.08 * amount) * s_size / 100.0 * pop;
+    float size = (0.13 + 0.08 * amount) * s_size / 100.0 * pop * u_amount;
     if (size <= 0.001) return vec4(0.0);
     vec2 centre = vec2((0.18 + 0.64 * seed) * aspect, 0.22 + 0.56 * hash(vec2(seed, slot + 2.0)));
     vec2 q = turn((hash(vec2(slot, seed)) - 0.5) * 0.6) * (s - centre) / size;
@@ -140,7 +141,7 @@ vec4 effect(vec2 uv) {
     float t = u_time;
 
     // A little of a printed comic in the picture itself: punchier colour, inked edges.
-    float look = s_look / 100.0;
+    float look = s_look / 100.0 * u_amount;
     if (look > 0.0) {
         vec2 px = 1.0 / u_resolution;
         float l = dot(c, vec3(0.299, 0.587, 0.114));
@@ -153,7 +154,7 @@ vec4 effect(vec2 uv) {
     }
 
     // Notes floating up while there's music, in columns that sway.
-    float music = max(u_sound_music, u_sound_singing) * s_notes / 100.0;
+    float music = max(u_sound_music, u_sound_singing) * s_notes / 100.0 * u_amount;
     if (music > 0.05) {
         float cell = 0.2;
         vec2 p = s + vec2(0.0, -t * 0.12);

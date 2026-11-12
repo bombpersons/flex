@@ -1,6 +1,7 @@
 // Aura: light around people, kept in the alpha of u_prev and carried up and outwards each frame,
 // so it flows off them. People themselves are left alone. With MoGe-2's head it can stream off
-// animals instead, or both.
+// animals instead, or both. Fading in, the people start giving off light and it builds up as it
+// flows away from them.
 //
 // s_who: 0 people, 1 animals, 2 people and animals.
 
@@ -30,9 +31,9 @@ vec4 effect(vec2 uv) {
     vec2 wander = vec2(fbm(p * 5.0 + vec2(0.0, -t * 0.7)), fbm(p * 5.0 + vec2(6.0, -t * 0.6))) - 0.47;
     vec2 from = uv - (vec2(0.0, 0.003) + wander * 0.008) * s_size / 100.0;
     float kept = u_frame < 2 ? 0.0 : texture(u_prev, from).a;
-    float field = max(near * 1.1, kept * (0.955 + 0.03 * u_bass * s_react / 100.0));
+    float field = max(near * 1.1 * u_amount, kept * (0.955 + 0.03 * u_bass * s_react / 100.0));
     vec3 colour = hue(s_colours / 360.0 + s_spread / 100.0 * (field * 0.6 + wander.x * 1.5 + t * 0.05));
-    float glow = smoothstep(0.05, 0.9, field) * (1.0 + 1.2 * u_beat * s_react / 100.0);
+    float glow = smoothstep(0.05, 0.9, field) * (1.0 + 1.2 * u_beat * s_react / 100.0) * u_amount;
     // It's behind them, so anything nearer than the person hides it.
     if (source > 0.0) glow *= 1.0 - smoothstep(source + 0.02, source + 0.1, depth_at(uv));
     float solid = smoothstep(0.4, 0.7, person);

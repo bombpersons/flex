@@ -26,7 +26,9 @@ between the shortest and longest you set, then fading into the next. Every effec
 before any comes round again, and the clock stops while the video's paused or the list of effects
 is open. Set it to Scene cuts and the next effect starts on the frame the shot changes instead,
 once the shortest turn is up. OK on the row opens the rest: Fade sets how long the change takes,
-and Off makes it instant. Random settings moves an effect's settings at random each time it comes
+and Off makes it instant. Fade style picks how: Crossfade dissolves one effect into the next;
+Through the picture has each effect ease itself away to the plain picture in its own way (heads
+shrink back, colours come back, snow stops) before the next eases in. Random settings moves an effect's settings at random each time it comes
 up, without changing the ones you've set. Sound effects says how often a turn comes with a sound
 effect (see Changing the sound). Shuffle keeps sound, depth, masks and faces running for
 whatever it might pick next, so that nothing stutters at the changes; untick the effects that use
@@ -256,6 +258,7 @@ don't declare them yourself, or functions of your own with the same names:
 |---|---|
 | `sampler2D u_video` | the video frame as mpv drew it (with subtitles, and Anime4K or SVP if they're on) |
 | `sampler2D u_prev` | the effect's own previous output (black unless `feedback = true`) |
+| `float u_amount` | how much of the effect there is, from 0 (the picture as it is) to 1 (all of it), eased in and out when shuffle fades through the plain picture; 1 the rest of the time. Use it on the effect's own levers (a head's size, how thick the snow falls, how far a grade goes) so that at 0 the effect draws the plain picture and grows into itself; an effect that doesn't use it is mixed with the plain picture instead |
 | `vec2 u_resolution` | the size being drawn, in pixels |
 | `float u_time` | seconds since the effect started; keeps going while paused |
 | `float u_video_time` | the playback position in seconds: stops when paused, jumps when you seek |

@@ -1,13 +1,13 @@
 // Paper Lanterns: hung through the air of the shot's world, a few to each cell of a grid around
 // where the camera is looking, so there are always some in view wherever it goes. Whatever's
 // nearer than a lantern stands in front of it. They wait for the camera to be known, and light up
-// as it is.
+// as it is. Fading in, the lanterns swell from nothing as the picture dims and their light comes up.
 
 const float LOOKING = 0.75;
 
 vec4 effect(vec2 uv) {
     vec3 film = texture(u_video, uv).rgb;
-    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw) || u_world_ready <= 0.0) return vec4(film, 1.0);
+    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw) || u_world_ready <= 0.0 || u_amount <= 0.0) return vec4(film, 1.0);
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     // The same lanterns for all of one shot, and different ones in the next.
     float shot = mod(u_shot_start * 100.0, 971.0);
@@ -51,13 +51,13 @@ vec4 effect(vec2 uv) {
                 at.x += (0.5 + 0.5 * sin(u_time * 0.4 + seed.y)) * 0.01 * wind / away;
                 at += vec2(sin(u_time * 13.0 + seed.z * 5.0), sin(u_time * 17.0 + seed.x * 7.0)) * 0.005 * jolt / away;
                 vec2 d = (uv - at) * aspect;
-                float radius = 0.03 * s_size / 100.0 / away;
+                float radius = 0.03 * s_size / 100.0 / away * u_amount;
                 // Something nearer than the lantern is in front of it.
                 float seen = smoothstep(away * 0.92, away * 1.08, scene_distance) * kept;
                 float flicker = 0.85 + 0.15 * sin(u_time * (5.0 + 3.0 * hash(seed + 2.0)) + seed.z * 4.0);
                 float r = length(d * vec2(1.0, 0.82)) / radius;
                 // The light it casts falls on whatever's near it, even behind it.
-                glow += tint * flicker * pulse * 0.016 / (r * r + 2.5) * (0.35 + 0.65 * seen) * kept;
+                glow += tint * flicker * pulse * 0.016 / (r * r + 2.5) * (0.35 + 0.65 * seen) * kept * u_amount;
                 if (r < 1.0) {
                     // Ribs of the paper, and brighter towards the flame.
                     float ribs = 0.82 + 0.18 * cos(asin(clamp(d.x / radius, -1.0, 1.0)) * 16.0);
@@ -68,6 +68,6 @@ vec4 effect(vec2 uv) {
             }
         }
     }
-    vec3 c = film * (1.0 - s_dim / 100.0 * u_world_ready) + (film * glow * 14.0 + glow * 1.8) * u_world_ready;
+    vec3 c = film * (1.0 - s_dim / 100.0 * u_world_ready * u_amount) + (film * glow * 14.0 + glow * 1.8) * u_world_ready;
     return vec4(mix(c, paper, covered * u_world_ready), 1.0);
 }

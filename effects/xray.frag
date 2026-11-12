@@ -1,5 +1,6 @@
 // X-Ray: a skull built in the face's own coordinates, so its jaw and sockets sit where the real
-// ones are. The teeth part as far as the real mouth opens.
+// ones are. The teeth part as far as the real mouth opens. Fading in, the x-ray and its line
+// come up over the film.
 
 float box(vec2 p, vec2 size) {
     vec2 d = abs(p) - size;
@@ -50,8 +51,8 @@ vec4 effect(vec2 uv) {
             int who = face_there(uv);
             film = mix(film, skull(face_uv(uv), u_face_open[max(who, 0)].z, c), on);
         }
-        c = mix(c, film, inside);
+        c = mix(c, film, inside * u_amount);
     }
-    c += vec3(0.3, 0.7, 1.0) * line * (0.6 + u_beat);
+    c += vec3(0.3, 0.7, 1.0) * line * (0.6 + u_beat) * u_amount;
     return vec4(c, 1.0);
 }

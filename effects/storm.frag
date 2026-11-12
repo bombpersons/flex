@@ -1,5 +1,6 @@
 // Thunderstorm: layers of falling streaks each at their own distance, hidden by anything nearer,
 // and splashing on the top of things. Lightning is kept soft and brief, as flashes are hard on eyes.
+// Fading in, the sky darkens and the rain starts, falling more and more heavily.
 
 // One layer of rain. Every column of it falls at its own speed, with drops of its own spacing and
 // length, so nothing lines up from one column to the next.
@@ -10,7 +11,7 @@ float streaks(vec2 p, float scale, float t, float wind, float rain) {
     float spacing = 0.12 + 0.2 * hash(vec2(column + 7.0, scale));
     float y = (p.y + t * speed) / spacing + 17.0 * hash(vec2(column + 3.0, scale));
     vec2 id = vec2(column, floor(y));
-    if (hash(id + scale) > rain) return 0.0;
+    if (hash(id + scale) > rain || u_amount <= 0.0) return 0.0;
     float size = 0.3 + 0.6 * hash(id + 9.0);
     float along = (fract(y) - (1.0 - size) * hash(id + 5.0)) / size;
     if (along < 0.0 || along > 1.0) return 0.0;
@@ -25,7 +26,7 @@ vec4 effect(vec2 uv) {
     // Wrapped, so the sums below don't run out of precision over a long film.
     float t = mod(u_time, 900.0);
     float near = depth_at(uv);
-    float gloom = s_dark / 100.0;
+    float gloom = s_dark / 100.0 * u_amount;
     float react = s_react / 100.0;
     vec3 graded = mix(c, c * vec3(0.5, 0.6, 0.8) * 0.8, gloom);
 
@@ -33,7 +34,7 @@ vec4 effect(vec2 uv) {
     float thunder = u_sound_thunder * react;
     float often = 0.62 - 0.2 * thunder;
     float strike = pow(max(noise(vec2(t * 2.3, 7.0)) - often, 0.0) / (1.0 - often), 2.0) * (1.0 + 0.8 * thunder) + u_beat * 0.25 * react;
-    strike *= s_lightning / 100.0;
+    strike *= s_lightning / 100.0 * u_amount;
     graded += c * vec3(0.8, 0.85, 1.0) * strike * (0.4 + 1.6 * (1.0 - near));
 
     // Gusts: the wind comes and goes, and the rain gets heavier and lighter in passing sheets.
@@ -41,7 +42,7 @@ vec4 effect(vec2 uv) {
     // heard makes it heavier.
     float wind = (s_wind / 100.0 + (s_wind < 0.0 ? -0.7 : 0.7) * u_sound_wind * react) * 0.32 * (0.7 + 0.8 * noise(vec2(t * 0.27, 3.0)));
     float pour = u_sound_water * react;
-    float rain = s_rain / 100.0 + (1.0 - s_rain / 100.0) * 0.9 * pour;
+    float rain = (s_rain / 100.0 + (1.0 - s_rain / 100.0) * 0.9 * pour) * u_amount;
     float sheets = 0.55 + 0.45 * smoothstep(0.3, 0.7, noise(vec2(p.x * 2.2 + t * 0.7, t * 0.33)));
     float fall = 0.0;
     for (int i = 0; i < 5; i++) {

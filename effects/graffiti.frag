@@ -1,6 +1,6 @@
 // Graffiti: painted in shot_uv, where each point was on screen when the shot began, so it stays on
 // what it's on. Only walls take paint (inside, or buildings' outsides), and people, animals and
-// vehicles go in front of it.
+// vehicles go in front of it. Fading in, the paint goes on in speckles, as if sprayed.
 
 // Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
 float noise_h3(vec2 p) {
@@ -110,6 +110,7 @@ vec4 effect(vec2 uv) {
     // Sprayed: speckled where the paint thins out.
     float speckle = smoothstep(0.35, 0.65, noise_h3(f * 120.0 + cell * 7.0));
     paint = clamp(paint * mix(0.85, 1.0, speckle), 0.0, 1.0);
+    wall *= clamp(u_amount * 1.6 - 0.6 * noise_h3(f * 60.0 + cell * 5.0), 0.0, 1.0);
     float luma = dot(film, vec3(0.3, 0.59, 0.11));
     vec3 c = film;
     c = mix(c, vec3(0.04) * (0.5 + luma), (outline - paint) * wall);

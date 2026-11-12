@@ -1,5 +1,6 @@
 // Topographic Map: depth is height. Contour lines every so often, a heavier one every fifth, a
-// colour for each height, and shading as if lit from the north-west.
+// colour for each height, and shading as if lit from the north-west. Fading in, the map comes up
+// over the film.
 
 vec3 land(float h) {
     if (h < 0.18) return mix(vec3(0.05, 0.2, 0.5), vec3(0.2, 0.55, 0.75), h / 0.18);
@@ -31,5 +32,7 @@ vec4 effect(vec2 uv) {
     } else {
         map = vec3(0.01, 0.01, 0.04) + (0.5 + 0.5 * cos(6.2831853 * (h * 1.3 + vec3(0.6, 0.9, 0.2)))) * max(thin * 0.7, thick) * 1.5;
     }
-    return vec4(mix(map, c, s_film / 100.0 * (1.0 - max(thin, thick))), 1.0);
+    float film = s_film / 100.0 * (1.0 - max(thin, thick));
+    if (u_amount < 1.0) film = mix(1.0, film, u_amount);
+    return vec4(mix(map, c, film), 1.0);
 }

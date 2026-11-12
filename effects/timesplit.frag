@@ -1,5 +1,6 @@
 // Colour Time Split: one colour is now, and the other two are running averages of the past, so
-// still things look normal and moving things split apart.
+// still things look normal and moving things split apart. Fading in, the two colours fall
+// further and further behind.
 
 vec4 effect(vec2 uv) {
     vec3 video = texture(u_video, uv).rgb;
@@ -13,5 +14,6 @@ vec4 effect(vec2 uv) {
     else rates = vec3(soon, late, 1.0);
     // Up close it's nearly in step; the distance falls further behind.
     rates = mix(rates, vec3(1.0), s_near / 100.0 * smoothstep(0.4, 0.85, depth_at(uv)));
+    if (u_amount < 1.0) rates = mix(vec3(1.0), rates, u_amount);
     return vec4(mix(before, video, rates), 1.0);
 }

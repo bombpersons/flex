@@ -1,5 +1,6 @@
 // Spinning Features: each eye and mouth is a disc of picture turning on the spot. On the mesh where
-// there is one, so they stay on the face however it's turned.
+// there is one, so they stay on the face however it's turned. Fading in, the discs grow from
+// nothing.
 
 // Where things are on a face, as face_uv has it.
 const vec2 RIGHT_EYE = vec2(0.35, 0.62);
@@ -29,7 +30,8 @@ vec4 effect(vec2 uv) {
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     vec2 p = uv * aspect;
     float t = u_video_time * s_speed / 100.0 + u_beat * s_react / 100.0;
-    float scale = s_size / 100.0;
+    if (u_amount <= 0.0) return vec4(c, 1.0);
+    float scale = s_size / 100.0 * u_amount;
     int there = face_there(uv);
     if (there >= 0 && meshed(there)) {
         vec2 a = face_uv(uv);

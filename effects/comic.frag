@@ -1,5 +1,6 @@
 // Comic Book People: flat, punchy colour printed as dots of cyan, magenta, yellow and black at the
-// usual screen angles, with a heavy black line round people and their features.
+// usual screen angles, with a heavy black line round people and their features. Fading in, the
+// print comes up over people and the speech bubbles swell in.
 
 float dots(vec2 p, float amount, float angle, float size) {
     float c = cos(angle), s = sin(angle);
@@ -40,7 +41,7 @@ vec3 bubbles(vec3 c, vec2 uv) {
         // On whichever side of the head there's more picture.
         float side = 0.5 * (b.x + b.z) < 0.5 ? 1.0 : -1.0;
         vec2 mouth = 0.5 * (face_point(i, 3) + face_point(i, 4)) * aspect;
-        vec2 radius = size * vec2(0.72, 0.36) * smoothstep(0.0, 0.5, t);
+        vec2 radius = size * vec2(0.72, 0.36) * smoothstep(0.0, 0.5, t) * (0.5 + 0.5 * u_amount);
         vec2 middle = vec2(mouth.x + side * size.x * 1.25, b.w - size.y * 0.12);
         middle.x = clamp(middle.x, u_video_rect.x * aspect.x + radius.x * 1.05, u_video_rect.z * aspect.x - radius.x * 1.05);
         middle.y = clamp(middle.y, u_video_rect.y + radius.y * 1.1, u_video_rect.w - radius.y * 1.1);
@@ -55,15 +56,15 @@ vec3 bubbles(vec3 c, vec2 uv) {
         float tail = length(p - middle - to_mouth * along) / (size.x * 0.13 * (1.0 - along));
         float shape = min(d, 0.6 + 0.4 * tail);
         float line = 2.5 / u_resolution.y / max(radius.y, 1e-4);
-        c = mix(c, vec3(0.02), 1.0 - smoothstep(1.0 + line, 1.0 + line * 1.6, shape));
-        c = mix(c, vec3(0.98), 1.0 - smoothstep(1.0 - line * 0.3, 1.0 + line * 0.3, shape));
+        c = mix(c, vec3(0.02), (1.0 - smoothstep(1.0 + line, 1.0 + line * 1.6, shape)) * u_amount);
+        c = mix(c, vec3(0.98), (1.0 - smoothstep(1.0 - line * 0.3, 1.0 + line * 0.3, shape)) * u_amount);
         // Scribbled words, jumping with the sound.
         float rows = floor((q.y + 0.6) * 3.0 / 1.2);
         vec2 row = vec2(q.x, fract((q.y + 0.6) * 3.0 / 1.2) - 0.5);
         if (rows >= 0.0 && rows < 3.0 && abs(q.x) < 0.68 - rows * 0.08 * (rows - 1.0)) {
             float word = sin(q.x * 90.0 + rows * 2.0 + floor(u_time * 6.0)) * 0.16 * (0.4 + u_mid);
             float gaps = smoothstep(-0.2, 0.0, sin(q.x * 11.0 + rows * 5.0));
-            c = mix(c, vec3(0.03), (1.0 - smoothstep(0.05, 0.1, abs(row.y - word))) * gaps * (1.0 - smoothstep(1.0, 1.02, d)));
+            c = mix(c, vec3(0.03), (1.0 - smoothstep(0.05, 0.1, abs(row.y - word))) * gaps * (1.0 - smoothstep(1.0, 1.02, d)) * u_amount);
         }
     }
     return c;
@@ -110,6 +111,6 @@ vec4 effect(vec2 uv) {
     float dy = luma(uv + vec2(0.0, e.y)) - luma(uv - vec2(0.0, e.y));
     float line = clamp(smoothstep(0.1, 0.22, length(vec2(dx, dy))) * s_outline / 100.0 + feature_line(uv, 2.0 * u_resolution.y / 720.0), 0.0, 1.0);
     vec3 printed = mix(paper, vec3(0.02), line);
-    vec3 shown = mix(c, printed, person);
-    return vec4(bubbles(mix(shown, vec3(0.0), rim * s_outline / 70.0), uv), kept);
+    vec3 shown = mix(c, printed, person * u_amount);
+    return vec4(bubbles(mix(shown, vec3(0.0), rim * s_outline / 70.0 * u_amount), uv), kept);
 }

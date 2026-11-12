@@ -1,5 +1,5 @@
 // Cyborg: on one side of the face's own coordinates the skin gives way to plates and circuits,
-// lit by which way the head is turned.
+// lit by which way the head is turned. Fading in, the metal spreads across the face from its side.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -11,7 +11,7 @@ vec4 effect(vec2 uv) {
     // How far into the metal side, ragged where the skin's torn.
     float x = s_side > 0.5 ? 1.0 - a.x : a.x;
     float tear = noise(a * vec2(9.0, 22.0)) * 0.07 + noise(a * 60.0) * 0.02;
-    float edge = 1.0 - s_cover / 100.0 + tear;
+    float edge = 1.0 - s_cover / 100.0 * u_amount + tear + 0.05 * (1.0 - u_amount);
     float metal = smoothstep(edge - 0.004, edge + 0.004, x);
     float wound = smoothstep(edge - 0.035, edge, x) * (1.0 - metal);
     c = mix(c, vec3(0.16, 0.01, 0.015), wound * on);

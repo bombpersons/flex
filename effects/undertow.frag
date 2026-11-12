@@ -1,5 +1,6 @@
 // Undertow: feedback weighed by depth. Each frame the last one is pushed along a swirling
-// flow, shifted in colour and blended under the video, but only where depth lets it.
+// flow, shifted in colour and blended under the video, but only where depth lets it. Fading in,
+// more and more of the last frame is kept.
 
 float noise_sin(vec2 p) {
     vec2 i = floor(p);
@@ -32,5 +33,5 @@ vec4 effect(vec2 uv) {
         + texture(u_prev, q + vec2(e.x, -e.y)).rgb + texture(u_prev, q - vec2(e.x, -e.y)).rgb);
     prev = hue_rotate(prev, 0.08 * s_colour / 50.0);
     vec3 video = texture(u_video, uv).rgb;
-    return vec4(mix(video, prev, m * s_trails / 100.0), 1.0);
+    return vec4(mix(video, prev, m * s_trails / 100.0 * u_amount), 1.0);
 }

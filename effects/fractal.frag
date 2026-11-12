@@ -1,6 +1,6 @@
 // Fractal Zoom: the picture holds a smaller copy of itself behind its people, which holds another,
 // and so on, all live. Zooming by one whole copy lands back where it started, so
-// the fall never ends.
+// the fall never ends. Fading in, the copies open up from the middle of the picture outwards.
 
 vec3 turned(vec3 c, float a) {
     float s = sin(a), k = cos(a);
@@ -43,5 +43,10 @@ vec4 effect(vec2 uv) {
         if (i == 0) person *= 1.0 - smoothstep(0.55, 1.0, fall);
         if (person > 0.0) c = mix(c, copy_at(levels[i], fall - float(i), low, high), person);
     }
+    // The window into the copies opens out from the middle, past the picture's corners at all of it.
+    vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
+    float open = 4.0 * u_amount * u_amount;
+    float shown = 1.0 - smoothstep(open - 0.4, open, length((uv - centre) * aspect));
+    c = mix(texture(u_video, uv).rgb, c, shown);
     return vec4(c, 1.0);
 }

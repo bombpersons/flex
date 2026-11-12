@@ -1,6 +1,6 @@
 // Fish Shoal: shoals swim loops through the air of the shot's world, one or none to each cell of a
 // grid around where the camera is looking, so there are always some about wherever it goes.
-// Whatever's nearer than a fish stands in front of it.
+// Whatever's nearer than a fish stands in front of it. Fading in, the fish grow from nothing.
 
 // Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
 float noise_h3(vec2 p) {
@@ -32,7 +32,7 @@ const float LOOKING = 0.5;
 
 vec4 effect(vec2 uv) {
     vec3 film = texture(u_video, uv).rgb;
-    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw) || u_world_ready <= 0.0) return vec4(film, 1.0);
+    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw) || u_world_ready <= 0.0 || u_amount <= 0.0) return vec4(film, 1.0);
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     float shot = mod(u_shot_start * 100.0, 971.0);
     float t = u_video_time * s_speed / 100.0;
@@ -84,7 +84,7 @@ vec4 effect(vec2 uv) {
                 if (place.z < 0.1) continue;
                 vec2 heading = (world_to_screen(next).xy - place.xy) * aspect;
                 heading = length(heading) > 1e-6 ? normalize(heading) : vec2(1.0, 0.0);
-                float long_ = picture_size(0.035 * s_size / 100.0 * (0.8 + 0.4 * hash(seed + 5.0)), place.z);
+                float long_ = picture_size(0.035 * s_size / 100.0 * (0.8 + 0.4 * hash(seed + 5.0)), place.z) * u_amount;
                 vec2 d = (uv - place.xy) * aspect;
                 vec2 q = vec2(dot(d, heading), dot(d, vec2(-heading.y, heading.x))) / long_;
                 if (abs(q.x) > 1.2 || abs(q.y) > 0.6) continue;

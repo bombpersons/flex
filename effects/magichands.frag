@@ -1,6 +1,7 @@
 // Magic Hands: a ball of crackling energy in everyone's hands, sparks spinning round it, and
 // lightning arcing between a person's two hands when they're near enough. It flares on the beat.
-// From MoGe-2's who's who and hands.
+// From MoGe-2's who's who and hands. Fading in, the balls swell up from nothing as all of it
+// brightens.
 
 // Lightning from a to b: a wiggling line, re-struck several times a second.
 float bolt(vec2 p, vec2 a, vec2 b, float seed) {
@@ -21,7 +22,7 @@ vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     vec2 p = uv * aspect;
-    float power = s_power / 100.0 * (1.0 + 1.5 * u_beat * s_react / 100.0);
+    float power = s_power / 100.0 * (1.0 + 1.5 * u_beat * s_react / 100.0) * u_amount;
     vec3 glow = vec3(0.0);
     for (int i = 0; i < u_person_count; i++) {
         float seen = u_person_seen[i];
@@ -34,7 +35,7 @@ vec4 effect(vec2 uv) {
             at[n] = hand.xy * aspect;
             sure[n] = seen * smoothstep(0.2, 0.6, hand.w);
             if (sure[n] <= 0.0) continue;
-            float r = max(hand.z, 0.01) * 1.4;
+            float r = max(hand.z, 0.01) * 1.4 * max(u_amount, 1e-3);
             vec2 rel = p - at[n];
             float d = length(rel);
             // The ball: a hot core in a soft glow, its edge boiling.

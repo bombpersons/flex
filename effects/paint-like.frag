@@ -1,7 +1,8 @@
 // Paint Like: the picture painted by Magenta's stylization in the style picked (u_video, with
 // restyle), over the real picture (u_original), keeping as much of the film's own colours (its
 // colour, the painting's lightness) as asked. The network paints far smaller than the screen, so
-// the film's own fine detail (finer than the painting's pixels) is laid back over it.
+// the film's own fine detail (finer than the painting's pixels) is laid back over it. Fading in,
+// the paint comes up over the real picture.
 
 vec4 effect(vec2 uv) {
     vec3 painted = texture(u_video, uv).rgb;
@@ -23,5 +24,5 @@ vec4 effect(vec2 uv) {
     painted = clamp(painted + detail * s_detail / 100.0, 0.0, 1.0);
     vec3 recoloured = clamp(real + vec3(dot(painted, luma) - dot(real, luma)), 0.0, 1.0);
     vec3 c = mix(painted, recoloured, s_own_colours / 100.0);
-    return vec4(mix(real, c, s_strength / 100.0), 1.0);
+    return vec4(mix(real, c, s_strength / 100.0 * u_amount), 1.0);
 }

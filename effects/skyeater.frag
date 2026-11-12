@@ -1,5 +1,6 @@
 // Sky Eater: the sky shows the film again in log-polar space, a spiral falling forever.
-// Without sky in the shot, nothing happens, until there's a window.
+// Without sky in the shot, nothing happens, until there's a window. Fading in, the hole in the
+// sky opens out from the spiral's middle.
 
 vec4 effect(vec2 uv) {
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) {
@@ -23,5 +24,7 @@ vec4 effect(vec2 uv) {
     vec3 spiral = texture(u_video, sample_at).rgb;
     spiral *= 0.75 + 0.6 * hue(fall + t * 0.2 + u_bass * 0.5);
     spiral *= smoothstep(0.0, 0.08, r) * (1.0 + 2.0 * u_beat * smoothstep(0.1, 0.0, abs(fract(fall + 0.5) - 0.5)));
-    return vec4(mix(now, spiral, sky), 1.0);
+    float reach = u_amount * 1.4;
+    float eaten = u_amount >= 1.0 ? 1.0 : 1.0 - smoothstep(reach - 0.1, reach, r);
+    return vec4(mix(now, spiral, sky * eaten), 1.0);
 }

@@ -1,4 +1,5 @@
 // War Paint: marks drawn in the face's own coordinates, so they stay on the skin as it moves.
+// Fading in, each mark is drawn on from its wide end.
 
 vec3 soft_hue(float t) {
     return 0.55 + 0.45 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
@@ -7,7 +8,10 @@ vec3 soft_hue(float t) {
 float slash(vec2 p, vec2 a, vec2 b, float wide) {
     vec2 pa = p - a, ba = b - a;
     float along = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-    return 1.0 - smoothstep(wide * (1.0 - along) * 0.7, wide * (1.0 - along) + 0.004, length(pa - ba * along));
+    float m = 1.0 - smoothstep(wide * (1.0 - along) * 0.7, wide * (1.0 - along) + 0.004, length(pa - ba * along));
+    // Drawn on as far as it's faded in.
+    if (u_amount < 1.0) m *= 1.0 - smoothstep(u_amount * 1.05 - 0.05, u_amount * 1.05, along);
+    return m;
 }
 
 vec4 effect(vec2 uv) {

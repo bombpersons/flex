@@ -1,5 +1,6 @@
 // Distance: one effect, as strong as depth says. Everything is weighed by m, which runs
-// from 0 where the effect stops to 1 at the far end (or the near end, with s_where).
+// from 0 where the effect stops to 1 at the far end (or the near end, with s_where). Fading in,
+// the effect's strength grows from nothing.
 //
 // s_style: 0 fog, 1 prism, 2 heat haze, 3 blocks, 4 colour spin, 5 rush.
 
@@ -38,7 +39,7 @@ vec4 effect(vec2 uv) {
     float from = s_from / 100.0;
     float m = smoothstep(from, 1.0, s_where < 0.5 ? 1.0 - d : d);
     float kick = 1.0 + u_beat * s_react / 100.0;
-    float amount = s_amount / 100.0 * kick;
+    float amount = s_amount / 100.0 * kick * u_amount;
     float aspect = u_resolution.x / u_resolution.y;
     vec2 p = uv * vec2(aspect, 1.0);
 
@@ -68,7 +69,8 @@ vec4 effect(vec2 uv) {
     }
     if (s_style < 4.5) {
         vec3 c = texture(u_video, uv).rgb;
-        return vec4(hue_rotate(c, m * (amount * 12.0 + 0.6 * t)), 1.0);
+        // Blended towards it: the turn grows with time, so scaling it would wander on the way in.
+        return vec4(mix(c, hue_rotate(c, m * (amount * 12.0 + 0.6 * t)), u_amount), 1.0);
     }
     vec3 sum = vec3(0.0);
     for (int i = 0; i < 16; i++) {

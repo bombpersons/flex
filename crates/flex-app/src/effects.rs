@@ -69,6 +69,9 @@ struct Slot {
     drawn: usize,
     /// The shader's state for the plugin's status line, and which file it's about.
     status: Option<(PathBuf, (bool, String))>,
+    /// Whether the effect fades itself with `u_amount`; if not, it's mixed with the plain
+    /// picture instead.
+    fades: bool,
 }
 
 /// Lives on the GL thread (inside the player's paint callback); the UI thread only reads
@@ -109,8 +112,12 @@ pub struct Renderer {
 #[derive(Clone)]
 pub struct Frame {
     pub effect: ActiveEffect,
-    /// The effect fading out, and how far `effect` has faded in over it (0–1).
+    /// The effect fading out and how much of it there still is (its `u_amount`), how far
+    /// `effect` has faded in over it (0–1), and how much of `effect` there is (see
+    /// `flex_core::effects::Fade`).
     pub fading: Option<(ActiveEffect, f32)>,
+    pub faded_in: f32,
+    pub amount: f32,
     /// The size mpv draws at, relative to the screen.
     pub video_scale: f32,
     /// Shuffle or an effect wants to know where the shot changes.
@@ -531,6 +538,10 @@ uniform sampler2D u_original;
 uniform float u_has_restyled;
 uniform vec2 u_restyled_size;
 uniform sampler2D u_prev;
+// How much of the effect there is, from 0 (the picture as it is) to 1 (all of it): it's eased in
+// and out as shuffle fades through the plain picture. An effect that uses it should look like the
+// plain picture at 0 and grow into itself; one that doesn't is mixed with the plain picture.
+uniform float u_amount;
 uniform vec2 u_resolution;
 uniform float u_time;
 uniform int u_frame;
@@ -1020,12 +1031,15 @@ pub(crate) fn vertex_source(version: &str) -> String {
 fn copy_source(version: &str, embedded: bool) -> String {
     let precision = if embedded { "precision highp float;\n" } else { "" };
     format!(
-        "{version}\n{precision}uniform sampler2D u_tex;\nuniform sampler2D u_from;\nuniform sampler2D u_words;\nuniform float u_has_words;\nuniform vec4 u_picture;\nuniform float u_faded_in;\nuniform float u_flip;\n\
+        "{version}\n{precision}uniform sampler2D u_tex;\nuniform sampler2D u_from;\nuniform sampler2D u_plain;\nuniform sampler2D u_words;\nuniform float u_has_words;\nuniform vec4 u_picture;\nuniform float u_faded_in;\nuniform float u_tex_mix;\nuniform float u_from_mix;\nuniform float u_flip;\n\
          in vec2 v_uv;\nout vec4 flex_color;\n\
          void main() {{\n    vec2 uv = vec2(v_uv.x, u_flip > 0.5 ? 1.0 - v_uv.y : v_uv.y);\n\
          vec4 words = texture(u_words, uv) * u_has_words;\n\
          vec2 at = (uv - u_picture.xy) / (u_picture.zw - u_picture.xy);\n\
-         vec3 picture = at == clamp(at, 0.0, 1.0) ? mix(texture(u_from, at).rgb, texture(u_tex, at).rgb, u_faded_in) : vec3(0.0);\n\
+         vec3 plain = texture(u_plain, at).rgb;\n\
+         vec3 from = mix(plain, texture(u_from, at).rgb, u_from_mix);\n\
+         vec3 now = mix(plain, texture(u_tex, at).rgb, u_tex_mix);\n\
+         vec3 picture = at == clamp(at, 0.0, 1.0) ? mix(from, now, u_faded_in) : vec3(0.0);\n\
          flex_color = vec4(picture * (1.0 - words.a) + words.rgb, 1.0);\n}}\n"
     )
 }
@@ -1355,29 +1369,36 @@ impl Renderer {
             gl.active_texture(glow::TEXTURE0 + ORIGINAL_UNIT);
             gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
             Unit::Video.bind(gl, Some(picture_for(effect)));
-            self.slots[front].draw(gl, effect, &given);
-            if let Some((from, _)) = &frame.fading {
+            self.slots[front].draw(gl, effect, &given, frame.amount);
+            if let Some((from, amount)) = &frame.fading {
                 Unit::Video.bind(gl, Some(picture_for(from)));
-                self.slots[back].draw(gl, from, &given);
+                self.slots[back].draw(gl, from, &given, *amount);
             }
 
             // Onto the screen, scaled up if the effect works smaller. One that didn't compile
-            // fades as the plain video.
+            // fades as the plain video, and one that doesn't fade itself is mixed with it.
             let shown = |slot: &Slot| slot.program.and(slot.out.as_ref()).map_or(video_texture, |out| out[slot.drawn].texture);
+            let mixed = |slot: &Slot, amount: f32| if slot.fades { 1.0 } else { amount };
             let new = shown(&self.slots[front]);
-            let (old, faded_in) = match &frame.fading {
-                Some((_, amount)) => (shown(&self.slots[back]), *amount),
-                None => (new, 1.0),
+            let new_mix = mixed(&self.slots[front], frame.amount);
+            let (old, old_mix, faded_in) = match &frame.fading {
+                Some((_, amount)) => (shown(&self.slots[back]), mixed(&self.slots[back], *amount), frame.faded_in),
+                None => (new, new_mix, 1.0),
             };
             gl.bind_framebuffer(glow::FRAMEBUFFER, target);
             gl.viewport(0, 0, w, h);
             gl.use_program(Some(copy));
             gl.active_texture(glow::TEXTURE13);
             gl.bind_texture(glow::TEXTURE_2D, words_texture);
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(old));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(new));
+            gl.uniform_1_i32(gl.get_uniform_location(copy, "u_plain").as_ref(), 2);
+            gl.uniform_1_f32(gl.get_uniform_location(copy, "u_tex_mix").as_ref(), new_mix);
+            gl.uniform_1_f32(gl.get_uniform_location(copy, "u_from_mix").as_ref(), old_mix);
             gl.uniform_1_i32(gl.get_uniform_location(copy, "u_words").as_ref(), 13);
             gl.uniform_4_f32(gl.get_uniform_location(copy, "u_picture").as_ref(), picture[0], picture[1], picture[2], picture[3]);
             gl.uniform_1_f32(gl.get_uniform_location(copy, "u_has_words").as_ref(), if words_texture.is_some() { 1.0 } else { 0.0 });
@@ -1623,6 +1644,7 @@ impl Slot {
                     (false, format!("Can't read {name}: {e}"))
                 }
                 Ok(body) => {
+                    self.fades = body.contains("u_amount");
                     let decl = version.version_declaration();
                     let fragment = fragment_source(decl, version.is_embedded(), &source.uniforms, &body);
                     let started = Instant::now();
@@ -1677,7 +1699,7 @@ impl Slot {
     }
 
     /// Runs the effect once. Texture units 0 and 2–4 are already bound.
-    unsafe fn draw(&mut self, gl: &glow::Context, effect: &ActiveEffect, given: &Given) {
+    unsafe fn draw(&mut self, gl: &glow::Context, effect: &ActiveEffect, given: &Given, amount: f32) {
         let (Some(program), Some(targets)) = (self.program, &self.out) else { return };
         unsafe {
             let (out, prev) = (&targets[self.current], &targets[1 - self.current]);
@@ -1738,6 +1760,7 @@ impl Slot {
             for (i, name) in SOUND_UNIFORMS.iter().enumerate() {
                 gl.uniform_1_f32(at(name).as_ref(), given.audio.and_then(|a| a.kinds.get(i).copied()).unwrap_or(0.0));
             }
+            gl.uniform_1_f32(at("u_amount").as_ref(), if self.fades { amount } else { 1.0 });
             gl.uniform_1_f32(at("u_has_depth").as_ref(), if given.has_depth { 1.0 } else { 0.0 });
             gl.uniform_4_f32(at("u_ground").as_ref(), given.ground[0], given.ground[1], given.ground[2], given.ground[3]);
             gl.uniform_1_f32(at("u_has_masks").as_ref(), if given.has_masks { 1.0 } else { 0.0 });

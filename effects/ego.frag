@@ -1,5 +1,6 @@
 // Ego Death: wherever the last frame differs from this one, it's kept, turned and recoloured,
-// so anything that moves leaves ghosts. People are lit up from inside and feed the ghosts.
+// so anything that moves leaves ghosts. People are lit up from inside and feed the ghosts. Fading
+// in, the ghosts linger longer and people's light comes up.
 
 vec4 effect(vec2 uv) {
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) {
@@ -14,8 +15,8 @@ vec4 effect(vec2 uv) {
     vec3 now = texture(u_video, uv).rgb;
     float person = smoothstep(0.35, 0.7, person_at(uv));
     float differs = smoothstep(0.1, 0.35, length(past - now));
-    float keep = differs * (0.75 + 0.245 * s_trails / 100.0) * step(0.001, s_trails);
-    vec3 lit = mix(now, hue(dot(now, vec3(0.33)) * 2.0 + u_time * 0.25) * 1.3, 0.6);
+    float keep = differs * (0.75 + 0.245 * s_trails / 100.0) * step(0.001, s_trails) * u_amount;
+    vec3 lit = mix(now, hue(dot(now, vec3(0.33)) * 2.0 + u_time * 0.25) * 1.3, 0.6 * u_amount);
     vec3 world = mix(now, past, keep);
     return vec4(mix(world, lit, person), 1.0);
 }

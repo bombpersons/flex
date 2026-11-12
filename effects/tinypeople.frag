@@ -1,5 +1,6 @@
 // Tiny People: the room behind people comes from what Flex has seen of it. Then each person with
-// a face is drawn smaller, standing on the lowest point of their own body.
+// a face is drawn smaller, standing on the lowest point of their own body. Fading in, people
+// shrink from their own size as the room shows through behind them.
 
 float someone(vec2 uv) {
     float most = person_at(uv);
@@ -14,6 +15,7 @@ vec4 effect(vec2 uv) {
     vec3 video = texture(u_video, uv).rgb;
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(video, 1.0);
     float clear = 1.0 - smoothstep(0.08, 0.3, someone(uv));
+    if (u_amount < 1.0) clear = mix(1.0, clear, u_amount);
     if (u_has_plate < 0.5) return vec4(video, 1.0);
     vec3 c = mix(plate_at(uv), video, clear);
     float scale = s_size / 100.0 * (1.0 + 0.12 * u_beat * s_react / 100.0);
@@ -28,7 +30,7 @@ vec4 effect(vec2 uv) {
             bottom = y;
         }
         vec2 stand = vec2(chin.x, bottom);
-        vec2 from = stand + (uv - stand) / mix(1.0, scale, u_face_seen[i]);
+        vec2 from = stand + (uv - stand) / mix(1.0, scale, u_face_seen[i] * u_amount);
         if (from != clamp(from, u_video_rect.xy, u_video_rect.zw)) continue;
         // Keep to this person, when there are several.
         bool theirs = true;

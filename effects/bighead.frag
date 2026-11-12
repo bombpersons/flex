@@ -1,5 +1,6 @@
 // Big Heads: each head is magnified about its chin, so it swells upwards and outwards while the
-// neck stays where it is, and the picture around it is pushed back into place at the edge.
+// neck stays where it is, and the picture around it is pushed back into place at the edge. Fading
+// in, heads swell from their own size and start to bobble.
 
 // The head compared with the box round the face: how wide and tall from its middle, and how far
 // above the chin the middle is. Bigger than the box, to take in the hair and ears.
@@ -26,10 +27,11 @@ vec4 effect(vec2 uv) {
         vec2 chin = centre - up * size.y * 0.5;
 
         float seen = smoothstep(0.0, 1.0, u_face_seen[i]);
+        float grown = seen * u_amount;
         // Swells with the bass and kicks on each beat.
         float pulse = (0.5 * u_bass + 0.45 * u_beat) * s_react / 100.0;
-        float zoom = 1.0 + (s_size / 100.0 - 1.0 + pulse) * seen;
-        float angle = s_bobble / 100.0 * 0.3 * sin(t * 2.7 + float(i) * 1.9) * seen;
+        float zoom = 1.0 + (s_size / 100.0 - 1.0 + pulse) * grown;
+        float angle = s_bobble / 100.0 * 0.3 * sin(t * 2.7 + float(i) * 1.9) * grown;
         vec2 from_chin = p - chin;
         from_chin = vec2(from_chin.x * cos(angle) - from_chin.y * sin(angle), from_chin.x * sin(angle) + from_chin.y * cos(angle));
 

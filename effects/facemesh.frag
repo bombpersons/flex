@@ -1,4 +1,5 @@
-// Face Mesh: draws what effects get with mesh = true, for checking it.
+// Face Mesh: draws what effects get with mesh = true, for checking it. Fading in, the view comes up
+// over the picture.
 
 float dot_at(vec2 uv, vec2 at, vec2 aspect, float size) {
     return 1.0 - smoothstep(size, size * 1.6, length((uv - at) * aspect));
@@ -30,7 +31,7 @@ vec3 where_view(vec2 uv) {
     return mix(c, mix(vec3(at, 0.3), vec3(1.0), 1.0 - lines), on_face(uv));
 }
 
-vec4 effect(vec2 uv) {
+vec4 view(vec2 uv) {
     if (s_view > 2.5) {
         vec2 at = uv * vec2(4.0, 2.0);
         vec4 f = face_texture(int(at.y) * 4 + int(at.x), (fract(at) - 0.02) / 0.96);
@@ -72,4 +73,9 @@ vec4 effect(vec2 uv) {
         }
     }
     return vec4(c, 1.0);
+}
+
+vec4 effect(vec2 uv) {
+    vec3 c = view(uv).rgb;
+    return vec4(c * u_amount + texture(u_video, uv).rgb * (1.0 - u_amount), 1.0);
 }

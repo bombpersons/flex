@@ -1,7 +1,7 @@
 // Synesthesia: each kind of sound Flex hears (u_sound_*) has a look of its own, and they mix as
 // the sounds do. Booms warp and shake the picture, engines blur it towards the middle, and the
 // rest colour it and scatter things over it. Speech calms everything a little, so dialogue
-// scenes stay watchable.
+// scenes stay watchable. Fading in, every look grows with the strength, from nothing.
 
 vec3 hsv_hue(float h) {
     return clamp(abs(fract(h + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
@@ -53,7 +53,7 @@ vec4 effect(vec2 uv) {
     float t = u_time;
     vec2 px = 1.0 / u_resolution;
     vec2 centre = mix(u_video_rect.xy, u_video_rect.zw, 0.5);
-    float k = s_strength / 100.0 * (1.0 - 0.4 * u_sound_speech);
+    float k = s_strength / 100.0 * u_amount * (1.0 - 0.4 * u_sound_speech);
     float motion = s_motion / 100.0;
     float many = s_specks / 100.0;
 
@@ -85,7 +85,7 @@ vec4 effect(vec2 uv) {
     p.x += (noise(vec2(uv.x * 25.0, uv.y * 35.0 - t * 5.0)) - 0.5) * 0.012 * fire * (1.2 - uv.y) * motion;
     // Water: everything ripples a little.
     p += vec2(sin(uv.y * 60.0 + t * 3.0), cos(uv.x * 45.0 + t * 2.3)) * 0.0025 * water * motion;
-    p = clamp(p, u_video_rect.xy + px, u_video_rect.zw - px);
+    p = clamp(p, u_video_rect.xy + px * u_amount, u_video_rect.zw - px * u_amount);
 
     // Engines: rushing towards the middle (a zoom blur), and booms split the colours.
     vec3 c = vec3(0.0);
@@ -153,5 +153,8 @@ vec4 effect(vec2 uv) {
     c *= 1.0 - edge * 0.45 * quiet;
     c += (hash(uv * u_resolution + fract(t) * 91.0) - 0.5) * 0.05 * quiet;
 
-    return vec4(clamp(c, 0.0, 1.0), 1.0);
+    c = clamp(c, 0.0, 1.0);
+    // The black bars, which the picture's edges are pulled out over, come back as they were.
+    if (u_amount < 1.0 && uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) c = mix(texture(u_video, uv).rgb, c, u_amount);
+    return vec4(c, 1.0);
 }

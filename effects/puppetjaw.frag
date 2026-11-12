@@ -1,5 +1,6 @@
 // Puppet Jaw: everything below the mouth slides down as a piece, like a Monty Python cut-out,
-// and there's a dark mouth with teeth behind it. The sound decides how far.
+// and there's a dark mouth with teeth behind it. The sound decides how far. Fading in, the jaws
+// drop further and further.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -19,7 +20,7 @@ vec4 effect(vec2 uv) {
         if (seen <= 0.0) continue;
         Face f = face_frame(i, aspect);
         float gape = s_listen > 2.5 ? (meshed(i) ? smoothstep(0.03, 0.6, u_face_open[i].z) * s_flap / 100.0 : 0.0) : open;
-        float drop = gape * f.height * 0.9 * seen;
+        float drop = gape * f.height * 0.9 * seen * u_amount;
         if (drop < f.height * 0.03) continue;
         vec2 rel = p - f.mouth;
         float x = dot(rel, f.across);

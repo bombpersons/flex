@@ -1,6 +1,6 @@
 // Relight: treats depth as a surface. Normals come from the depth network (or depth's slopes),
 // so the picture can be lit again from new positions (and shadows found by walking towards each
-// light).
+// light). Fading in, the film's own light gives way to the new lights.
 //
 // s_style: 0 coloured lights, 1 clay, 2 oil slick, 3 show the surface.
 
@@ -33,14 +33,14 @@ vec4 effect(vec2 uv) {
     float t = u_video_time * s_speed;
     vec3 n = bumped_normal(uv);
     if (s_style > 2.5) {
-        return vec4(n * 0.5 + 0.5, 1.0);
+        return vec4(mix(video, n * 0.5 + 0.5, u_amount), 1.0);
     }
     if (s_style > 1.5) {
         // A reflection of a slowly turning room of colour.
         vec3 r = reflect(vec3(0.0, 0.0, -1.0), n);
         float bands = sin(r.x * 7.0 + t) + sin(r.y * 9.0 - 0.7 * t) + 3.0 * d;
         vec3 chrome = hue(0.18 * bands + 0.03 * t) * (0.45 + 0.55 * pow(1.0 - n.z, 1.5)) + pow(max(r.y, 0.0), 12.0);
-        return vec4(mix(video * 0.4, chrome, 0.85), 1.0);
+        return vec4(mix(video * mix(1.0, 0.4, u_amount), chrome, 0.85 * u_amount), 1.0);
     }
 
     float aspect = u_resolution.x / u_resolution.y;
@@ -68,5 +68,8 @@ vec4 effect(vec2 uv) {
         light += colour * max(dot(n, l), 0.0) * reach;
         shine += colour * pow(max(dot(n, normalize(l + view)), 0.0), 40.0) * reach * 0.4;
     }
-    return vec4(sqrt(base * light * 1.4) + shine, 1.0);
+    // At none, the film's own light: sqrt(video * video * 1.4 / 1.4).
+    base = mix(video * video, base, u_amount);
+    light = mix(vec3(1.0 / 1.4), light, u_amount);
+    return vec4(sqrt(base * light * 1.4) + shine * u_amount, 1.0);
 }

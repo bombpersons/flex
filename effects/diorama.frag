@@ -1,6 +1,7 @@
 // Diorama: moves the viewpoint. Each point of the picture is pushed sideways by how far it
 // is from the distance that stays still, so to draw a pixel we walk from near to far until
-// we reach the surface that lands there; whatever gets uncovered smears from its edges.
+// we reach the surface that lands there; whatever gets uncovered smears from its edges. Fading in,
+// the camera's movement grows from standing still.
 //
 // s_style: 0 floating camera, 1 vertigo (a dolly zoom), 2 red and cyan 3D.
 
@@ -41,7 +42,7 @@ vec4 effect(vec2 uv) {
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
     float t = u_video_time * s_speed;
-    float size = s_size / 100.0;
+    float size = s_size / 100.0 * u_amount;
     float kick = 1.0 + 1.5 * u_beat * s_react / 100.0;
     if (s_style > 1.5) {
         vec2 off = vec2(0.03 * size, 0.0);

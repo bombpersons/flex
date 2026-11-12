@@ -1,6 +1,7 @@
-// Signals: draws each of the inputs on its own. See EFFECTS.md for what they are.
+// Signals: draws each of the inputs on its own. See EFFECTS.md for what they are. Fading in, the
+// drawing comes up over the picture.
 
-vec4 effect(vec2 uv) {
+vec4 signals(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     if (s_view < 0.5) {
         vec2 v = flow_at(uv) * vec2(u_resolution.x / u_resolution.y, 1.0);
@@ -39,4 +40,8 @@ vec4 effect(vec2 uv) {
         return vec4(vec3(step(uv.y, bar)), 1.0);
     }
     return vec4(mix(c, vec3(1.0, 0.1, 0.1), u_cut), 1.0);
+}
+
+vec4 effect(vec2 uv) {
+    return vec4(mix(texture(u_video, uv).rgb, signals(uv).rgb, u_amount), 1.0);
 }

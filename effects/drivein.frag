@@ -1,7 +1,7 @@
 // Drive-In: the picture so far, wrapped around each face using the face's own coordinates, so it
 // bends over the nose and holds on as the head turns. It's drawn from the last frame shown, so
 // faces in the picture on the face have pictures on them too. With MoGe-2's head the rest of
-// people's skin shows it too, fitted to each person.
+// people's skin shows it too, fitted to each person. Fading in, the screen brightens up on them.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -27,6 +27,6 @@ vec4 effect(vec2 uv) {
     screen = pow(screen, vec3(0.75)) * (0.95 + luma * 1.1 + 0.25 * u_beat);
     screen *= 0.86 + 0.14 * sin(a.y * 500.0);
     float within = 1.0 - smoothstep(0.97, 1.05, edge);
-    c = mix(c, mix(vec3(0.03), screen, within), on * s_bright / 100.0);
+    c = mix(c, mix(vec3(0.03), screen, within), on * s_bright / 100.0 * u_amount);
     return vec4(c, 1.0);
 }

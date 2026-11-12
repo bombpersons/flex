@@ -1,6 +1,7 @@
 // Depth: a test effect for depth (depth = true in depth.toml). depth_at(uv) gives how near
 // each point is, from 0 (far) to 1 (near), from Depth Anything V2 running on the GPU; it
-// covers the picture (not the black bars) and arrives a frame or two after the picture.
+// covers the picture (not the black bars) and arrives a frame or two after the picture. Fading
+// in, the overlay comes up over the picture.
 //
 // s_mode: 0 contours, 1 fog, 2 show the depth.
 
@@ -16,11 +17,11 @@ vec3 fog_colour(float choice, vec3 moving) {
 vec4 effect(vec2 uv) {
     vec3 video = texture(u_video, uv).rgb;
     float d = depth_at(uv);
-    float amount = s_amount / 100.0;
+    float amount = s_amount / 100.0 * u_amount;
     float t = u_video_time * s_speed;
 
     if (s_mode > 1.5) {
-        return vec4(vec3(d), 1.0);
+        return vec4(vec3(d) * u_amount + video * (1.0 - u_amount), 1.0);
     }
     if (s_mode > 0.5) {
         // Fog: far away fades into a slowly drifting colour.

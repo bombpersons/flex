@@ -1,5 +1,6 @@
 // Colour Thief: takes the colour out of everything but one kind of thing: people, everything but
-// people, animals, vehicles, plants or sky.
+// people, animals, vehicles, plants or sky. Fading in, the colour drains out of everything else
+// as the kept colour grows stronger.
 //
 // s_who: 0 people, 1 the world (all but people), 2 animals, 3 vehicles, 4 plants, 5 sky.
 
@@ -15,5 +16,5 @@ vec4 effect(vec2 uv) {
     float luma = dot(c, vec3(0.3, 0.59, 0.11));
     float boost = s_boost / 100.0 * (1.0 + u_bass * s_react / 100.0);
     vec3 vivid = clamp(vec3(luma) + (c - luma) * boost, 0.0, 1.0);
-    return vec4(mix(mix(c, vec3(luma), s_grey / 100.0), vivid, colourful), 1.0);
+    return vec4(mix(mix(c, vec3(luma), s_grey / 100.0 * u_amount), vivid, colourful * u_amount), 1.0);
 }

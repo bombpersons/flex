@@ -1,6 +1,7 @@
 // Strobe Sculpture: alpha holds the statues, with which half-second each was made in the whole
 // part and its brightness in the fraction. It has to be alpha, as the colours are in use showing
-// the film, and people are drawn over their own statues.
+// the film, and people are drawn over their own statues. Fading in, the statues come up out of
+// the picture.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -23,7 +24,7 @@ vec4 effect(vec2 uv) {
         } else {
             float bright = fract(kept) / 0.98;
             vec3 statue = mix(vec3(bright), hue(made * 0.13 + bright * 0.4) * (0.25 + bright * 1.5), s_colour / 100.0);
-            c = mix(c, statue, left * 0.9);
+            c = mix(c, statue, left * 0.9 * u_amount);
         }
     }
     vec3 live = texture(u_video, uv).rgb;

@@ -1,7 +1,8 @@
 // Mouth Cam: the screen is filled by one mouth, and cuts to another when someone else starts
 // talking. What's remembered between frames is kept in the alpha of the bottom row of u_prev:
 // how much each face has been talking lately (0 to 7), how open its mouth was (8 to 15), whose
-// mouth is shown (16) and how long it's been shown (17).
+// mouth is shown (16) and how long it's been shown (17). Fading in, the picture zooms and turns in
+// from the whole frame to the mouth; what's remembered goes on as it is.
 
 const int OPEN_AT = 8;
 const int SHOWN_AT = 16;
@@ -96,7 +97,9 @@ vec4 effect(vec2 uv) {
     if (chosen != shown_before()) since = 0.0;
     // A little push in as each new mouth is cut to.
     float punch = 1.0 + 0.18 * exp(-since * 6.0) * s_punch / 100.0;
-    float scale = wide / (aspect.x * s_fill / 100.0) / punch;
+    float scale = pow(wide / (aspect.x * s_fill / 100.0) / punch, u_amount);
+    middle = mix(vec2(0.5), middle, u_amount);
+    angle *= u_amount;
     vec2 p = (uv - 0.5) * aspect;
     float c = cos(angle), s = sin(angle);
     vec2 from = middle * aspect + vec2(c * p.x - s * p.y, s * p.x + c * p.y) * scale;
@@ -104,6 +107,6 @@ vec4 effect(vec2 uv) {
     vec3 colour = texture(u_video, at).rgb;
     if (at != clamp(at, u_video_rect.xy, u_video_rect.zw)) colour = vec3(0.0);
     // A flash of white on the cut.
-    colour = mix(colour, vec3(1.0), exp(-since * 20.0) * s_flash / 100.0);
+    colour = mix(colour, vec3(1.0), exp(-since * 20.0) * s_flash / 100.0 * u_amount);
     return vec4(colour, memory);
 }

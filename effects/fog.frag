@@ -1,6 +1,6 @@
 // Fog Layer: a level of mist in the shot's world, a little above the ground that depth finds. Each pixel's line of
 // sight is followed down into it, so whatever's deep in the fog is hidden by more of it, and what
-// stands above it isn't.
+// stands above it isn't. Fading in, the mist rises from the ground and thickens.
 
 // Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
 float noise_h3(vec2 p) {
@@ -39,7 +39,7 @@ vec4 effect(vec2 uv) {
     if (dot(up, origin - g0) < 0.0) up = -up;
     float eye = dot(origin - g0, up);
     if (eye <= 1e-3) return vec4(film, 1.0);
-    float top = eye * s_height / 100.0;
+    float top = eye * s_height / 100.0 * u_amount;
     // How much of the line of sight, up to what's there, is below the top.
     float h0 = eye, h1 = dot(origin + direction * scene - g0, up);
     float inside = 0.0;
@@ -65,7 +65,7 @@ vec4 effect(vec2 uv) {
     float depth_in = clamp(1.0 - dot(at - g0, up) / max(top, 1e-3), 0.0, 1.0);
     // It thickens a little in silence, and in frightening music.
     float settle = 1.0 + 0.3 * u_sound_silence + 0.4 * u_sound_scary_music;
-    float fog = 1.0 - exp(-inside * 2.0 * s_thick / 100.0 * settle * billow * (0.5 + depth_in));
+    float fog = 1.0 - exp(-inside * 2.0 * s_thick / 100.0 * settle * billow * (0.5 + depth_in) * u_amount);
     float light = dot(film, vec3(0.3, 0.59, 0.11));
     vec3 mist = mix(vec3(0.62, 0.66, 0.72), vec3(0.85, 0.88, 0.92), billow - 0.55) * (0.6 + 0.5 * light);
     return vec4(mix(film, mist, fog * u_world_ready), 1.0);

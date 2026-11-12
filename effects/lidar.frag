@@ -1,5 +1,5 @@
 // Lidar Sweep: a front moves out through the depth of the scene. Whatever it's passed glows, and
-// fades, as a set of scan dots.
+// fades, as a set of scan dots. Fading in, the picture darkens as the scan comes up.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -16,5 +16,5 @@ vec4 effect(vec2 uv) {
     float luma = dot(c, vec3(0.3, 0.59, 0.11));
     vec3 lit = tint * (luma * 1.6 + 0.08) * after * (0.5 + 0.5 * dots) * (1.0 + u_beat * s_react / 100.0);
     lit += mix(tint, vec3(1.0), 0.6) * line * 1.5;
-    return vec4(lit + c * tint * after * s_film / 100.0, 1.0);
+    return vec4(lit * u_amount + c * mix(vec3(1.0), tint * after * s_film / 100.0, u_amount), 1.0);
 }

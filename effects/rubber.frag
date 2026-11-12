@@ -1,7 +1,8 @@
 // Rubber Sheet: a mesh made in pixel space. There's a grid of vertices over the picture, each
 // raised by the depth under it and moved by its own wobble; between them heights blend, as
 // across a mesh's faces. Each pixel walks along its view ray until it goes under that surface,
-// then shows the part of the film pinned there. Where depth jumps, the sheet stretches.
+// then shows the part of the film pinned there. Where depth jumps, the sheet stretches. Fading
+// in, the wobble, the view's circling and the zoom past the edge all grow from none.
 //
 // s_style: 0 waves, 1 ripples, 2 facets, 3 wireframe.
 
@@ -116,19 +117,19 @@ vec4 effect(vec2 uv) {
     }
 
     float t = u_video_time * s_speed;
-    float amount = s_wobble / 100.0 * (1.0 + (u_beat + u_bass) * s_react / 100.0);
+    float amount = s_wobble / 100.0 * (1.0 + (u_beat + u_bass) * s_react / 100.0) * u_amount;
     vec2 grid = cells();
     vec2 centre = 0.5 * (u_video_rect.xy + u_video_rect.zw);
 
     // Zoomed in just past as far as the wobble can reach, so the picture's edge is never pulled
     // into view: it's often dark, from the film's frame or a sliver of black bar.
     vec2 size = u_video_rect.zw - u_video_rect.xy;
-    uv = centre + (uv - centre) * (1.0 - 2.0 * (reach() / size + EDGE));
+    uv = centre + (uv - centre) * (1.0 - 2.0 * (reach() / size + EDGE) * u_amount);
 
     // The view circles, so there's always some angle on the mesh, and leans in a little.
     float angle = 0.45 * t;
-    vec2 tilt = s_sway / 100.0 * vec2(0.16 * cos(angle), 0.11 * sin(angle));
-    float lean = 0.22 * s_sway / 100.0;
+    vec2 tilt = s_sway / 100.0 * u_amount * vec2(0.16 * cos(angle), 0.11 * sin(angle));
+    float lean = 0.22 * s_sway / 100.0 * u_amount;
     float top = 1.0 + 0.35 * amount;
     float bottom = -0.35 * amount;
     float span = top - bottom;
@@ -169,7 +170,7 @@ vec4 effect(vec2 uv) {
     float here = height_at(q, grid, t, amount);
     float slope = height_at(q + vec2(e.x, 0.0), grid, t, amount) - here + height_at(q + vec2(0.0, e.y), grid, t, amount) - here;
     // Waves stay unlit: they only move sideways, so all the light could show is depth's hard edges.
-    vec3 c = s_style < 0.5 ? video : video * (1.0 + clamp(slope * 2.5, -0.3, 0.35));
+    vec3 c = s_style < 0.5 ? video : video * (1.0 + clamp(slope * 2.5, -0.3, 0.35) * u_amount);
 
     if (s_style > 2.5) {
         vec2 g = to_picture(moved) * grid;
@@ -177,7 +178,7 @@ vec4 effect(vec2 uv) {
         vec2 near_line = min(fract(g), 1.0 - fract(g));
         float line = 1.0 - min(smoothstep(0.0, w.x, near_line.x), smoothstep(0.0, w.y, near_line.y));
         vec3 glow = 0.5 + 0.5 * cos(6.2831853 * (z * 1.5 + 0.05 * t + vec3(0.0, 0.33, 0.67)));
-        c = mix(c * 0.45, glow * 1.3, line);
+        c = mix(c * mix(1.0, 0.45, u_amount), glow * 1.3, line * u_amount);
     }
     return vec4(c, 1.0);
 }

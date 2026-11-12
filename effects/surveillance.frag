@@ -1,6 +1,8 @@
 // Surveillance: a security camera's picture (grey or night-vision green, noisy, with scan lines),
 // tracking everyone: brackets round each person with their number, a sight on their head, and
 // animals and vehicles outlined. A blinking REC and the time in the corner. From MoGe-2's who's who.
+// Fading in, the camera's picture comes over the film, the brackets grow out from the corners and
+// the writing comes up.
 //
 // s_look: 0 grey, 1 night vision.
 
@@ -64,17 +66,18 @@ vec4 effect(vec2 uv) {
     vec3 tint = s_look < 0.5 ? vec3(0.92, 0.96, 1.0) : vec3(0.35, 1.0, 0.45);
     vec3 c = s_look < 0.5 ? vec3(luma) * tint : pow(vec3(max(luma, 0.0)), vec3(0.7)) * tint;
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) c = vec3(0.0);
+    if (u_amount < 1.0) c = mix(film, c, u_amount);
     vec3 ink = s_look < 0.5 ? vec3(1.0, 0.85, 0.2) : vec3(0.85, 1.0, 0.85);
     // Animals and vehicles: outlined.
     float things = outline(uv, vehicle_at(uv) + animal_at(uv), px);
-    c = mix(c, vec3(1.0, 0.55, 0.1), things * step(0.5, fract((p.x + p.y) * 60.0)));
+    c = mix(c, vec3(1.0, 0.55, 0.1), things * step(0.5, fract((p.x + p.y) * 60.0)) * u_amount);
     for (int i = 0; i < u_person_count; i++) {
         float seen = u_person_seen[i];
         if (seen <= 0.0) continue;
         vec4 b = u_person_box[i];
         vec2 lo = b.xy * aspect - 4.0 * px, hi = b.zw * aspect + 4.0 * px;
         vec2 size = hi - lo;
-        float arm = min(size.x, size.y) * 0.22;
+        float arm = min(size.x, size.y) * 0.22 * u_amount;
         // Brackets at the corners.
         vec2 q = p - lo;
         vec2 r = hi - p;
@@ -96,16 +99,16 @@ vec4 effect(vec2 uv) {
             float hairs = step(abs(h.x), w * 0.5) * step(hr * 0.5, abs(h.y)) * step(abs(h.y), hr * 1.4) + step(abs(h.y), w * 0.5) * step(hr * 0.5, abs(h.x)) * step(abs(h.x), hr * 1.4);
             sight = max(ring, hairs) * (0.6 + 0.4 * step(0.5, fract(u_time * 2.0 + float(i) * 0.3)));
         }
-        c = mix(c, ink, max(max(corner, label), sight) * seen);
+        c = mix(c, ink, max(max(corner, label), sight) * seen * u_amount);
     }
     // REC, blinking, and the time.
     vec2 corner_at = vec2(u_video_rect.x * aspect.x + 0.04, u_video_rect.w - 0.07);
     float dot_ = 1.0 - smoothstep(0.012, 0.014, length(p - corner_at - vec2(0.0, 0.02)));
-    c = mix(c, vec3(1.0, 0.1, 0.1), dot_ * step(0.5, fract(u_time)));
+    c = mix(c, vec3(1.0, 0.1, 0.1), dot_ * step(0.5, fract(u_time)) * u_amount);
     int t = int(u_video_time);
     float clock = number(p, corner_at + vec2(0.04, 0.0), 0.04, t / 3600, 2)
         + number(p, corner_at + vec2(0.04 + 0.075, 0.0), 0.04, (t / 60) % 60, 2)
         + number(p, corner_at + vec2(0.04 + 0.15, 0.0), 0.04, t % 60, 2);
-    c = mix(c, vec3(1.0), clamp(clock, 0.0, 1.0));
+    c = mix(c, vec3(1.0), clamp(clock, 0.0, 1.0) * u_amount);
     return vec4(c, 1.0);
 }

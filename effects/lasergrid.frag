@@ -1,7 +1,8 @@
 // Laser Grid: straight beams across the shot's world, at heights and distances around where the
 // camera is looking, so there are always some in view. Each pixel's line of sight is tested against
 // each beam, so a beam shows only where it passes in front of what's there, and where it meets a
-// surface it leaves a bright spot, brightest on people.
+// surface it leaves a bright spot, brightest on people. Fading in, the beams and spots thicken from
+// nothing as the room dims.
 
 // Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
 float noise_h3(vec2 p) {
@@ -24,7 +25,7 @@ float fbm_h3(vec2 p) {
 
 vec4 effect(vec2 uv) {
     vec3 film = texture(u_video, uv).rgb;
-    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw) || u_world_ready <= 0.0) return vec4(film, 1.0);
+    if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw) || u_world_ready <= 0.0 || u_amount <= 0.0) return vec4(film, 1.0);
     float shot = mod(u_shot_start * 100.0, 971.0);
     float t = u_video_time;
     vec3 origin, direction;
@@ -61,17 +62,17 @@ vec4 effect(vec2 uv) {
             float s = (b * e - d) / den;
             float u = (a * e - b * d) / den;
             float gap = length(w0 + direction * s - along * u);
-            float width = (0.0006 + 0.0008 * max(s, 0.0)) * 640.0 / u_world_lens.x;
+            float width = (0.0006 + 0.0008 * max(s, 0.0)) * 640.0 / u_world_lens.x * u_amount;
             float in_front = step(0.05, s) * (1.0 - smoothstep(scene * 0.97, scene * 1.03, s)) * kept;
             float shimmer = 0.85 + 0.15 * noise_h3(vec2(u * 30.0 - t * 2.0, cell.x + cell.y * 7.0));
             light += in_front * shimmer * (exp(-gap * gap / (width * width)) + 0.25 * s_haze / 100.0 * exp(-gap / (width * 6.0)));
             // Where it meets whatever's there.
             float off = length(cross(surface - at, along));
-            float spot = 0.004 * scene * 640.0 / u_world_lens.x;
+            float spot = 0.004 * scene * 640.0 / u_world_lens.x * u_amount;
             spots += exp(-off * off / (spot * spot)) * (1.0 + 2.5 * person) * kept;
         }
     }
-    vec3 c = film * (1.0 - 0.25 * u_world_ready);
+    vec3 c = film * (1.0 - 0.25 * u_world_ready * u_amount);
     c += tint * (light * pulse + spots * 0.8) * u_world_ready;
     c += film * tint * spots * 0.6 * u_world_ready;
     return vec4(c, 1.0);

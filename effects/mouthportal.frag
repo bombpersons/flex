@@ -1,4 +1,5 @@
-// Mouth Portal: the inside of each mouth, from its mesh, shows somewhere else entirely.
+// Mouth Portal: the inside of each mouth, from its mesh, shows somewhere else entirely. Fading
+// in, the glow comes up and the portal opens as if the mouth were opening wider.
 
 const int LIP_POINTS = 20;
 
@@ -33,7 +34,7 @@ vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     for (int i = 0; i < u_face_count; i++) {
-        float open = u_face_open[i].z * u_face_mesh[i] * u_face_seen[i];
+        float open = u_face_open[i].z * u_face_mesh[i] * u_face_seen[i] * u_amount;
         if (open <= 0.01) continue;
         vec2 top = mesh_point(i, 13).xy, bottom = mesh_point(i, 14).xy;
         vec2 left = mesh_point(i, 61).xy, right = mesh_point(i, 291).xy;

@@ -1,7 +1,8 @@
 // Aquarium: a flat sheet of water in the room, level with the floor or table found from depth, so
 // it tilts with the camera. A point is underwater if it's further away than where its line of
 // sight meets the water, so the waterline runs along the table and around people on its own. What's seen is then refracted, reflected about where it
-// meets the water, lit by caustics and fogged by how much water is in front of it.
+// meets the water, lit by caustics and fogged by how much water is in front of it. Fading in, the
+// water rises from below the floor to its level.
 
 // The waves on the surface, at a point on it.
 float swell(vec2 at, float t) {
@@ -57,7 +58,7 @@ vec4 effect(vec2 uv) {
     // the height of that surface below the camera, the water is at above_water.
     float found = s_find * u_ground.w;
     vec3 ground = mix(vec3(0.0, -1.7, 1.7 * s_horizon / 100.0), u_ground.xyz + vec3(0.0, 0.0, BEYOND), found);
-    float above_water = mix(1.0, -0.4, s_level / 100.0 * filled) - 0.012 * u_bass * react;
+    float above_water = mix(1.0, -0.4, s_level / 100.0 * filled) + (1.0 - sqrt(u_amount)) / max(sqrt(u_amount), 1e-3) * 1.5 - 0.012 * u_bass * react;
     float below = dot(ground, vec3(pic, 1.0));
     vec2 downhill = ground.xy / vec2(aspect, 1.0);
     vec2 along = normalize(vec2(-downhill.y, downhill.x));

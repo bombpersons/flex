@@ -4,6 +4,8 @@
 // in the air in front of what you're looking at, and people and furniture cut dark shafts through
 // them. Bright windows and sky pour out their own beams, surfaces the light lands on brighten,
 // beams take their colour from the film, and dust glitters in them and swirls when things move.
+// Fading in, the room dims as the beams and the dust brighten in; what's remembered of the rays
+// isn't faded.
 
 float fbm4(vec2 p) {
     float sum = 0.0, amount = 0.5;
@@ -118,7 +120,7 @@ vec4 effect(vec2 uv) {
     vec3 tint = mix(hue(s_colour / 360.0) * 0.5 + 0.55, film_light(), s_film / 100.0);
     tint = mix(tint, hue(uv.x * 2.0 - t * 0.1) * 1.1, s_rainbow / 100.0);
 
-    float strength = s_strength / 100.0 * (1.0 + 0.9 * u_bass * react + 0.8 * hymn + 3.0 * flash) * mix(1.4, 0.85, clamp(u_brightness * 2.0, 0.0, 1.0));
+    float strength = s_strength / 100.0 * (1.0 + 0.9 * u_bass * react + 0.8 * hymn + 3.0 * flash) * mix(1.4, 0.85, clamp(u_brightness * 2.0, 0.0, 1.0)) * u_amount;
 
     // Where the light lands on things.
     float e = 0.006;
@@ -127,14 +129,14 @@ vec4 effect(vec2 uv) {
     vec3 towards = normalize(vec3(from_light * -1.0, 0.5));
     float facing = max(dot(normal, towards), 0.0);
     float landed = on_surface * mix(1.0, shafts, 0.6) * (0.35 + 0.65 * facing);
-    vec3 lit = c * (mix(0.66, 0.74, clamp(u_brightness * 2.0, 0.0, 1.0)) + tint * landed * 0.85 * s_land / 100.0);
-    lit += tint * face_at(uv) * on_surface * facing * 0.08 * s_land / 100.0;
+    vec3 lit = c * mix(vec3(1.0), mix(0.66, 0.74, clamp(u_brightness * 2.0, 0.0, 1.0)) + tint * landed * 0.85 * s_land / 100.0, u_amount);
+    lit += tint * face_at(uv) * on_surface * facing * 0.08 * s_land / 100.0 * u_amount;
 
     // Added as light through air is, which can't blow out what's already bright.
     vec3 shown = 1.0 - (1.0 - clamp(lit, 0.0, 1.0)) * exp(-tint * rays * strength * 0.8);
 
     // Motes of dust, in front of whatever's behind them, only where there's light.
-    float amount = s_dust / 100.0;
+    float amount = s_dust / 100.0 * u_amount;
     if (amount > 0.0) {
         vec2 p = uv * aspect - moving * 0.08;
         for (int i = 0; i < 3; i++) {

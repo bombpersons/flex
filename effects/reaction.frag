@@ -2,7 +2,8 @@
 // pushed up by what's close around it and down by what's further out, which settles by itself
 // into stripes and spots. Depth shapes them: they're bigger up close, squashed on surfaces that
 // turn away, don't cross the edges of things, and line up along the depth of the room. They ride
-// along on whatever's moving, and are lit as if raised from the surface.
+// along on whatever's moving, and are lit as if raised from the surface. Fading in, the markings
+// come up on the picture; they go on growing underneath at every amount.
 
 // An average of the pattern around `uv`, flattened along `slant` where the surface turns away,
 // and counting only what's on the same surface. `along` pulls the samples towards a line, which
@@ -60,7 +61,7 @@ vec4 effect(vec2 uv) {
     vec2 px = 1.5 / u_resolution;
     vec2 rise = vec2(texture(u_prev, uv + vec2(px.x, 0.0)).a - texture(u_prev, uv - vec2(px.x, 0.0)).a, texture(u_prev, uv + vec2(0.0, px.y)).a - texture(u_prev, uv - vec2(0.0, px.y)).a);
     ink *= 1.0 + dot(rise, vec2(0.6, -0.8)) * 1.6 * s_relief / 100.0;
-    vec3 shown = mix(c, ink, s_strength / 100.0);
+    vec3 shown = mix(c, ink, s_strength / 100.0 * u_amount);
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) shown = vec3(0.0);
     return vec4(shown, pattern);
 }

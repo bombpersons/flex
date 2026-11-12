@@ -1,4 +1,5 @@
-// Moustache Everyone: a shape worked out in the face's own coordinates, with a curl at each end.
+// Moustache Everyone: a shape worked out in the face's own coordinates, with a curl at each end. Fading in,
+// the moustache grows from a point under the nose.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -8,17 +9,17 @@ vec4 effect(vec2 uv) {
     vec3 tone = tones[int(s_colour + 0.5)];
     for (int i = 0; i < u_face_count; i++) {
         float seen = u_face_seen[i];
-        if (seen <= 0.0) continue;
+        if (seen <= 0.0 || u_amount <= 0.0) continue;
         Face f = face_frame(i, aspect);
         vec2 at = mix(f.nose, f.mouth, 0.52);
-        float w = f.spread * 0.72 * s_size / 100.0;
+        float w = f.spread * 0.72 * s_size / 100.0 * u_amount;
         vec2 across = f.across, up = f.up;
         if (meshed(i)) {
             // Pinned between nose and lip, so it rides on the mouth and narrows as the head turns.
             vec2 under_nose = mesh_point(i, 2).xy * aspect, top_lip = mesh_point(i, 0).xy * aspect;
             vec2 corners = (mesh_point(i, 291).xy - mesh_point(i, 61).xy) * aspect;
             at = mix(under_nose, top_lip, 0.55);
-            w = length(corners) * 1.1 * s_size / 100.0;
+            w = length(corners) * 1.1 * s_size / 100.0 * u_amount;
             across = normalize(corners + vec2(1e-6, 0.0));
             up = vec2(-across.y, across.x);
         }

@@ -1,5 +1,6 @@
 // Wallpaper Crawl: the walls flow along a moving noise field, and a grid of eyes hides in them.
-// Each eye opens now and then and looks at the first face it can find.
+// Each eye opens now and then and looks at the first face it can find. Fading in, the walls start to
+// writhe and colour, and the eyes open from shut.
 
 // An eye at `q` (roughly -1 to 1 inside it), looking along `look`, opened by `open`.
 vec4 eye(vec2 q, vec2 look, float open) {
@@ -25,9 +26,9 @@ vec4 effect(vec2 uv) {
     vec2 p = shot_uv(uv) * aspect;
     float t = u_video_time;
     vec2 flow = vec2(fbm(p * 4.0 + vec2(t * 0.25, 0.0)), fbm(p * 4.0 + vec2(5.2, -t * 0.2))) - 0.47;
-    vec2 from = uv + flow * 0.06 * s_crawl / 100.0 * (1.0 + u_bass);
+    vec2 from = uv + flow * 0.06 * s_crawl / 100.0 * u_amount * (1.0 + u_bass);
     vec3 moved = texture(u_video, clamp(from, u_video_rect.xy, u_video_rect.zw)).rgb;
-    moved = mix(moved, moved * hue(flow.x * 2.0 + t * 0.05) * 1.8, s_colour / 100.0);
+    moved = mix(moved, moved * hue(flow.x * 2.0 + t * 0.05) * 1.8, s_colour / 100.0 * u_amount);
 
     float size = 0.14;
     vec2 cell = floor(p / size);
@@ -44,7 +45,7 @@ vec4 effect(vec2 uv) {
         float open = smoothstep(0.1 - 0.9 * uneasy, 0.6 - 0.5 * uneasy, rhythm);
         // A blink now and then.
         open *= 1.0 - smoothstep(0.96, 1.0, sin(t * 2.3 + 9.0 * hash(cell + 4.0))) * (1.0 - scream);
-        open = mix(open, 1.0, scream) * woken;
+        open = mix(open, 1.0, scream) * woken * u_amount;
         if (open > 0.0) {
             vec2 centre = (cell + 0.5) * size;
             vec2 target = u_face_count > 0 ? face_point(0, 2) * aspect : vec2(aspect.x * 0.5 + 0.3 * sin(t * 0.7), 0.4);

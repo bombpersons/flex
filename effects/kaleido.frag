@@ -1,6 +1,7 @@
 // Kaleidoscope: every step is a setting. Each point on screen is moved about, folded into a slice,
 // and looked up in the film; then the colour is worked on and trails are mixed in. A count of arms
-// between two whole numbers blends between them, so it can change smoothly.
+// between two whole numbers blends between them, so it can change smoothly. Fading in, each point
+// slides from where it is to where the folds put it, the colour work comes in, and trails build up.
 
 const float TAU = 6.2831853;
 
@@ -40,7 +41,7 @@ vec2 tiled(vec2 p) {
     return p;
 }
 
-vec3 look(vec2 p, float arms, float zoom, float roam, float aspect) {
+vec3 look(vec2 uv, vec2 p, float arms, float zoom, float roam, float aspect) {
     vec2 q = slice(p, arms);
     int folds = int(s_folds + 0.5);
     for (int i = 1; i < folds; i++) {
@@ -59,7 +60,7 @@ vec3 look(vec2 p, float arms, float zoom, float roam, float aspect) {
         q *= 1.0 - (depth_at(u_video_rect.xy + picture * size) - 0.5) * s_relief / 100.0 * 0.6;
         picture = bounce(q / vec2(aspect * size.y / size.x, 1.0) / size.y + 0.5);
     }
-    return texture(u_video, u_video_rect.xy + picture * size).rgb;
+    return texture(u_video, mix(uv, u_video_rect.xy + picture * size, u_amount)).rgb;
 }
 
 vec4 effect(vec2 uv) {
@@ -90,16 +91,18 @@ vec4 effect(vec2 uv) {
     float arms = max(s_arms + s_bass_arms * u_bass, 1.0);
     float whole = floor(arms);
     float between = smoothstep(0.3, 0.7, arms - whole);
-    vec3 c = look(p, whole, zoom, roam, aspect);
-    if (between > 0.0) c = mix(c, look(p, whole + 1.0, zoom, roam, aspect), between);
+    vec3 c = look(uv, p, whole, zoom, roam, aspect);
+    if (between > 0.0) c = mix(c, look(uv, p, whole + 1.0, zoom, roam, aspect), between);
 
-    c = hue_turn(c, radians(s_hue) + t * 0.5 * s_flow / 100.0 + s_rainbow / 100.0 * r * 6.0 + u_beat * kick);
+    // Blended towards the turned colour: the angle keeps growing with time, so scaling it would
+    // turn the colours somewhere arbitrary on the way in.
+    c = mix(c, hue_turn(c, radians(s_hue) + t * 0.5 * s_flow / 100.0 + s_rainbow / 100.0 * r * 6.0 + u_beat * kick), u_amount);
     float grey = dot(c, vec3(0.3, 0.59, 0.11));
-    c = mix(vec3(grey), c, s_saturation / 100.0);
-    c = (c - 0.5) * s_contrast / 100.0 + 0.5;
-    if (s_layers >= 2.0) c = floor(clamp(c, 0.0, 1.0) * s_layers + 0.5) / s_layers;
+    c = mix(vec3(grey), c, mix(1.0, s_saturation / 100.0, u_amount));
+    c = (c - 0.5) * mix(1.0, s_contrast / 100.0, u_amount) + 0.5;
+    if (s_layers >= 2.0) c = mix(c, floor(clamp(c, 0.0, 1.0) * s_layers + 0.5) / s_layers, u_amount);
     c = clamp(c, 0.0, 4.0);
-    c *= 1.0 - s_vignette / 100.0 * smoothstep(0.25, 0.9, r);
+    c *= 1.0 - s_vignette / 100.0 * smoothstep(0.25, 0.9, r) * u_amount;
 
     bool inside = uv == clamp(uv, u_video_rect.xy, u_video_rect.zw);
     if (s_fill < 0.5 && !inside) c = vec3(0.0);
@@ -108,7 +111,7 @@ vec4 effect(vec2 uv) {
         vec2 q = (uv - 0.5) * to_square;
         q = rotate(q, 0.001 * s_trail_turn) * (1.0 - 0.001 * s_trail_zoom);
         vec3 past = texture(u_prev, q / to_square + 0.5).rgb;
-        past = hue_turn(past, 0.002 * s_trail_colour) * s_trails / 100.0;
+        past = hue_turn(past, 0.002 * s_trail_colour) * s_trails / 100.0 * u_amount;
         c = max(c, past);
     }
     return vec4(c, 1.0);

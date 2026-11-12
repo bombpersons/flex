@@ -52,6 +52,8 @@ enum Line {
     Shortest,
     Longest,
     Fade,
+    /// Whether fades go through the plain picture.
+    FadeStyle,
     Randomise,
     /// How often shuffle pairs a sound effect with a turn.
     SoundPairing,
@@ -348,7 +350,7 @@ fn lines(page: &Page, sh: &Shared) -> Vec<Line> {
             if sh.effects.shuffle().at_cuts {
                 lines.push(Line::ByShot);
             }
-            lines.extend([Line::Shortest, Line::Longest, Line::Fade, Line::Randomise, Line::SoundPairing]);
+            lines.extend([Line::Shortest, Line::Longest, Line::Fade, Line::FadeStyle, Line::Randomise, Line::SoundPairing]);
             lines
         }
         Page::Drift => vec![Line::Drift, Line::DriftSpeed],
@@ -610,6 +612,7 @@ impl EffectPanel {
                 set_shuffle(sh, Shuffle { on: mode > 0, at_cuts: mode == 2, ..shuffle });
             }
             Line::ByShot => set_shuffle(sh, Shuffle { by_shot: !shuffle.by_shot, ..shuffle }),
+            Line::FadeStyle => set_shuffle(sh, Shuffle { through_normal: !shuffle.through_normal, ..shuffle }),
             Line::Shortest => {
                 let shortest = timed(shuffle.shortest, TURN);
                 set_shuffle(sh, Shuffle { shortest, longest: shuffle.longest.max(shortest), ..shuffle });
@@ -704,6 +707,7 @@ impl EffectPanel {
             Line::DriftSpeed => ("Drift speed".into(), format!("{}%", drift.speed), timed(drift.speed, DRIFT_SPEED)),
             Line::Shuffle => ("Shuffle".into(), ["Off", "Timed", "Scene cuts"][shuffle_mode(shuffle) as usize].into(), None),
             Line::ByShot => ("Suit the shot".into(), (if shuffle.by_shot { "On" } else { "Off" }).into(), None),
+            Line::FadeStyle => ("Fade style".into(), (if shuffle.through_normal { "Through the picture" } else { "Crossfade" }).into(), None),
             Line::Shortest => ("Shortest turn".into(), seconds(shuffle.shortest), timed(shuffle.shortest, TURN)),
             Line::Longest => ("Longest turn".into(), seconds(shuffle.longest), timed(shuffle.longest, TURN)),
             Line::Fade => ("Fade".into(), if shuffle.fade > 0.0 { seconds(shuffle.fade) } else { "Off".into() }, timed(shuffle.fade, FADE)),
@@ -771,6 +775,7 @@ impl EffectPanel {
             Line::Shortest | Line::Longest if sh.effects.shuffle().at_cuts => "Cuts are ignored until the shortest turn is up. After the longest it changes anyway.".into(),
             Line::Shortest | Line::Longest => "Each effect stays for a random time between these.".into(),
             Line::Fade => "How long one effect takes to fade into the next. Off switches instantly.".into(),
+            Line::FadeStyle => "Crossfade: one effect dissolves into the next. Through the picture: each effect eases itself away to the plain picture in its own way (heads grow back, colours come back), then the next eases in.".into(),
             Line::Randomise => "Each time an effect comes up, its settings move this far at random from yours, which aren't changed.".into(),
             Line::SoundPairing => "How often an effect comes with a sound effect, picked at random. It changes and fades with the picture. Off: the sound effect picked on the Sound row plays throughout.".into(),
             Line::Sound if crate::sound_effects::unavailable() => {

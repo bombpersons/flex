@@ -1,7 +1,8 @@
 // Black Hole: a real one, hanging in the room. Each line of sight is bent by its gravity on the
 // way past and either falls in, crosses the glowing disc, or comes out to land on whatever's
 // behind, so what you see around it is the room lensed, and by more the further back it is.
-// Anything nearer than the hole stands in front of it, and the disc lights up the room.
+// Anything nearer than the hole stands in front of it, and the disc lights up the room. Fading in,
+// the hole grows from a point and the people it hides go out of the room.
 
 float fbm4(vec2 p) {
     float sum = 0.0, amount = 0.5;
@@ -30,7 +31,7 @@ vec3 room_at(vec2 uv) {
     // Mirrored at the edges, as there's nothing past them.
     p = 1.0 - abs(mod(p, 2.0) - 1.0);
     vec2 inside = u_video_rect.xy + p * size;
-    float gone = smoothstep(0.3, 0.6, person_at(inside)) * smoothstep(0.2, 0.7, plate_known(inside));
+    float gone = smoothstep(0.3, 0.6, person_at(inside)) * smoothstep(0.2, 0.7, plate_known(inside)) * u_amount;
     vec3 c = texture(u_video, inside).rgb;
     return gone > 0.0 ? mix(c, plate_at(inside), gone) : c;
 }
@@ -60,7 +61,7 @@ vec4 effect(vec2 uv) {
     // It hangs in the room, so it stays there when the camera moves.
     centre_uv = world_pin_nearby(centre_uv, 1.5);
     vec2 centre = centre_uv * aspect;
-    float radius = 0.06 * s_size / 100.0 * (1.0 + 0.12 * u_bass * s_react / 100.0);
+    float radius = 0.06 * s_size / 100.0 * (1.0 + 0.12 * u_bass * s_react / 100.0) * max(u_amount, 1e-4);
     vec2 rel = p - centre;
 
     // It hangs just in front of what's behind it, leaving out anyone nearby, then as far
