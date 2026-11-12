@@ -102,6 +102,23 @@ Levin (the living textures grown for the Living Textures, Drawn World and Drawn 
   Source: https://distill.pub/selforg/2021/textures and
   https://github.com/distillpub/post--selforg-textures
 
+DeepFilterNet3 by Hendrik Schröter and others (finds the voice in the sound, for sound effects)
+  Not included: downloaded from its GitHub repository the first time a sound effect is on.
+  License: MIT or Apache 2.0.
+  Source: https://github.com/Rikorose/DeepFilterNet
+
+Silero VAD (hears when someone's talking, for sound effects)
+  Not included: downloaded from its GitHub repository the first time a sound effect is on.
+  License: MIT.
+  Source: https://github.com/snakers4/silero-vad
+
+DDSP-VST by Google's Magenta team (hears a voice's pitch for the Instrument, Auto-tune, Synth
+voice and some Voice changer voices, and plays it on instruments)
+  Not included: the pitch network is downloaded from GitHub, and the instruments from Google's
+  release, the first time they're used.
+  License: Apache 2.0.
+  Source: https://github.com/magenta/ddsp-vst
+
 JASSUB $jassub_version (built into $program; draws subtitles in the web UI's player)
   JASSUB itself: MIT (licenses/jassub-LICENSE.txt). Its WebAssembly contains libass
   (ISC), FreeType (FTL or GPL 2), HarfBuzz (MIT), FriBidi (LGPL 2.1 or later) and their
