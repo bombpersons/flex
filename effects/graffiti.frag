@@ -1,5 +1,6 @@
 // Graffiti: painted in shot_uv, where each point was on screen when the shot began, so it stays on
-// what it's on. Only walls take paint, and people walk in front of it.
+// what it's on. Only walls take paint (inside, or buildings' outsides), and people, animals and
+// vehicles go in front of it.
 
 // Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
 float noise_h3(vec2 p) {
@@ -60,7 +61,8 @@ float stencil(vec2 p, float kind) {
 vec4 effect(vec2 uv) {
     vec3 film = texture(u_video, uv).rgb;
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw) || u_world_ready <= 0.0) return vec4(film, 1.0);
-    float wall = smoothstep(0.35, 0.7, wall_at(uv)) * (1.0 - smoothstep(0.3, 0.6, person_at(uv)));
+    float in_front = person_at(uv) + animal_at(uv) + vehicle_at(uv);
+    float wall = smoothstep(0.35, 0.7, wall_at(uv) + building_at(uv)) * (1.0 - smoothstep(0.3, 0.6, in_front));
     if (wall <= 0.0) return vec4(film, 1.0);
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     float shot = mod(u_shot_start * 100.0, 971.0);

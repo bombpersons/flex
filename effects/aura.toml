@@ -1,5 +1,5 @@
 name = "Aura"
-description = "A coloured energy field streams off each person, pulsing with the bass."
+description = "A coloured energy field streams off each person (or animal), pulsing with the bass."
 segment = true
 audio = true
 feedback = true
@@ -44,3 +44,14 @@ max = 100
 step = 10
 unit = "%"
 default = 60
+
+[[settings]]
+key = "who"
+label = "Who glows"
+type = "choice"
+default = "people"
+options = [
+    { id = "people", label = "People" },
+    { id = "animals", label = "Animals" },
+    { id = "both", label = "People and animals" },
+]

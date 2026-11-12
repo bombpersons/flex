@@ -1,5 +1,5 @@
 name = "Graffiti"
-description = "Neon tags, stencils and splashes sprayed on the walls, staying on the walls as the camera moves."
+description = "Neon tags, stencils and splashes sprayed on the walls and buildings, staying put as the camera moves."
 suits = ["wide"]
 camera = true
 segment = true

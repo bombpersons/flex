@@ -1,5 +1,5 @@
 name = "Colour Thief"
-description = "The world is grey and only people have colour, or the other way round."
+description = "The world is grey and only people have colour, or the other way round, or only animals, vehicles, plants or the sky."
 segment = true
 audio = true
 
@@ -11,6 +11,10 @@ default = "people"
 options = [
     { id = "people", label = "People" },
     { id = "world", label = "The world" },
+    { id = "animals", label = "Animals" },
+    { id = "vehicles", label = "Vehicles" },
+    { id = "plants", label = "Plants" },
+    { id = "sky", label = "Sky" },
 ]
 
 [[settings]]

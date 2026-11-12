@@ -112,9 +112,11 @@ pub struct DepthMap {
     /// How much of each pixel is a person (red), wall (green) and sky (blue), RGBA, bottom row
     /// first, `WIDTH` × `HEIGHT`, when an effect asked for them.
     pub masks: Option<Vec<u8>>,
-    /// Ground, ceiling, water and plant; then window, skin, hair and clothes (from MoGe-2's head),
-    /// likewise.
-    pub more_masks: Option<[Vec<u8>; 2]>,
+    /// MoGe-2's head's other masks, likewise, as `MORE_LAYERS` layers one after another (see
+    /// `more_layers`).
+    pub more_masks: Option<Vec<u8>>,
+    /// Who's where, with `more_masks`.
+    pub people: crate::people::People,
     /// Which way surfaces face (see `normal_bytes`), RGBA, bottom row first, `WIDTH` × `HEIGHT`,
     /// when the network gives them.
     pub normals: Option<Vec<u8>>,
@@ -223,7 +225,7 @@ impl Net {
         });
         let masks = if masks && m.has_masks() {
             let found = m.masks()?;
-            Some(mask_planes(&found.scene, &found.parts, from))
+            Some(mask_planes(&found, from))
         } else {
             None
         };
@@ -277,35 +279,75 @@ impl Pace {
     }
 }
 
-/// Mask classes effects get, in this order: person, wall and sky, then ground, ceiling, water,
-/// plant, window, and a person's skin, hair and clothes.
+/// The planes of masks kept, in this order: SCENE's classes but "other" (person, wall, sky,
+/// ground, ceiling, water, plant, window, vehicle, animal, building, furniture); a person's
+/// PARTS (skin, hair, clothes) and BODY (head, torso, arm, hand, leg, foot), each of how much of
+/// a person a pixel is; then CENTRES (heat, and the way to the middle, x and y).
 const MASKS: usize = 3;
-const ALL_MASKS: usize = 11;
+const SCENE_MASKS: usize = 12;
+const SKIN: usize = SCENE_MASKS;
+const HEAD: usize = SKIN + 3;
+const HAND: usize = HEAD + 3;
+const LEG: usize = HEAD + 4;
+const FOOT: usize = HEAD + 5;
+const HEAT: usize = HEAD + 6;
+const ALL_MASKS: usize = HEAT + 3;
+/// The layers of `u_more_masks`: ground, ceiling, water, plant; window, skin, hair, clothes;
+/// vehicle, animal, building, furniture; head, torso, arm, hand; leg, foot, who and heat.
+pub const MORE_LAYERS: usize = 5;
 
-/// The head's scene planes (`size`, rows from the top, the first being "other") and parts as
-/// the masks effects get, at `WIDTH` × `HEIGHT`. `parts` are of a person, so they're scaled by
-/// how much of a person each pixel is.
-fn mask_planes(scene: &[f32], parts: &[f32], size: (usize, usize)) -> Vec<Vec<f32>> {
+/// The head's planes (`size`, rows from the top; SCENE's first being "other") as the planes
+/// kept, at `WIDTH` × `HEIGHT`. PARTS and BODY are of a person, so they're scaled by how much
+/// of a person each pixel is.
+fn mask_planes(found: &flex_depth::moge::Masks, size: (usize, usize)) -> Vec<Vec<f32>> {
     let pixels = size.0 * size.1;
     let full = |plane: &[f32]| if size == (WIDTH, HEIGHT) { plane.to_vec() } else { scaled(plane, size, (WIDTH, HEIGHT)) };
-    let scene_masks = ALL_MASKS - flex_depth::moge::PARTS.len();
-    let mut out: Vec<Vec<f32>> = (1..=scene_masks).map(|c| full(&scene[c * pixels..][..pixels])).collect();
-    let person = &scene[pixels..][..pixels];
-    for part in parts.chunks(pixels) {
+    let mut out: Vec<Vec<f32>> = (1..=SCENE_MASKS).map(|c| full(&found.scene[c * pixels..][..pixels])).collect();
+    let person = &found.scene[pixels..][..pixels];
+    for part in found.parts.chunks(pixels).chain(found.body.chunks(pixels)) {
         out.push(full(&part.iter().zip(person).map(|(a, b)| a * b).collect::<Vec<f32>>()));
     }
+    out.extend(found.centres.chunks(pixels).map(full));
     out
+}
+
+/// `u_more_masks`' layers' bytes (see `MORE_LAYERS`), from all the planes kept and which person
+/// each pixel is (rows from the top, 0 for nobody).
+fn more_layers(planes: &[Vec<f32>], whose: &[u8]) -> Vec<u8> {
+    let who: Vec<f32> = whose.iter().map(|w| *w as f32 / 255.0).collect();
+    let layers: [[&[f32]; 4]; MORE_LAYERS] = [
+        [&planes[3], &planes[4], &planes[5], &planes[6]],
+        [&planes[7], &planes[SKIN], &planes[SKIN + 1], &planes[SKIN + 2]],
+        [&planes[8], &planes[9], &planes[10], &planes[11]],
+        [&planes[HEAD], &planes[HEAD + 1], &planes[HEAD + 2], &planes[HAND]],
+        [&planes[LEG], &planes[FOOT], &who, &planes[HEAT]],
+    ];
+    layers.iter().map(|l| mask_bytes(l)).collect::<Vec<_>>().concat()
+}
+
+/// Who's where in planes kept, as `people::find` finds them.
+fn people_in(planes: &[Vec<f32>]) -> (Vec<crate::people::Person>, Vec<u8>) {
+    let p = crate::people::Planes {
+        person: &planes[0],
+        heat: &planes[HEAT],
+        to_x: &planes[HEAT + 1],
+        to_y: &planes[HEAT + 2],
+        head: &planes[HEAD],
+        hand: &planes[HAND],
+        foot: &planes[FOOT],
+    };
+    crate::people::find(&p, (WIDTH, HEIGHT))
 }
 
 /// Four masks (rows from the top) as a texture's bytes: RGBA, bottom row first, with 1 for
 /// any that aren't there.
-fn mask_bytes(planes: &[Vec<f32>]) -> Vec<u8> {
+fn mask_bytes<P: AsRef<[f32]>>(planes: &[P]) -> Vec<u8> {
     let mut out = vec![255u8; WIDTH * HEIGHT * 4];
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
-            let px = &mut out[((HEIGHT - 1 - y) * WIDTH + x) * 4..][..4];
-            for (byte, plane) in px.iter_mut().zip(planes) {
-                *byte = (plane[y * WIDTH + x].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    for (c, plane) in planes.iter().enumerate() {
+        for (y, src) in plane.as_ref().as_chunks::<WIDTH>().0.iter().enumerate() {
+            let dst = &mut out[(HEIGHT - 1 - y) * WIDTH * 4..][..WIDTH * 4];
+            for (px, v) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src) {
+                px[c] = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
             }
         }
     }
@@ -415,28 +457,46 @@ fn settle(values: &mut [f32], previous: &[f32], size: (usize, usize)) {
     }
 }
 
-/// `plane` (`WIDTH` × `HEIGHT`) after `seconds` of movement, the movement being x and y in
-/// fractions of the picture a second at that size, all rows from the top.
-fn carried(plane: &[f32], flow: &[Vec<f32>; 2], seconds: f32) -> Vec<f32> {
-    let (w, h) = (WIDTH as f32, HEIGHT as f32);
-    let mut out = Vec::with_capacity(plane.len());
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
-            let at = y * WIDTH + x;
-            // What's here now was back along the movement.
-            let from_x = (x as f32 - flow[0][at] * seconds * w).clamp(0.0, w - 1.0);
-            let from_y = (y as f32 - flow[1][at] * seconds * h).clamp(0.0, h - 1.0);
-            let (x0, y0) = (from_x as usize, from_y as usize);
-            let (x1, y1) = ((x0 + 1).min(WIDTH - 1), (y0 + 1).min(HEIGHT - 1));
-            let (tx, ty) = (from_x - x0 as f32, from_y - y0 as f32);
-            let (r0, r1) = (&plane[y0 * WIDTH..][..WIDTH], &plane[y1 * WIDTH..][..WIDTH]);
-            let top = r0[x0] + (r0[x1] - r0[x0]) * tx;
-            let bottom = r1[x0] + (r1[x1] - r1[x0]) * tx;
-            out.push(top + (bottom - top) * ty);
-        }
-    }
-    out
+/// Where each pixel of a plane (`WIDTH` × `HEIGHT`, rows from the top) was `seconds` ago along
+/// the movement (x and y in fractions of the picture a second at that size): the four pixels
+/// around it and how much of the right and lower ones to take. Worked out once for every plane.
+struct Warp {
+    from: Vec<(u32, u32, f32, f32)>,
 }
+
+impl Warp {
+    fn new(flow: &[Vec<f32>; 2], seconds: f32) -> Warp {
+        let (w, h) = (WIDTH as f32, HEIGHT as f32);
+        let mut from = Vec::with_capacity(WIDTH * HEIGHT);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let at = y * WIDTH + x;
+                let from_x = (x as f32 - flow[0][at] * seconds * w).clamp(0.0, w - 1.0);
+                let from_y = (y as f32 - flow[1][at] * seconds * h).clamp(0.0, h - 1.0);
+                let (x0, y0) = (from_x as usize, from_y as usize);
+                from.push(((y0 * WIDTH + x0) as u32, (x0 + 1).min(WIDTH - 1) as u32 - x0 as u32 + if y0 + 1 < HEIGHT { (WIDTH as u32) << 16 } else { 0 }, from_x - x0 as f32, from_y - y0 as f32));
+            }
+        }
+        Warp { from }
+    }
+
+    /// `plane` moved.
+    fn carry(&self, plane: &[f32]) -> Vec<f32> {
+        self.from
+            .iter()
+            .map(|&(at, step, tx, ty)| {
+                let (at, right, down) = (at as usize, (step & 0xffff) as usize, (step >> 16) as usize);
+                let (a, b, c, d) = (plane[at], plane[at + right], plane[at + down], plane[at + down + right]);
+                let top = a + (b - a) * tx;
+                let bottom = c + (d - c) * tx;
+                top + (bottom - top) * ty
+            })
+            .collect()
+    }
+}
+
+/// The most threads planes are carried on at once.
+const CARRY_THREADS: usize = 4;
 
 /// What's known of the picture at one moment, rows from the top.
 struct Picture {
@@ -448,10 +508,26 @@ struct Picture {
 
 impl Picture {
     fn moved(&self, flow: &[Vec<f32>; 2], seconds: f32) -> Picture {
+        let warp = Warp::new(flow, seconds);
+        // Each plane's carried on its own; there are a couple of dozen, so they're shared out.
+        let mut planes: Vec<&[f32]> = vec![&self.depth];
+        planes.extend(self.masks.iter().flatten().map(Vec::as_slice));
+        planes.extend(self.normals.iter().flatten().map(Vec::as_slice));
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, CARRY_THREADS);
+        let mut carried: Vec<Vec<f32>> = std::thread::scope(|s| {
+            let warp = &warp;
+            let handles: Vec<_> = planes.chunks(planes.len().div_ceil(threads)).map(|some| s.spawn(move || some.iter().map(|p| warp.carry(p)).collect::<Vec<_>>())).collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        let normals = self.normals.as_ref().map(|_| {
+            let mut n = carried.split_off(carried.len() - 3).into_iter();
+            std::array::from_fn(|_| n.next().unwrap_or_default())
+        });
+        let masks = self.masks.as_ref().map(|_| carried.split_off(1));
         Picture {
-            depth: carried(&self.depth, flow, seconds),
-            masks: self.masks.as_ref().map(|masks| masks.iter().map(|m| carried(m, flow, seconds)).collect()),
-            normals: self.normals.as_ref().map(|normals| std::array::from_fn(|c| carried(&normals[c], flow, seconds))),
+            depth: carried.pop().unwrap_or_default(),
+            masks,
+            normals,
             time: self.time + seconds,
         }
     }
@@ -469,6 +545,7 @@ struct Carrier {
     wrong: f32,
     serial: u64,
     ground: [f32; 4],
+    people: crate::people::Tracker,
 }
 
 /// The speed nine tenths of the picture is under, from planes of x then y.
@@ -488,19 +565,29 @@ impl Carrier {
     /// A new shot: nothing about the last one applies.
     fn cut(&mut self) {
         self.picture = None;
+        self.people.cut();
         self.fast = 0.0;
         self.wrong = 0.0;
     }
 
     fn map(&mut self, picture: &Picture, ahead: bool) -> DepthMap {
         self.serial += 1;
+        let all = picture.masks.as_ref().filter(|m| m.len() == ALL_MASKS);
+        let (people, more_masks) = match all {
+            Some(planes) => {
+                let (found, mut whose) = people_in(planes);
+                (self.people.update(&found, &mut whose), Some(more_layers(planes, &whose)))
+            }
+            None => (Default::default(), None),
+        };
         DepthMap {
             // GL's rows run bottom-up.
             values: picture.depth.chunks(WIDTH).rev().flatten().copied().collect(),
             serial: self.serial,
             time: picture.time,
             masks: picture.masks.as_ref().map(|m| mask_bytes(&m[..MASKS])),
-            more_masks: picture.masks.as_ref().filter(|m| m.len() == ALL_MASKS).map(|m| [mask_bytes(&m[3..7]), mask_bytes(&m[7..11])]),
+            more_masks,
+            people,
             normals: picture.normals.as_ref().map(normal_bytes),
             ground: self.ground,
             ahead,
@@ -679,7 +766,9 @@ impl Link {
             let input = loop {
                 self.catch_up(&mut carrier);
                 let mut state = self.lock();
-                if !state.moves.is_empty() {
+                // More movement came in meanwhile; but a frame waiting goes first, or the model
+                // could wait for ever behind movement that comes in faster than it's carried.
+                if !state.moves.is_empty() && state.input.is_none() {
                     continue;
                 }
                 if let Some(input) = state.input.take() {
@@ -943,13 +1032,23 @@ mod tests {
     fn masks_skip_other_and_go_bottom_row_first() {
         // Small pictures would need scaling; use the full size for the layout.
         let pixels = WIDTH * HEIGHT;
-        let mut planes = vec![0.0; flex_depth::moge::SCENE.len() * pixels];
-        planes[pixels] = 1.0; // person, at the top left
-        let parts = vec![0.0; flex_depth::moge::PARTS.len() * pixels];
-        let masks = mask_planes(&planes, &parts, (WIDTH, HEIGHT));
+        use flex_depth::moge::{BODY, CENTRES, PARTS, SCENE};
+        let mut found = flex_depth::moge::Masks { scene: vec![0.0; SCENE.len() * pixels], parts: vec![0.0; PARTS.len() * pixels], body: vec![0.0; BODY.len() * pixels], centres: vec![0.0; CENTRES.len() * pixels] };
+        found.scene[pixels] = 1.0; // person, at the top left
+        found.body[3 * pixels] = 0.5; // half a hand there
+        found.scene[9 * pixels + 1] = 1.0; // a vehicle beside it
+        let masks = mask_planes(&found, (WIDTH, HEIGHT));
         assert_eq!(masks.len(), ALL_MASKS);
         let bytes = mask_bytes(&masks[..MASKS]);
         assert_eq!(&bytes[(HEIGHT - 1) * WIDTH * 4..][..4], &[255, 0, 0, 255]);
         assert_eq!(&bytes[..4], &[0, 0, 0, 255]);
+        let mut whose = vec![0; pixels];
+        whose[0] = 3;
+        let layers = more_layers(&masks, &whose);
+        assert_eq!(layers.len(), MORE_LAYERS * pixels * 4);
+        let top_left = |layer: usize, at: usize| &layers[layer * pixels * 4 + (HEIGHT - 1) * WIDTH * 4 + at * 4..][..4];
+        assert_eq!(top_left(3, 0), &[0, 0, 0, 128]);
+        assert_eq!(top_left(4, 0)[2], 3);
+        assert_eq!(top_left(2, 1), &[255, 0, 0, 0]);
     }
 }

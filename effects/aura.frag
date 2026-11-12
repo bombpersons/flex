@@ -1,5 +1,14 @@
 // Aura: light around people, kept in the alpha of u_prev and carried up and outwards each frame,
-// so it flows off them. People themselves are left alone.
+// so it flows off them. People themselves are left alone. With MoGe-2's head it can stream off
+// animals instead, or both.
+//
+// s_who: 0 people, 1 animals, 2 people and animals.
+
+float glowing_at(vec2 uv) {
+    if (s_who < 0.5) return person_at(uv);
+    if (s_who < 1.5) return animal_at(uv);
+    return max(person_at(uv), animal_at(uv));
+}
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -7,13 +16,13 @@ vec4 effect(vec2 uv) {
     vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
     vec2 p = uv * aspect;
     float t = u_time;
-    float person = person_at(uv);
+    float person = glowing_at(uv);
     float reach = 0.03 * s_size / 100.0 * (1.0 + u_bass * s_react / 50.0);
     float near = 0.0, source = 0.0;
     for (int i = 0; i < 12; i++) {
         float a = float(i) * 0.5235988;
         vec2 at = uv + vec2(cos(a), sin(a)) * reach / aspect;
-        float there = person_at(at);
+        float there = glowing_at(at);
         near += there;
         if (there > 0.5) source = max(source, depth_at(at));
     }

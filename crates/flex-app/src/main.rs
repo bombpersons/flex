@@ -26,6 +26,7 @@ mod logging;
 mod mpv;
 mod music_player;
 mod nca;
+mod people;
 mod picture;
 mod restyle;
 mod player;

@@ -90,8 +90,6 @@ pub struct Renderer {
     camera: CameraGl,
     restyle: RestyleGl,
     nca: crate::nca::NcaGl,
-    /// How many texture units a fragment shader can have (16 at least): `u_original` is the 17th.
-    units: i32,
     shots: crate::shot_type::Tracker,
     cuts: CutGl,
     history: HistoryGl,
@@ -695,14 +693,18 @@ float sky_at(vec2 uv) {
 }
 // With segment = true and MoGe-2's head (u_has_more_masks is 1): more of what each point is,
 // each from 0 to 1. ground_at is anything underfoot (floors, roads, grass, sand, snow), and
-// body_skin_at, clothes_at and hair_at say which part of a person a point is (they add up to
-// person_at).
-uniform sampler2D u_masks2;
-uniform sampler2D u_masks3;
+// building_at the outsides of buildings (inside, walls are wall_at). Of a person, body_skin_at,
+// clothes_at and hair_at say what they're made of there, and head_at, torso_at, arm_at, hand_at,
+// leg_at and foot_at which part of the body it is, whatever it's wearing: each set adds up to
+// person_at.
+uniform sampler2DArray u_more_masks;
 uniform float u_has_more_masks;
-vec4 more_masks_at(vec2 uv, int which) {
+// Layer 0: ground, ceiling, water, plant. 1: window, skin, hair, clothes. 2: vehicle, animal,
+// building, furniture. 3: head, torso, arm, hand. 4: leg, foot, and (not to be filtered) which
+// person, and how near a person's middle.
+vec4 more_masks_at(vec2 uv, int layer) {
     vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
-    return (which == 0 ? texture(u_masks2, p) : texture(u_masks3, p)) * u_has_more_masks;
+    return texture(u_more_masks, vec3(p, float(layer))) * u_has_more_masks;
 }
 float ground_at(vec2 uv) { return more_masks_at(uv, 0).r; }
 float ceiling_at(vec2 uv) { return more_masks_at(uv, 0).g; }
@@ -711,6 +713,42 @@ float plant_at(vec2 uv) { return more_masks_at(uv, 0).a; }
 float window_at(vec2 uv) { return more_masks_at(uv, 1).r; }
 float body_skin_at(vec2 uv) { return more_masks_at(uv, 1).g; }
 float clothes_at(vec2 uv) { return more_masks_at(uv, 1).a; }
+float vehicle_at(vec2 uv) { return more_masks_at(uv, 2).r; }
+float animal_at(vec2 uv) { return more_masks_at(uv, 2).g; }
+float building_at(vec2 uv) { return more_masks_at(uv, 2).b; }
+float furniture_at(vec2 uv) { return more_masks_at(uv, 2).a; }
+float head_at(vec2 uv) { return more_masks_at(uv, 3).r; }
+float torso_at(vec2 uv) { return more_masks_at(uv, 3).g; }
+float arm_at(vec2 uv) { return more_masks_at(uv, 3).b; }
+float hand_at(vec2 uv) { return more_masks_at(uv, 3).a; }
+float leg_at(vec2 uv) { return more_masks_at(uv, 4).r; }
+float foot_at(vec2 uv) { return more_masks_at(uv, 4).g; }
+// Who's who (with segment = true and MoGe-2's head): up to MAX_PEOPLE people, each keeping their
+// number while they're in shot (so one can be given their own colour); a number's free when
+// u_person_seen is 0. For each: how sure that they're there (1, fading for a moment once
+// they're lost), their box (x0, y0, x1, y1 on screen) and middle; and their head, hands and
+// feet (picture-left first), each the middle on screen, its radius as a share of the screen's
+// height, and how sure that is from 0 to 1 (0 when it can't be seen).
+const int MAX_PEOPLE = 8;
+uniform int u_person_count;
+uniform float u_person_seen[MAX_PEOPLE];
+uniform vec4 u_person_box[MAX_PEOPLE];
+uniform vec2 u_person_centre[MAX_PEOPLE];
+uniform vec4 u_person_head[MAX_PEOPLE];
+uniform vec4 u_person_hands[MAX_PEOPLE * 2];
+uniform vec4 u_person_feet[MAX_PEOPLE * 2];
+// Which person a point on screen belongs to, or -1 for nobody.
+int person_there(vec2 uv) {
+    if (u_has_more_masks < 0.5) return -1;
+    vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
+    ivec3 size = textureSize(u_more_masks, 0);
+    ivec2 at = clamp(ivec2(p * vec2(size.xy)), ivec2(0), size.xy - 1);
+    int who = int(texelFetch(u_more_masks, ivec3(at, 4), 0).b * 255.0 + 0.5) - 1;
+    return who < MAX_PEOPLE ? who : -1;
+}
+// How near a person's middle a point is, 1 at the middle (a soft bump about a twentieth of the
+// picture's height across).
+float person_middle_at(vec2 uv) { return more_masks_at(uv, 4).a; }
 const int MAX_FACES = 8;
 uniform int u_face_count;
 // Each face: x0, y0, x1, y1 on screen. Its five points: right eye, left eye, nose, right and
@@ -833,8 +871,16 @@ float face_at(vec2 uv) {
     return amount;
 }
 // Which face a point of the picture belongs with, as an index into u_faces, or -1 if there are
-// none. Bodies hang below faces, so what's underneath counts as nearer than what's alongside.
+// none. With who's who (segment = true), the face on the same person; otherwise, or for a person
+// whose face can't be seen, the nearest, with what's underneath a face counting as nearer than
+// what's alongside it (bodies hang below faces).
 int who_at(vec2 uv) {
+    int person = person_there(uv);
+    if (person >= 0) {
+        for (int i = 0; i < u_face_count; i++) {
+            if (u_face_seen[i] > 0.02 && person_there(0.5 * (u_faces[i].xy + u_faces[i].zw)) == person) return i;
+        }
+    }
     int best = -1;
     float nearest = 1e9;
     for (int i = 0; i < u_face_count; i++) {
@@ -983,9 +1029,6 @@ fn copy_source(version: &str, embedded: bool) -> String {
          flex_color = vec4(picture * (1.0 - words.a) + words.rgb, 1.0);\n}}\n"
     )
 }
-
-/// Said when the GPU has too few texture units for `u_original`.
-const NO_ORIGINAL: &str = "This GPU can't give effects the real picture beside the restyled one";
 
 /// The first line of a compiler log, for the status line (the whole log goes to the log).
 fn first_line(log: &str) -> &str {
@@ -1183,6 +1226,10 @@ impl Renderer {
                 self.held_words.pick(frame.video_time - held_back).map_or(words.texture, |w| w.0)
             });
             let (depth_texture, mask_texture, normal_texture, more_textures) = if frame.depth.is_some() { self.depth.map_for(pts) } else { (None, None, None, None) };
+            let people = match self.depth.maps.nearest(pts, DEPTH_REACH) {
+                Some((m, _)) if frame.depth.is_some() && self.depth.has_more_masks => PeopleUniforms::of(&m.people, rect),
+                _ => PeopleUniforms::default(),
+            };
             let faces = if frame.faces.is_some() { self.faces.uniforms(pts, rect) } else { FaceUniforms::default() };
             let clues = std::mem::take(&mut self.depth.clues);
             let shot = if frame.needs.scene {
@@ -1267,8 +1314,7 @@ impl Renderer {
             Unit::Depth.bind(gl, depth_texture);
             Unit::Masks.bind(gl, mask_texture);
             Unit::Normals.bind(gl, normal_texture);
-            Unit::Masks2.bind(gl, more_textures.map(|t| t[0]));
-            Unit::Masks3.bind(gl, more_textures.map(|t| t[1]));
+            Unit::MoreMasks.bind(gl, more_textures);
             Unit::History.bind(gl, history);
             Unit::Flow.bind(gl, flow);
             Unit::Plate.bind(gl, plate);
@@ -1293,26 +1339,21 @@ impl Renderer {
                 has_masks: mask_texture.is_some() && self.depth.has_masks,
                 has_normals: normal_texture.is_some() && self.depth.has_normals,
                 has_more_masks: more_textures.is_some() && self.depth.has_more_masks,
+                people: &people,
                 faces: &faces,
                 has_face_map,
                 shot,
                 world: if frame.camera.is_some() { self.camera.at(pts) } else { None },
                 has_restyled: restyled.is_some(),
                 restyled_size: if frame.restyle.is_some() { self.restyle.shown_size } else { (0, 0) },
-                original: if self.units > 16 { ORIGINAL_UNIT as i32 } else { 0 },
+                original: ORIGINAL_UNIT as i32,
             };
 
             // The effects, each at its working size. One drawing on the restyled picture has it
             // as u_video, and the real one as u_original.
             let picture_for = |effect: &ActiveEffect| if effect.restyle { restyled.unwrap_or(video_texture) } else { video_texture };
-            // Every unit up to 16 is taken: without a 17th, u_original is the restyled picture.
-            if self.units <= 16 && effect.restyle && self.slots[front].status.as_ref().is_some_and(|(_, (ok, _))| *ok) {
-                self.slots[front].status = Some((effect.shader.clone(), (false, NO_ORIGINAL.into())));
-            }
-            if self.units > 16 {
-                gl.active_texture(glow::TEXTURE0 + ORIGINAL_UNIT);
-                gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
-            }
+            gl.active_texture(glow::TEXTURE0 + ORIGINAL_UNIT);
+            gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
             Unit::Video.bind(gl, Some(picture_for(effect)));
             self.slots[front].draw(gl, effect, &given);
             if let Some((from, _)) = &frame.fading {
@@ -1351,10 +1392,8 @@ impl Renderer {
             for unit in Unit::ALL {
                 unit.bind(gl, None);
             }
-            if self.units > 16 {
-                gl.active_texture(glow::TEXTURE0 + ORIGINAL_UNIT);
-                gl.bind_texture(glow::TEXTURE_2D, None);
-            }
+            gl.active_texture(glow::TEXTURE0 + ORIGINAL_UNIT);
+            gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_vertex_array(None);
             gl.use_program(None);
@@ -1423,10 +1462,6 @@ impl Renderer {
             let copy = compile(gl, &vertex_source(decl), &copy_source(decl, version.is_embedded()))?;
             match gl.create_vertex_array() {
                 Ok(vao) => {
-                    self.units = gl.get_parameter_i32(glow::MAX_TEXTURE_IMAGE_UNITS);
-                    if self.units <= 16 {
-                        log::warn!("video effects: {NO_ORIGINAL} ({} texture units)", self.units);
-                    }
                     self.vao = Some(vao);
                     self.copy = Some(copy);
                     self.spectrum = create_spectrum(gl).map_err(|e| log::warn!("video effects: no spectrum texture: {e}")).ok();
@@ -1476,15 +1511,15 @@ enum Unit {
     FaceParts2,
     FaceAtlas,
     Normals,
-    Masks2,
-    Masks3,
+    MoreMasks,
 }
 
-/// `u_original`'s unit, when there's a 17th: the real picture, beside a restyled one.
-const ORIGINAL_UNIT: u32 = 16;
+/// `u_original`'s unit, after the rest: the real picture, beside a restyled one. Every GPU has
+/// at least 16.
+const ORIGINAL_UNIT: u32 = 15;
 
 impl Unit {
-    const ALL: [Unit; 16] = [
+    const ALL: [Unit; 15] = [
         Unit::Video,
         Unit::Prev,
         Unit::Spectrum,
@@ -1499,8 +1534,7 @@ impl Unit {
         Unit::FaceParts2,
         Unit::FaceAtlas,
         Unit::Normals,
-        Unit::Masks2,
-        Unit::Masks3,
+        Unit::MoreMasks,
     ];
 
     fn uniform(self) -> &'static str {
@@ -1519,14 +1553,13 @@ impl Unit {
             Unit::FaceParts2 => "u_face_parts2",
             Unit::FaceAtlas => "u_face_atlas",
             Unit::Normals => "u_normals",
-            Unit::Masks2 => "u_masks2",
-            Unit::Masks3 => "u_masks3",
+            Unit::MoreMasks => "u_more_masks",
         }
     }
 
     /// Puts `texture` on this unit, leaving it the active one.
     unsafe fn bind(self, gl: &glow::Context, texture: Option<glow::Texture>) {
-        let target = if matches!(self, Unit::History) { glow::TEXTURE_2D_ARRAY } else { glow::TEXTURE_2D };
+        let target = if matches!(self, Unit::History | Unit::MoreMasks) { glow::TEXTURE_2D_ARRAY } else { glow::TEXTURE_2D };
         unsafe {
             gl.active_texture(glow::TEXTURE0 + self as u32);
             gl.bind_texture(target, texture);
@@ -1553,6 +1586,7 @@ struct Given<'a> {
     has_masks: bool,
     has_normals: bool,
     has_more_masks: bool,
+    people: &'a PeopleUniforms,
     faces: &'a FaceUniforms,
     has_face_map: bool,
     /// Whether there's a restyled picture yet, the size the network drew it at, and the unit
@@ -1709,6 +1743,14 @@ impl Slot {
             gl.uniform_1_f32(at("u_has_masks").as_ref(), if given.has_masks { 1.0 } else { 0.0 });
             gl.uniform_1_f32(at("u_has_normals").as_ref(), if given.has_normals { 1.0 } else { 0.0 });
             gl.uniform_1_f32(at("u_has_more_masks").as_ref(), if given.has_more_masks { 1.0 } else { 0.0 });
+            let people = given.people;
+            gl.uniform_1_i32(at("u_person_count").as_ref(), people.count);
+            gl.uniform_1_f32_slice(at("u_person_seen").as_ref(), &people.seen);
+            gl.uniform_4_f32_slice(at("u_person_box").as_ref(), &people.boxes);
+            gl.uniform_2_f32_slice(at("u_person_centre").as_ref(), &people.centres);
+            gl.uniform_4_f32_slice(at("u_person_head").as_ref(), &people.heads);
+            gl.uniform_4_f32_slice(at("u_person_hands").as_ref(), &people.hands);
+            gl.uniform_4_f32_slice(at("u_person_feet").as_ref(), &people.feet);
             let faces = given.faces;
             gl.uniform_1_i32(at("u_face_count").as_ref(), faces.count);
             gl.uniform_4_f32_slice(at("u_faces").as_ref(), &faces.boxes);
@@ -2102,14 +2144,67 @@ impl Default for FaceUniforms {
     }
 }
 
-/// What one depth map comes in: for `u_depth`, `u_masks`, `u_normals`, and `u_masks2` and
-/// `u_masks3`.
+/// What one depth map comes in: for `u_depth`, `u_masks`, `u_normals` and `u_more_masks`, and
+/// who's where in it.
 #[derive(Clone, Copy)]
 struct DepthTextures {
     depth: glow::Texture,
     masks: glow::Texture,
     normals: glow::Texture,
-    more: [glow::Texture; 2],
+    more: glow::Texture,
+    people: crate::people::People,
+}
+
+/// The people in a depth map, as `u_person_*` (see `HEADER`), on screen.
+struct PeopleUniforms {
+    count: i32,
+    seen: [f32; MAX_PEOPLE],
+    boxes: [f32; MAX_PEOPLE * 4],
+    centres: [f32; MAX_PEOPLE * 2],
+    heads: [f32; MAX_PEOPLE * 4],
+    hands: [f32; MAX_PEOPLE * 8],
+    feet: [f32; MAX_PEOPLE * 8],
+}
+
+use crate::people::MAX_PEOPLE;
+
+impl Default for PeopleUniforms {
+    fn default() -> Self {
+        Self { count: 0, seen: [0.0; MAX_PEOPLE], boxes: [0.0; MAX_PEOPLE * 4], centres: [0.0; MAX_PEOPLE * 2], heads: [0.0; MAX_PEOPLE * 4], hands: [0.0; MAX_PEOPLE * 8], feet: [0.0; MAX_PEOPLE * 8] }
+    }
+}
+
+impl PeopleUniforms {
+    /// `people` (fractions of the picture, rows from the top) on screen, where the picture is
+    /// `rect` (x0, y0, x1, y1 with y up).
+    fn of(people: &crate::people::People, rect: [f32; 4]) -> Self {
+        let mut u = Self::default();
+        let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
+        let at = |p: [f32; 2]| [rect[0] + p[0] * w, rect[1] + (1.0 - p[1]) * h];
+        for (i, p) in people.iter().enumerate() {
+            if p.seen <= 0.0 {
+                continue;
+            }
+            u.count = i as i32 + 1;
+            u.seen[i] = p.seen;
+            let (a, b) = (at([p.bounds[0], p.bounds[3]]), at([p.bounds[2], p.bounds[1]]));
+            u.boxes[i * 4..][..4].copy_from_slice(&[a[0], a[1], b[0], b[1]]);
+            u.centres[i * 2..][..2].copy_from_slice(&at(p.centre));
+            // Sizes in screen heights.
+            let spot = |s: &crate::people::Spot| {
+                let c = at(s.at);
+                [c[0], c[1], s.size * h, s.seen]
+            };
+            u.heads[i * 4..][..4].copy_from_slice(&spot(&p.head));
+            for (n, s) in p.hands.iter().enumerate() {
+                u.hands[(i * 2 + n) * 4..][..4].copy_from_slice(&spot(s));
+            }
+            for (n, s) in p.feet.iter().enumerate() {
+                u.feet[(i * 2 + n) * 4..][..4].copy_from_slice(&spot(s));
+            }
+        }
+        u
+    }
 }
 
 /// Depth maps kept, so a held-back frame can have the one made from it.
@@ -2231,7 +2326,7 @@ impl DepthGl {
     /// The depth map, masks, normals and more masks made from the frame nearest `time`, if one's
     /// within `DEPTH_REACH` of it.
     #[allow(clippy::type_complexity)]
-    fn map_for(&self, time: f32) -> (Option<glow::Texture>, Option<glow::Texture>, Option<glow::Texture>, Option<[glow::Texture; 2]>) {
+    fn map_for(&self, time: f32) -> (Option<glow::Texture>, Option<glow::Texture>, Option<glow::Texture>, Option<glow::Texture>) {
         match self.maps.nearest(time, DEPTH_REACH) {
             Some((m, _)) => (Some(m.depth), Some(m.masks), Some(m.normals), Some(m.more)),
             None => (None, None, None, None),
@@ -2281,12 +2376,13 @@ impl DepthGl {
                 }
                 self.has_normals = map.normals.is_some();
                 if let Some(more) = &map.more_masks {
-                    for (texture, bytes) in o.more.iter().zip(more) {
-                        gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
-                        gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(bytes)));
-                    }
+                    gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(o.more));
+                    let layers = crate::depth::MORE_LAYERS as i32;
+                    gl.tex_sub_image_3d(glow::TEXTURE_2D_ARRAY, 0, 0, 0, 0, w, h, layers, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(more)));
+                    gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
                 }
                 self.has_more_masks = map.more_masks.is_some();
+                self.maps.items[slot].0.people = map.people;
                 gl.bind_texture(glow::TEXTURE_2D, None);
                 self.serial = map.serial;
                 self.ground = map.ground;
@@ -2309,7 +2405,7 @@ impl DepthGl {
         unsafe {
             self.readback.release(gl);
             for o in self.maps.drain() {
-                for texture in [o.depth, o.masks, o.normals, o.more[0], o.more[1]] {
+                for texture in [o.depth, o.masks, o.normals, o.more] {
                     gl.delete_texture(texture);
                 }
             }
@@ -3010,6 +3106,7 @@ unsafe fn create_depth_maps(gl: &glow::Context) -> Result<Vec<DepthTextures>, St
         let size = (WIDTH as i32, HEIGHT as i32);
         let zeros = vec![0u8; WIDTH * HEIGHT * 4];
         let mut made = Vec::new();
+        let mut arrays = Vec::new();
         let mut texture = |internal: u32, format: u32, kind: u32| -> Result<glow::Texture, String> {
             let texture = gl.create_texture()?;
             made.push(texture);
@@ -3028,14 +3125,30 @@ unsafe fn create_depth_maps(gl: &glow::Context) -> Result<Vec<DepthTextures>, St
         let maps: Result<Vec<DepthTextures>, String> = (0..DEPTH_MAPS)
             .map(|_| {
                 let mut rgba = || texture(glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE);
-                let (masks, normals, more) = (rgba()?, rgba()?, [rgba()?, rgba()?]);
-                Ok(DepthTextures { masks, normals, more, depth: texture(glow::R16F, glow::RED, glow::FLOAT)? })
+                let (masks, normals) = (rgba()?, rgba()?);
+                let depth = texture(glow::R16F, glow::RED, glow::FLOAT)?;
+                let more = gl.create_texture()?;
+                arrays.push(more);
+                gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(more));
+                let layers = crate::depth::MORE_LAYERS;
+                let zeros = vec![0u8; WIDTH * HEIGHT * 4 * layers];
+                gl.tex_image_3d(glow::TEXTURE_2D_ARRAY, 0, glow::RGBA8 as i32, size.0, size.1, layers as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&zeros)));
+                for (param, value) in [
+                    (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                    (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+                ] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, param, value as i32);
+                }
+                gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+                Ok(DepthTextures { masks, normals, more, depth, people: Default::default() })
             })
             .collect();
         gl.bind_texture(glow::TEXTURE_2D, None);
         if maps.is_err() {
             // Nothing made is kept.
-            for texture in made {
+            for texture in made.into_iter().chain(arrays) {
                 gl.delete_texture(texture);
             }
         }

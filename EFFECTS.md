@@ -116,8 +116,10 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Aquarium**: the room really floods: a water surface lying level with the floor or table, that wraps around people and furniture,
   with reflections, wakes, fish, and bubbles from people's mouths.
 - **Snow Globe**: snow falls behind whatever's near and settles on things; a beat shakes it off.
-- **Thermal Vision**: heat colours, with people and faces hottest.
-- **Night of the Living**: grey-green people with hollow eyes, under a flickering light.
+- **Thermal Vision**: heat colours, with people, faces and animals hottest, and cold hands, feet
+  and clothes.
+- **Night of the Living**: grey-green people with hollow eyes and grimy rags, under a flickering
+  light.
 - **Black Hole**: a real black hole hanging in the room: light bends round it into a ring, people pass in front of it, and its disc lights the walls.
 - **Melting Clocks**: everything but people sags and drips over its edges.
 - **Fractal Zoom**: an endless fall through copies of the live picture, centred on a face.
@@ -128,7 +130,7 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Colour Time Split**: red, green and blue run at different moments.
 - **Inkblot**: the picture folds into a mirrored Rorschach blot that keeps changing.
 - **Strobe Sculpture**: people leave rising, glowing statues of themselves on the beat.
-- **Aura**: a coloured energy field streams off each person, pulsing with the bass.
+- **Aura**: a coloured energy field streams off each person (or animal), pulsing with the bass.
 - **Living Static**: people are made of TV noise, with their faces flickering through.
 - **Melting People**: people sag and drip, running off in streams that pool at the bottom.
 - **Smoke People**: people come apart at the edges and blow away as smoke.
@@ -140,7 +142,8 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Time-Lagged Body**: the tops of people run behind their bottoms, so they ripple as they move.
 - **Stop Motion People**: people move like stop-motion puppets, a few poses a second, while
   everything around them plays on smoothly.
-- **Colour Thief**: the world is grey and only people have colour, or the other way round.
+- **Colour Thief**: the world is grey and only people have colour, or the other way round, or only
+  animals, vehicles, plants or the sky.
 - **Glitch Bodies**: people tear into sliding strips on each beat.
 - **Swarm**: people dissolve into buzzing specks that scatter with the bass.
 - **Tiny Heads**: everyone's head shrinks to a pea on a full-sized body.
@@ -184,6 +187,21 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Motion Paint**: only what's moving shows, painted in a colour for each direction.
 - **Echoes**: everything leaves a trail of coloured copies of where it was a moment ago.
 - **Everyone's Colour**: each person is washed in their own colour, which follows them about.
+- **Halos**: a glowing halo, devil's horns or a gold crown on every head.
+- **Big Hands**: hands (or feet) swell up into huge cartoon mitts, throbbing with the bass.
+- **Marionettes**: everyone hangs from strings tied to their hands and head, from a rocking
+  wooden bar.
+- **Stage Lights**: the house lights go down and everyone gets their own follow spot.
+- **Mannequins**: people become wooden artists' figures, plastic toys or chrome statues, with
+  seams at their joints.
+- **Light Suits**: people in dark suits of neon, glowing along their outlines and joints, with
+  light rippling down them on the beat.
+- **Magic Hands**: balls of crackling energy in everyone's hands, with lightning between them.
+- **Night City**: night falls: stars, buildings with their windows lit one by one, streetlight on
+  cars and moonlit people.
+- **Surveillance**: a security camera's view, tracking everyone in numbered brackets.
+- **Mouth Cam**: the screen is one mouth, close up, cutting to another whenever someone else
+  starts talking.
 - **Film Palette**: the film redrawn in just its own four main colours.
 - **Slow Burn**: the picture gets stranger the longer a shot goes on, and every cut snaps it back.
 - **Soundstage**: sounds light up what's closest and roll back through the scene.
@@ -191,8 +209,8 @@ Flex comes with these to start from, in [`effects`](effects):
   with people standing up out of it.
 - **Ghosts**: pale see-through figures drift through the room and stay put as the camera moves,
   coming out in silence and with sad or scary music.
-- **Graffiti**: neon tags, stencils and splashes sprayed on the walls, staying on them as the
-  camera moves.
+- **Graffiti**: neon tags, stencils and splashes sprayed on the walls and buildings, staying on
+  them as the camera moves.
 - **Paper Lanterns**: glowing paper lanterns hang in the air where they are as the camera moves,
   with people passing in front of them.
 - **Laser Grid**: security laser beams strung across the room, glowing where anyone breaks them.
@@ -255,9 +273,13 @@ don't declare them yourself, or functions of your own with the same names:
 | `vec2 depth_slope(vec2 uv, float reach)` | a function: how much `depth_at` changes from `reach` pixels to one side of the point to the same distance the other, across in x and up in y (with `depth = true`) |
 | `sampler2D u_normals`, `float u_has_normals` | the normals themselves (x, y and z from 0 to 1 for -1 to 1), covering the picture, and 1 when the depth network gives them |
 | `float person_at(vec2 uv)`, `wall_at`, `sky_at` | functions: how much of that point of the screen is a person, a wall or sky, from 0 to 1 (with `segment = true`; 0 until the first masks arrive). `vec4 masks_at(vec2 uv)` gives all three in r, g and b |
-| `vec4 more_masks_at(vec2 uv, int which)`, `float u_has_more_masks` | a function: more masks (with `segment = true`), all 0 until the first arrive: `which` 0 is ground, ceiling, water and plants in r, g, b and a, and 1 is window, body skin, hair and clothes; `u_has_more_masks` is 1 when they're there. The functions below read them |
-| `float ground_at(vec2 uv)`, `ceiling_at`, `water_at`, `plant_at`, `window_at` | functions: how much of that point is ground (floors, roads, grass, sand, snow: anything underfoot), ceiling, water, plants and trees, or a window, from 0 to 1 (with `segment = true`, from MoGe-2's head; 0 without it, and `u_has_more_masks` says which) |
+| `vec4 more_masks_at(vec2 uv, int layer)`, `float u_has_more_masks` | a function: more masks (with `segment = true`), all 0 until the first arrive, four to a layer of `sampler2DArray u_more_masks`: layer 0 is ground, ceiling, water and plants in r, g, b and a; 1 window, body skin, hair and clothes; 2 vehicle, animal, building and furniture; 3 head, torso, arm and hand; 4 leg and foot (and, in b and a, which person and how near their middle, which `person_there` and `person_middle_at` read). `u_has_more_masks` is 1 when they're there. The functions below read them |
+| `float ground_at(vec2 uv)`, `ceiling_at`, `water_at`, `plant_at`, `window_at`, `vehicle_at`, `animal_at`, `building_at`, `furniture_at` | functions: how much of that point is ground (floors, roads, grass, sand, snow: anything underfoot), ceiling, water, plants and trees, a window, a vehicle (cars, bikes, boats, planes, trains), an animal, a building seen from outside (walls inside are `wall_at`), or furniture, from 0 to 1 (with `segment = true`, from MoGe-2's head; 0 without it, and `u_has_more_masks` says which) |
 | `float body_skin_at(vec2 uv)`, `clothes_at` | functions: how much of that point is a person's bare skin, or their clothes (with `segment = true`, from MoGe-2's head). With `hair_at` they add up to `person_at`. `skin_at` is the face's skin, from the face mesh |
+| `float head_at(vec2 uv)`, `torso_at`, `arm_at`, `hand_at`, `leg_at`, `foot_at` | functions: which part of a person's body that point is, whatever it's wearing (shoes are feet, hair is head), from 0 to 1 (with `segment = true`, from MoGe-2's head). They add up to `person_at` |
+| `int u_person_count`, `float u_person_seen[MAX_PEOPLE]`, `vec4 u_person_box[MAX_PEOPLE]`, `vec2 u_person_centre[MAX_PEOPLE]` | who's who (with `segment = true`, from MoGe-2's head): up to `MAX_PEOPLE` (8) people, the biggest, each keeping their number while they're in shot, so they can be given their own colour or anything else. How far through the arrays to look; 1 while a person's found (fading for a moment once they're lost, 0 for a free number); their box on screen (x0, y0, x1, y1) and middle |
+| `vec4 u_person_head[MAX_PEOPLE]`, `vec4 u_person_hands[MAX_PEOPLE * 2]`, `vec4 u_person_feet[MAX_PEOPLE * 2]` | each person's head, hands and feet (hands and feet picture-left first: `u_person_hands[person * 2 + n]`): the middle on screen in xy, the radius in z (as a share of the screen's height), and in w how sure it is, from 0 to 1 (0 when it can't be seen; two hands together are one, the other's w is 0) |
+| `int person_there(vec2 uv)`, `float person_middle_at(vec2 uv)` | functions: which person a point on screen belongs to, as an index into the `u_person_` arrays, or -1; and how near a person's middle it is, 1 at the middle (with `segment = true`) |
 | `int u_face_count`, `vec4 u_faces[MAX_FACES]` | how far through the arrays to look, and each face's box on screen: x0, y0, x1, y1 (with `faces = true`) |
 | `float u_face_seen[MAX_FACES]` | 1 while a face is found, blending in over a moment when it's first found, and 0 as soon as it's lost (a face's slot is kept for a moment in case it comes back, so don't draw it there). Multiply by it. It's 0 for empty slots |
 | `vec2 face_point(int face, int point)` | where on the screen a face's point is: 0 right eye, 1 left eye, 2 nose, 3 right corner of the mouth, 4 left (the person's own right and left) |
@@ -272,7 +294,7 @@ don't declare them yourself, or functions of your own with the same names:
 | `float hair_at(vec2 uv)` | a function: where hair is (with `segment = true`), from MoGe-2's head when it's running; otherwise, with `mesh = true` too, roughly, as the person above and around each face |
 | `bool meshed(int face)`, `vec2 iris_of(int face, int eye)` | functions: whether a face has a mesh worth using, and where on screen the middle of its right (0) or left (1) iris is, from the mesh (with `mesh = true`) |
 | `float face_roll(int face)` | a function: how far a head tilts to the side, anticlockwise, in radians (with `faces = true`) |
-| `int who_at(vec2 uv)` | a function: which face a point of the picture belongs with, as an index into `u_faces`, or -1 (with `faces = true`). Use it with `person_at` to treat people separately |
+| `int who_at(vec2 uv)` | a function: which face a point of the picture belongs with, as an index into `u_faces`, or -1 (with `faces = true`): with `segment = true` too, the face on the same person (see `person_there`), otherwise the nearest. Use it with `person_at` to treat people separately |
 | `float u_dt` | seconds since the last frame was drawn |
 | `float u_cut`, `u_since_cut` | 1 on a scene cut, fading to 0 in about half a second, and seconds since the last one, for the frame on screen (with `cuts = true`). `u_since_cut` is huge (a million) until the first cut |
 | `float u_shot_start` | when this shot began, in seconds into the video: the same all through a shot, and 0 until the first cut (with `cuts = true`), so something random can be chosen once for a whole shot |
@@ -552,7 +574,10 @@ MoGe-2's features) tells people, walls, sky and the rest apart, so an effect can
 alongside `depth_at` without paying for depth twice (it adds about 2 ms to a depth map). It was
 trained on COCO, ADE20K, ATR, DensePose, CIHP and anime pictures. People and sky are solid,
 including in animation and crowds; walls are the weakest, so anything flat and dark behind
-someone can be called a wall, and their edges are worth treating as soft. Black bars are left
+someone can be called a wall, and their edges are worth treating as soft. It also tells which
+person each person's pixel belongs to (from where it says each person's middle is), so
+`person_there` and the `u_person_` arrays can keep people apart even when they overlap, and
+find their heads, hands and feet; small or far-off people can be missed or run together. Black bars are left
 out before it looks, as they'd otherwise pass for sky.
 
 ### Faces

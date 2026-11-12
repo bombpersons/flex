@@ -1,5 +1,5 @@
 name = "Masks"
-description = "Shows what Flex can tell apart in the picture: people in red, walls in blue and sky in cyan, and (from MoGe-2) ground, ceiling, water, plants, windows, and people's skin, hair and clothes. Handy when making an effect."
+description = "Shows what Flex can tell apart in the picture: people in red, walls in blue and sky in cyan, and (from MoGe-2) ground, ceiling, water, plants, windows, vehicles in orange, animals in pink, buildings in grey and furniture in brown; people's skin, hair and clothes; their body parts; and who's who, with each person's box, middle, head, hands and feet. Handy when making an effect."
 shuffle = false
 segment = true
 
@@ -11,4 +11,6 @@ default = "scene"
 options = [
     { id = "scene", label = "What's where" },
     { id = "people", label = "Skin, hair and clothes" },
+    { id = "body", label = "Body parts" },
+    { id = "who", label = "Who's who" },
 ]

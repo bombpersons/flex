@@ -1,5 +1,7 @@
 // Thermal Vision: heat made up from brightness, nearness, people and faces, through a false-colour
-// palette, with three red dots hunting each face.
+// palette, with three red dots hunting each face. With MoGe-2's head, bodies aren't evenly warm
+// (heads and middles hottest, hands and feet cooler, clothes cooler than skin), animals are as
+// warm as people, vehicles a little warm, and sky and water cold.
 
 vec3 ramp(float t, vec3 a, vec3 b, vec3 c, vec3 d, vec3 e) {
     t = clamp(t, 0.0, 1.0) * 4.0;
@@ -24,7 +26,22 @@ vec4 effect(vec2 uv) {
     float person = smoothstep(0.3, 0.7, person_at(uv));
     float face = face_at(uv);
     float h = luma * 0.3 + depth_at(uv) * 0.14;
-    h = mix(h, 0.5 + luma * 0.3, person * people);
+    float warmth = 0.5;
+    if (u_has_more_masks > 0.5) {
+        vec4 upper = more_masks_at(uv, 3);
+        vec4 lower = more_masks_at(uv, 4);
+        float body = upper.r + upper.g + upper.b + upper.a + lower.r + lower.g;
+        if (body > 0.05) {
+            // Head, torso, arm, hand, leg, foot.
+            warmth = (upper.r * 0.62 + upper.g * 0.56 + upper.b * 0.46 + upper.a * 0.4 + lower.r * 0.44 + lower.g * 0.3) / body;
+        }
+        warmth += (body_skin_at(uv) - clothes_at(uv)) * 0.06;
+        float animal = smoothstep(0.3, 0.7, animal_at(uv));
+        h = mix(h, 0.52 + luma * 0.3, animal * people);
+        h = mix(h, 0.36 + luma * 0.3, smoothstep(0.3, 0.7, vehicle_at(uv)) * people * 0.7);
+        h = mix(h, h * 0.4, smoothstep(0.3, 0.7, sky_at(uv) + water_at(uv)));
+    }
+    h = mix(h, warmth + luma * 0.3, person * people);
     h += face * 0.2 * people;
     // Real faces aren't evenly warm: noses run cold, and eyes and open mouths run hot.
     h += (eye_at(uv) * 0.1 + mouth_at(uv) * 0.2 + lips_at(uv) * 0.05 - nose_at(uv) * 0.16) * people;

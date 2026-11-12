@@ -1,5 +1,6 @@
 // Night of the Living: drains people to grey-green with veins under the skin, blacks out their
 // eyes and mouths, and grades everything else like an old horror film. The flicker stays gentle.
+// With MoGe-2's head only skin rots; clothes turn to grimy rags and hair goes lank and grey.
 
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
@@ -21,7 +22,17 @@ vec4 effect(vec2 uv) {
     vec3 skin = pow(luma, 1.25) * vec3(0.72, 0.9, 0.62) + vec3(0.03, 0.06, 0.02);
     skin *= mix(1.0, 0.45 + 1.0 * blotch, s_rot / 100.0);
     skin = mix(skin, vec3(0.1, 0.04, 0.12), veins * 0.75);
-    c = mix(world, skin, person * mix(0.5, 1.0, s_rot / 100.0));
+    float rotting = person;
+    if (u_has_more_masks > 0.5) {
+        float bare = body_skin_at(uv), hair = hair_at(uv), cloth = clothes_at(uv);
+        float all_of = max(bare + hair + cloth, 1e-3);
+        rotting = person * bare / all_of;
+        vec3 rags = mix(vec3(luma), c, 0.3) * vec3(0.82, 0.8, 0.68) * mix(1.0, 0.55 + 0.7 * fbm(p * 11.0 + 7.0), s_rot / 100.0);
+        vec3 lank = vec3(pow(luma, 1.1)) * vec3(0.8, 0.82, 0.78);
+        world = mix(world, rags, person * cloth / all_of);
+        world = mix(world, lank, person * hair / all_of * s_rot / 100.0);
+    }
+    c = mix(world, skin, rotting * mix(0.5, 1.0, s_rot / 100.0));
 
     for (int i = 0; i < u_face_count; i++) {
         float seen = u_face_seen[i];

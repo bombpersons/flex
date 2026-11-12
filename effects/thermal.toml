@@ -1,5 +1,5 @@
 name = "Thermal Vision"
-description = "Predator-style heat colours, with people and faces burning hottest."
+description = "Predator-style heat colours, with people, faces and animals burning hottest, and cold hands, feet and clothes."
 depth = true
 segment = true
 faces = true

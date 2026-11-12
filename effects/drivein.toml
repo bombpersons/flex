@@ -2,6 +2,7 @@ name = "Drive-In"
 description = "Everyone's skin is a screen showing the film, including the faces in the film, on and on forever."
 suits = ["close"]
 mesh = true
+segment = true
 feedback = true
 audio = true
 
