@@ -3,15 +3,14 @@
 //! it found. Until that's going, or if it can't, effects get `signals::FlowGl`'s block matching.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use flex_depth::flow::Flow;
 
+use crate::worker::{Job, Worker, push_capped};
+
 pub use flex_depth::flow::{FLOW_HEIGHT, FLOW_WIDTH, HEIGHT, WIDTH};
 
-/// Nothing wanted movement for this long: stop.
-const IDLE: Duration = Duration::from_secs(20);
 /// The least time between frames, and as a multiple of how long one takes, so the GPU has time
 /// for the picture too.
 const MIN_INTERVAL: Duration = Duration::from_millis(10);
@@ -28,8 +27,9 @@ const MOST_WAITING: usize = 16;
 /// A gap this long (seconds) between frames isn't movement.
 const LONGEST_GAP: f32 = 0.5;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum Status {
+    #[default]
     Off,
     Starting,
     Ready { adapter: String, ms: f32 },
@@ -82,56 +82,47 @@ struct Input {
     cut: bool,
 }
 
-struct State {
+#[derive(Default)]
+pub struct State {
     status: Status,
-    running: bool,
     input: Option<Input>,
     busy: bool,
     reports: VecDeque<Report>,
-    last_wanted: Instant,
     /// The depth worker to tell about the movement too, if it's carrying its maps along it.
     carrying: Option<crate::depth::Link>,
     too_slow_to_carry: bool,
 }
 
-/// Shared between the UI, the paint callback and the worker.
-#[derive(Clone)]
-pub struct Link(Arc<(Mutex<State>, Condvar)>);
-
-impl Default for Link {
-    fn default() -> Self {
-        let state = State { status: Status::Off, running: false, input: None, busy: false, reports: VecDeque::new(), last_wanted: Instant::now(), carrying: None, too_slow_to_carry: false };
-        Self(Arc::new((Mutex::new(state), Condvar::new())))
+impl Job for State {
+    type Status = Status;
+    fn status(&self) -> &Status {
+        &self.status
+    }
+    fn failed(&self) -> bool {
+        matches!(self.status, Status::Failed(_))
+    }
+    fn starting(&mut self) {
+        self.status = Status::Starting;
+    }
+    fn fail(&mut self, why: String) {
+        self.status = Status::Failed(why);
+    }
+    fn stopped(&mut self) {
+        self.reports.clear();
+        if matches!(self.status, Status::Ready { .. }) {
+            self.status = Status::Off;
+        }
     }
 }
 
-impl Link {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.0.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
+/// Shared between the UI, the paint callback and the worker.
+pub type Link = Worker<State>;
 
+impl Link {
     /// An effect wants movement: starts the worker if it isn't running. `carrying` is the depth
     /// worker, if it should carry its maps along the movement. Call every frame.
     pub fn wanted(&self, carrying: Option<crate::depth::Link>) {
-        let mut state = self.lock();
-        state.last_wanted = Instant::now();
-        state.carrying = carrying;
-        if state.running || matches!(state.status, Status::Failed(_)) {
-            return;
-        }
-        state.running = true;
-        state.status = Status::Starting;
-        drop(state);
-        let link = self.clone();
-        if let Err(e) = std::thread::Builder::new().name("flow".into()).spawn(move || link.work()) {
-            let mut state = self.lock();
-            state.running = false;
-            state.status = Status::Failed(format!("couldn't start: {e}"));
-        }
-    }
-
-    pub fn status(&self) -> Status {
-        self.lock().status.clone()
+        self.want("flow", |state| state.carrying = carrying, |link| link.work());
     }
 
     /// Whether depth can be carried along the movement on this GPU.
@@ -150,7 +141,7 @@ impl Link {
     /// `cut` says there's been a scene cut since the last frame handed over.
     pub fn submit(&self, rgba: Vec<u8>, time: f32, cut: bool) {
         self.lock().input = Some(Input { rgba, time, cut });
-        self.0.1.notify_all();
+        self.notify();
     }
 
     /// The reports that have come in since the last call, oldest first.
@@ -163,9 +154,7 @@ impl Link {
         if let Some(depth) = &state.carrying {
             depth.carry(Report { time: report.time, flow: report.flow.clone() });
         }
-        state.reports.push_back(report);
-        let extra = state.reports.len().saturating_sub(MOST_WAITING);
-        state.reports.drain(..extra);
+        push_capped(&mut state.reports, [report], MOST_WAITING);
     }
 
     fn work(&self) {
@@ -186,21 +175,11 @@ impl Link {
         let mut last_time: Option<f32> = None;
         let mut ms = 0.0f32;
         let mut runs = 0;
-        loop {
-            let input = {
-                let mut state = self.lock();
-                loop {
-                    if let Some(input) = state.input.take() {
-                        state.busy = true;
-                        break Some(input);
-                    }
-                    if state.last_wanted.elapsed() > IDLE {
-                        break None;
-                    }
-                    state = self.0.1.wait_timeout(state, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
-                }
-            };
-            let Some(input) = input else { break };
+        while let Some(input) = self.next(|state| {
+            let input = state.input.take()?;
+            state.busy = true;
+            Some(input)
+        }) {
             let started = Instant::now();
             crate::faces::top_down(&input.rgba, WIDTH, HEIGHT, &mut rgb);
             let gap = last_time.map(|t| input.time - t).filter(|gap| (1e-4..LONGEST_GAP).contains(gap));
@@ -249,12 +228,7 @@ impl Link {
         }
         drop(net);
         log::info!("flow: stopped");
-        let mut state = self.lock();
-        state.running = false;
-        state.reports.clear();
-        if matches!(state.status, Status::Ready { .. }) {
-            state.status = Status::Off;
-        }
+        self.stop();
     }
 }
 

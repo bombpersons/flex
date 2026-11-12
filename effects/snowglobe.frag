@@ -2,28 +2,6 @@
 // of something is, snow builds up in the alpha of u_prev, and a beat knocks it off again. The falling flakes drift on
 // the air, blown sideways by wind heard in the film, and bangs and explosions knock them about.
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-
-float fbm(vec2 p) {
-    float sum = 0.0, amount = 0.5;
-    for (int i = 0; i < 5; i++) {
-        sum += amount * noise(p);
-        p = p * 2.03 + vec2(17.1, 9.2);
-        amount *= 0.5;
-    }
-    return sum;
-}
-
 // How the air's moving here: slow eddies that carry nearby flakes along together, and change.
 vec2 eddy(vec2 p, float t) {
     return vec2(noise(p * 1.7 + vec2(t * 0.13, 0.0)), noise(p * 1.7 + vec2(3.1, -t * 0.11))) - 0.5;

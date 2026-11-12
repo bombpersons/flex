@@ -5,15 +5,13 @@
 //! solved several ways at once, and the way that fits best is kept.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use flex_depth::track::{Track, corners};
 
 use crate::depth::DepthMap;
+use crate::worker::{Job, Worker, push_capped};
 
-/// Nothing wanted the camera for this long: stop.
-const IDLE: Duration = Duration::from_secs(20);
 const MIN_INTERVAL: Duration = Duration::from_millis(10);
 /// The most points followed at once.
 const MOST_POINTS: usize = 700;
@@ -391,8 +389,9 @@ impl Points {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum Status {
+    #[default]
     Off,
     Starting,
     Ready { points: usize, inside: f32, ms: f32 },
@@ -418,26 +417,39 @@ struct Input {
     cut: bool,
 }
 
-struct State {
+#[derive(Default)]
+pub struct State {
     status: Status,
-    running: bool,
     input: Option<Input>,
     busy: bool,
     reports: VecDeque<Report>,
-    last_wanted: Instant,
     depth: Option<crate::depth::Link>,
 }
 
-/// Shared between the UI, the paint callback and the worker.
-#[derive(Clone)]
-pub struct Link(Arc<(Mutex<State>, Condvar)>);
-
-impl Default for Link {
-    fn default() -> Self {
-        let state = State { status: Status::Off, running: false, input: None, busy: false, reports: VecDeque::new(), last_wanted: Instant::now(), depth: None };
-        Self(Arc::new((Mutex::new(state), Condvar::new())))
+impl Job for State {
+    type Status = Status;
+    fn status(&self) -> &Status {
+        &self.status
+    }
+    fn failed(&self) -> bool {
+        matches!(self.status, Status::Failed(_))
+    }
+    fn starting(&mut self) {
+        self.status = Status::Starting;
+    }
+    fn fail(&mut self, why: String) {
+        self.status = Status::Failed(why);
+    }
+    fn stopped(&mut self) {
+        self.reports.clear();
+        if matches!(self.status, Status::Ready { .. }) {
+            self.status = Status::Off;
+        }
     }
 }
+
+/// Shared between the UI, the paint callback and the worker.
+pub type Link = Worker<State>;
 
 /// How a shot's solving is going.
 #[derive(Default)]
@@ -451,32 +463,10 @@ struct Shot {
 }
 
 impl Link {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.0.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// An effect wants the camera: starts the worker if it isn't running. `depth` is where its
     /// depth comes from. Call every frame.
     pub fn wanted(&self, depth: crate::depth::Link) {
-        let mut state = self.lock();
-        state.last_wanted = Instant::now();
-        state.depth = Some(depth);
-        if state.running || matches!(state.status, Status::Failed(_)) {
-            return;
-        }
-        state.running = true;
-        state.status = Status::Starting;
-        drop(state);
-        let link = self.clone();
-        if let Err(e) = std::thread::Builder::new().name("camera".into()).spawn(move || link.work()) {
-            let mut state = self.lock();
-            state.running = false;
-            state.status = Status::Failed(format!("couldn't start: {e}"));
-        }
-    }
-
-    pub fn status(&self) -> Status {
-        self.lock().status.clone()
+        self.want("camera", |state| state.depth = Some(depth), |link| link.work());
     }
 
     pub fn ready_for_frame(&self) -> bool {
@@ -488,7 +478,7 @@ impl Link {
     /// since the last one handed over.
     pub fn submit(&self, rgba: Vec<u8>, size: (usize, usize), time: f32, cut: bool) {
         self.lock().input = Some(Input { rgba, size, time, cut });
-        self.0.1.notify_all();
+        self.notify();
     }
 
     /// The reports that have come in since the last call, oldest first.
@@ -497,10 +487,7 @@ impl Link {
     }
 
     fn publish(&self, report: Report) {
-        let mut state = self.lock();
-        state.reports.push_back(report);
-        let extra = state.reports.len().saturating_sub(MOST_WAITING);
-        state.reports.drain(..extra);
+        push_capped(&mut self.lock().reports, [report], MOST_WAITING);
     }
 
     fn work(&self) {
@@ -511,21 +498,11 @@ impl Link {
         let mut last_time: Option<f32> = None;
         let mut gray = Vec::new();
         let mut ms = 0.0f32;
-        loop {
-            let input = {
-                let mut state = self.lock();
-                loop {
-                    if let Some(input) = state.input.take() {
-                        state.busy = true;
-                        break Some(input);
-                    }
-                    if state.last_wanted.elapsed() > IDLE {
-                        break None;
-                    }
-                    state = self.0.1.wait_timeout(state, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
-                }
-            };
-            let Some(input) = input else { break };
+        while let Some(input) = self.next(|state| {
+            let input = state.input.take()?;
+            state.busy = true;
+            Some(input)
+        }) {
             let started = Instant::now();
             if input.size != size || track.is_none() {
                 size = input.size;
@@ -580,12 +557,7 @@ impl Link {
             self.lock().busy = false;
         }
         log::info!("camera: stopped");
-        let mut state = self.lock();
-        state.running = false;
-        state.reports.clear();
-        if matches!(state.status, Status::Ready { .. }) {
-            state.status = Status::Off;
-        }
+        self.stop();
     }
 
     fn solve(&self, shot: &mut Shot, map: &DepthMap, size: (usize, usize), time: f32) {

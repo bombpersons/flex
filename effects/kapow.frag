@@ -42,12 +42,6 @@ float heard(int k) {
     return u_sound_singing;
 }
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
 // Whether a pixel of the font is on: column `col` across the word (each letter is five wide with
 // a gap after), row `row` from the top.
 bool lit(int word, int col, int row) {

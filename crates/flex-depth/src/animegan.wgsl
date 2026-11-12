@@ -21,10 +21,16 @@ const NEAREST: u32 = 32768u;
 const BYTES: u32 = 65536u;
 /// ag_pack: one channel, through a sigmoid (0 to 1), as grey.
 const GREY: u32 = 131072u;
+/// ag_join: with AFFINE, the scales and shifts are in `mem` (a style's), not the weights.
+const GAMMA_MEM: u32 = 262144u;
+/// ag_norm: through a sigmoid after (and no ReLU).
+const NORM_SIGMOID: u32 = 524288u;
+/// ag_pack: the values are 0 to 1.
+const UNIT: u32 = 1048576u;
 
 // k x k convolution (k = 3, 5, 7 or 9), stride 1, reflect padding k / 2: in [k][H = m][W = n] at
 // a_off, weights [x0][k][k][k] at b_off, bias at bias_off (or NONE), out [x0][H][W] at c_off.
-// Flags: TANH, LEAKY2, ACCUMULATE, LEAKY2_LAST. A 64 x 16 tile of pixels a workgroup: each thread makes 4 pixels side by
+// Flags: TANH, LEAKY2, RELU, ACCUMULATE, LEAKY2_LAST. A 64 x 16 tile of pixels a workgroup: each thread makes 4 pixels side by
 // side for 8 output channels (group wg.z), sliding along each row of its neighbourhood, with 2
 // input channels at a time in workgroup memory (15 KB in all, under WebGPU's least 16; 9 x 9
 // takes one at a time to fit).
@@ -94,6 +100,7 @@ fn conv_k(ks: u32, lid: vec3<u32>, li: u32, wg: vec3<u32>) {
             if (co >= cout) { break; }
             var s = select(a1[j][o - 4u], a0[j][min(o, 3u)], o < 4u);
             s = leaky2(s + bias(co), p.flags, LEAKY2);
+            if ((p.flags & RELU) != 0u) { s = max(s, 0.0); }
             if ((p.flags & TANH) != 0u) { s = tanh(s); }
             let at = p.c_off + co * plane + y * p.n + x;
             if ((p.flags & ACCUMULATE) != 0u) { s += mem[at]; }
@@ -179,7 +186,7 @@ fn ag_stats(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
 // eps is f0. With mem[bias_off] above 0 (bias_off not NONE), they're eased from what was there by
 // that much. With AFFINE, the parts are only the first's, and the scale and shift those that
 // normalise it and then scale and shift it by the weights' [x1] scales and [x1] shifts at b_off
-// (an instance norm's).
+// (an instance norm's), or with GAMMA_MEM, in `mem` at b_off (a style's).
 @compute @workgroup_size(64)
 fn ag_join(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c = gid.x;
@@ -206,8 +213,14 @@ fn ag_join(@builtin(global_invocation_id) gid: vec3<u32>) {
     var scale = sqrt(mv[1].y + p.f0) / sqrt(mv[0].y + p.f0);
     var shift = mv[1].x - mv[0].x * scale;
     if (affine) {
-        scale = w[p.b_off + c] / sqrt(mv[0].y + p.f0);
-        shift = w[p.b_off + p.x1 + c] - mv[0].x * scale;
+        var gamma = w[p.b_off + c];
+        var beta = w[p.b_off + p.x1 + c];
+        if ((p.flags & GAMMA_MEM) != 0u) {
+            gamma = mem[p.b_off + c];
+            beta = mem[p.b_off + p.x1 + c];
+        }
+        scale = gamma / sqrt(mv[0].y + p.f0);
+        shift = beta - mv[0].x * scale;
     }
     let o = p.c_off + c * 2u;
     var ease = 0.0;
@@ -252,7 +265,7 @@ fn ag_layer(@builtin(local_invocation_id) lid3: vec3<u32>) {
 // out[c][i] = leaky(in[c][i] * scale[c] + shift[c]), with in [k][m] at a_off, the scales and
 // shifts [k][2] at x0 in `mem` (or NONE for none), out at c_off, and [k][m] at b_off (unless
 // NONE) added after the leaky ReLU (or before it, with ADD_BEFORE). With NORM_RELU the ReLU is a
-// plain one; with NORM_LINEAR there's none. Grid: (m / 256, k).
+// plain one; with NORM_LINEAR there's none; with NORM_SIGMOID, a sigmoid instead. Grid: (m / 256, k).
 @compute @workgroup_size(256)
 fn ag_norm(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -264,7 +277,9 @@ fn ag_norm(@builtin(global_invocation_id) gid: vec3<u32>) {
     let add = p.b_off != NONE;
     let before = (p.flags & ADD_BEFORE) != 0u;
     if (add && before) { v += mem[p.b_off + at]; }
-    if ((p.flags & NORM_LINEAR) == 0u) {
+    if ((p.flags & NORM_SIGMOID) != 0u) {
+        v = 1.0 / (1.0 + exp(-v));
+    } else if ((p.flags & NORM_LINEAR) == 0u) {
         v = select(v * select(0.2, 0.0, (p.flags & NORM_RELU) != 0u), v, v >= 0.0);
     }
     if (add && !before) { v += mem[p.b_off + at]; }
@@ -370,9 +385,9 @@ fn ag_weave(@builtin(global_invocation_id) gid: vec3<u32>) {
     mem[p.c_off + c * 4u * plane + y * 2u * p.n + x] = mem[p.a_off + (place * p.k + c) * plane + (y / 2u) * p.n + x / 2u];
 }
 
-// [3][m] at a_off, from -1 to 1 (or 0 to 255, with BYTES; or with GREY, [1][m] through a sigmoid
-// as grey), to m RGB bytes packed in words at c_off. The top byte is 0x40,
-// which makes every word an ordinary float (from 2 to 4): never a NaN or a denormal, that
+// [3][m] at a_off, from -1 to 1 (or 0 to 255, with BYTES; 0 to 1, with UNIT; or with GREY, [1][m]
+// through a sigmoid as grey), to m RGB bytes packed in words at c_off. The top byte is 0x40,
+// which makes every word an ordinary float (from 2 to 8): never a NaN or a denormal, that
 // something on the way might change.
 @compute @workgroup_size(256)
 fn ag_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -384,6 +399,7 @@ fn ag_pack(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         let rgb = vec3<f32>(mem[p.a_off + i], mem[p.a_off + p.m + i], mem[p.a_off + 2u * p.m + i]);
         bytes = select((rgb + 1.0) * 127.5, rgb, (p.flags & BYTES) != 0u);
+        if ((p.flags & UNIT) != 0u) { bytes = rgb * 255.0; }
     }
     let b = vec3<u32>(clamp(bytes + 0.5, vec3<f32>(0.0), vec3<f32>(255.0)));
     mem[p.c_off + i] = bitcast<f32>(b.x | (b.y << 8u) | (b.z << 16u) | (0x40u << 24u));

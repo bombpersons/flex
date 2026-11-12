@@ -4,10 +4,6 @@
 //
 // s_mode: 0 contours, 1 fog, 2 show the depth.
 
-vec3 rainbow(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 // A fog colour setting: the first choice is the drifting rainbow, the rest are fixed.
 vec3 fog_colour(float choice, vec3 moving) {
     const vec3 named[11] = vec3[11](
@@ -28,7 +24,7 @@ vec4 effect(vec2 uv) {
     }
     if (s_mode > 0.5) {
         // Fog: far away fades into a slowly drifting colour.
-        vec3 moving = rainbow(0.1 * t + 0.3 * uv.x) * 0.6 + 0.2;
+        vec3 moving = hue(0.1 * t + 0.3 * uv.x) * 0.6 + 0.2;
         float far = 1.0 - smoothstep(0.0, 0.75, d);
         vec3 fog = mix(fog_colour(s_fog_start, moving), fog_colour(s_fog_end, moving), far);
         return vec4(mix(video, fog, far * amount), 1.0);
@@ -37,7 +33,7 @@ vec4 effect(vec2 uv) {
     float pulse = u_beat * s_react / 100.0;
     float band = d * s_bands - t * 0.5 - pulse;
     float line = 1.0 - smoothstep(0.0, 0.12, abs(fract(band) - 0.5) - 0.38);
-    vec3 colour = rainbow(floor(band) / s_bands + 0.05 * t);
+    vec3 colour = hue(floor(band) / s_bands + 0.05 * t);
     vec3 tinted = mix(video, video * colour * 1.6, amount * 0.6);
     return vec4(mix(tinted, colour, line * amount), 1.0);
 }

@@ -1,13 +1,8 @@
 // Graffiti: painted in shot_uv, where each point was on screen when the shot began, so it stays on
 // what it's on. Only walls take paint, and people walk in front of it.
 
-float hash(vec3 p) {
-    p = fract(p * vec3(0.1031, 0.1137, 0.1279));
-    p += dot(p, p.yzx + 33.33);
-    return fract((p.x + p.y) * p.z);
-}
-
-float noise(vec2 p) {
+// Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
+float noise_h3(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
     float a = hash(vec3(i, 0.0)), b = hash(vec3(i + vec2(1.0, 0.0), 0.0));
@@ -15,23 +10,14 @@ float noise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-float fbm(vec2 p) {
+float fbm_h3(vec2 p) {
     float sum = 0.0, amount = 0.5;
     for (int i = 0; i < 4; i++) {
-        sum += amount * noise(p);
+        sum += amount * noise_h3(p);
         p = p * 2.03 + vec2(17.1, 9.2);
         amount *= 0.5;
     }
     return sum;
-}
-
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
-// How tall something `size` big in the world looks on screen, `away` from the camera.
-float screen_size(float size, float away) {
-    return u_world_lens.x * size / max(away, 1e-3) / u_world_lens.z * (u_video_rect.w - u_video_rect.y);
 }
 
 float segment(vec2 p, vec2 a, vec2 b) {
@@ -114,13 +100,13 @@ vec4 effect(vec2 uv) {
         glow_d = max(d, 0.0);
     } else {
         // A splash, with spatter around it.
-        float r = length(f - 0.5) + 0.12 * (fbm((f - 0.5) * 6.0 + cell) - 0.5);
-        paint = (1.0 - smoothstep(0.22, 0.24, r)) + step(0.92, noise(f * 38.0 + cell * 3.0)) * (1.0 - smoothstep(0.25, 0.42, r));
+        float r = length(f - 0.5) + 0.12 * (fbm_h3((f - 0.5) * 6.0 + cell) - 0.5);
+        paint = (1.0 - smoothstep(0.22, 0.24, r)) + step(0.92, noise_h3(f * 38.0 + cell * 3.0)) * (1.0 - smoothstep(0.25, 0.42, r));
         outline = paint;
         glow_d = max(r - 0.23, 0.0);
     }
     // Sprayed: speckled where the paint thins out.
-    float speckle = smoothstep(0.35, 0.65, noise(f * 120.0 + cell * 7.0));
+    float speckle = smoothstep(0.35, 0.65, noise_h3(f * 120.0 + cell * 7.0));
     paint = clamp(paint * mix(0.85, 1.0, speckle), 0.0, 1.0);
     float luma = dot(film, vec3(0.3, 0.59, 0.11));
     vec3 c = film;

@@ -53,10 +53,10 @@ impl SoundKind {
 
 impl Drop for SoundKind {
     fn drop(&mut self) {
+        // Not waited for: this is dropped on the UI thread, and the thread may still be loading
+        // the network. With nothing left to send it, it stops by itself.
         self.send = None;
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        drop(self.thread.take());
     }
 }
 

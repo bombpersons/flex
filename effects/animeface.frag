@@ -13,10 +13,6 @@ float hash(float n) {
     return fract(sin(n * 91.345) * 47453.5453);
 }
 
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 // The colour of a face's eyes.
 vec3 iris_colour(int face) {
     if (s_colour > 0.5) {
@@ -166,7 +162,8 @@ vec4 draw_side_eye(vec2 l, float look_up, float open, vec3 colour, float pulse, 
     l.y += st.slant * l.x;
     float top = max(0.95 * st.opening.x * open, 0.03), bottom = -0.62 * st.opening.y;
     vec2 back = vec2(-0.6, -0.05);
-    float front = 0.32 - 0.1 * pow(clamp(l.y / max(l.y > 0.0 ? top : -bottom, 0.03), -1.0, 1.0), 2.0);
+    float rise = clamp(l.y / max(l.y > 0.0 ? top : -bottom, 0.03), -1.0, 1.0);
+    float front = 0.32 - 0.1 * rise * rise;
     float t = clamp((l.x - back.x) / (front - back.x), 0.0, 1.0);
     float upper = mix(back.y, top, 1.0 - (1.0 - t) * (1.0 - t));
     float lower = mix(back.y, bottom, sqrt(t));
@@ -359,7 +356,8 @@ float draw_brow(vec2 l, float lift, float frown, float worry, float px) {
     float x = clamp(l.x, inner_end, outer_end);
     float along = (x - inner_end) / (outer_end - inner_end);
     float inner_part = 1.0 - smoothstep(0.0, 0.75, along);
-    float y = 1.75 + lift + 0.3 * (1.0 - pow((x - 0.25) / 1.0, 2.0)) - 0.1 * frown + (0.45 * worry - 0.55 * frown) * inner_part;
+    float arch = x - 0.25;
+    float y = 1.75 + lift + 0.3 * (1.0 - arch * arch) - 0.1 * frown + (0.45 * worry - 0.55 * frown) * inner_part;
     float thick = mix(0.3, 0.04, smoothstep(0.0, 1.0, along));
     // Round at the inner end, and tapering to a point at the outer.
     float d = l.x < inner_end ? length(l - vec2(inner_end, y)) : abs(l.y - y);

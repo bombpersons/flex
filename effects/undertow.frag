@@ -1,12 +1,7 @@
 // Undertow: feedback weighed by depth. Each frame the last one is pushed along a swirling
 // flow, shifted in colour and blended under the video, but only where depth lets it.
 
-vec3 hue(vec3 c, float a) {
-    vec3 k = vec3(0.57735);
-    return c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
-}
-
-float noise(vec2 p) {
+float noise_sin(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
@@ -27,7 +22,7 @@ vec4 effect(vec2 uv) {
     float m = smoothstep(s_edge / 100.0, min(s_edge / 100.0 + 0.3, 1.0), s_where < 0.5 ? 1.0 - d : d);
     float kick = 1.0 + 2.0 * u_beat * s_react / 100.0;
     float t = u_time;
-    float a = 6.2831853 * 2.0 * noise(uv * vec2(3.0, 2.0) + vec2(0.05 * t, -0.03 * t));
+    float a = 6.2831853 * 2.0 * noise_sin(uv * vec2(3.0, 2.0) + vec2(0.05 * t, -0.03 * t));
     vec2 swirl = vec2(cos(a), sin(a)) * 0.006 * s_flow / 50.0 * kick;
     vec2 inward = (vec2(0.5) - uv) * 0.006 * s_flow / 50.0;
     vec2 q = uv + (swirl + inward) * m;
@@ -35,7 +30,7 @@ vec4 effect(vec2 uv) {
     vec2 e = 0.75 / u_resolution;
     vec3 prev = 0.25 * (texture(u_prev, q + e).rgb + texture(u_prev, q - e).rgb
         + texture(u_prev, q + vec2(e.x, -e.y)).rgb + texture(u_prev, q - vec2(e.x, -e.y)).rgb);
-    prev = hue(prev, 0.08 * s_colour / 50.0);
+    prev = hue_rotate(prev, 0.08 * s_colour / 50.0);
     vec3 video = texture(u_video, uv).rgb;
     return vec4(mix(video, prev, m * s_trails / 100.0), 1.0);
 }

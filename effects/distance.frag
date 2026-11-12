@@ -3,15 +3,6 @@
 //
 // s_style: 0 fog, 1 prism, 2 heat haze, 3 blocks, 4 colour spin, 5 rush.
 
-vec3 rainbow(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
-vec3 hue(vec3 c, float a) {
-    vec3 k = vec3(0.57735);
-    return c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
-}
-
 // A fog colour setting: the first choice is the drifting rainbow, the rest are fixed.
 vec3 fog_colour(float choice, vec3 moving) {
     const vec3 named[11] = vec3[11](
@@ -21,7 +12,7 @@ vec3 fog_colour(float choice, vec3 moving) {
     return choice < 0.5 ? moving : named[int(choice + 0.5) - 1];
 }
 
-float noise(vec2 p) {
+float noise_sin(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
@@ -34,7 +25,7 @@ float noise(vec2 p) {
 }
 
 float clouds(vec2 p) {
-    return 0.55 * noise(p) + 0.3 * noise(p * 2.1 + 7.0) + 0.15 * noise(p * 4.3 + 13.0);
+    return 0.55 * noise_sin(p) + 0.3 * noise_sin(p * 2.1 + 7.0) + 0.15 * noise_sin(p * 4.3 + 13.0);
 }
 
 vec4 effect(vec2 uv) {
@@ -54,7 +45,7 @@ vec4 effect(vec2 uv) {
     if (s_style < 0.5) {
         // Far layers of cloud move more slowly and look smaller, so the fog has some depth.
         float n = clouds(p * (2.0 + 5.0 * m) + vec2(0.12, 0.03) * t);
-        vec3 moving = rainbow(0.04 * t + 0.25 * p.x + 0.3 * m) * 0.45 + 0.45;
+        vec3 moving = hue(0.04 * t + 0.25 * p.x + 0.3 * m) * 0.45 + 0.45;
         vec3 fog = mix(fog_colour(s_fog_start, moving), fog_colour(s_fog_end, moving), m);
         float thick = 1.0 - exp(-1.6 * m * m * amount * (0.3 + 1.4 * n));
         return vec4(mix(texture(u_video, uv).rgb, fog, thick), 1.0);
@@ -62,10 +53,10 @@ vec4 effect(vec2 uv) {
     if (s_style < 1.5) {
         vec2 dir = (uv - 0.5) * 0.09 * m * amount;
         vec3 c = vec3(texture(u_video, uv + dir).r, texture(u_video, uv).g, texture(u_video, uv - dir).b);
-        return vec4(mix(c, c * rainbow(0.1 * t + m), 0.25 * m * amount), 1.0);
+        return vec4(mix(c, c * hue(0.1 * t + m), 0.25 * m * amount), 1.0);
     }
     if (s_style < 2.5) {
-        vec2 wob = vec2(sin(p.y * 40.0 + t * 5.0 + 6.0 * noise(p * 5.0)), cos(p.x * 31.0 + t * 4.0));
+        vec2 wob = vec2(sin(p.y * 40.0 + t * 5.0 + 6.0 * noise_sin(p * 5.0)), cos(p.x * 31.0 + t * 4.0));
         return vec4(texture(u_video, uv + wob * 0.012 * m * amount).rgb, 1.0);
     }
     if (s_style < 3.5) {
@@ -77,7 +68,7 @@ vec4 effect(vec2 uv) {
     }
     if (s_style < 4.5) {
         vec3 c = texture(u_video, uv).rgb;
-        return vec4(hue(c, m * (amount * 12.0 + 0.6 * t)), 1.0);
+        return vec4(hue_rotate(c, m * (amount * 12.0 + 0.6 * t)), 1.0);
     }
     vec3 sum = vec3(0.0);
     for (int i = 0; i < 16; i++) {

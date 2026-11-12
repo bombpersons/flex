@@ -1,5 +1,7 @@
 //! The picture redrawn in a style, for video effects that ask for it (`restyle = "<setting>"`):
-//! AnimeGANv3's anime styles, on the GPU through flex-depth, in a thread of its own. The paint
+//! AnimeGANv3's anime styles and the other networks in flex-depth's `animegan`, and Magenta's
+//! stylization in the style of any picture (`art:` styles, see `art`), on the GPU through
+//! flex-depth, in a thread of its own. The paint
 //! callback hands it frames of the picture (see `effects::Renderer`) whenever it's free, at the
 //! size it asks for, and picks up the redrawn ones as they come.
 //!
@@ -7,11 +9,14 @@
 //! thread stops, freeing the GPU memory, once nothing has asked for a style for a while.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use flex_core::effects::ART;
 use flex_depth::animegan::{self, AnimeGan};
+use flex_depth::magenta;
+
+use crate::worker::{Job, Worker, fetch_model, push_capped};
 
 /// The sizes it can run at (pixels in all), biggest first; each keeps the picture's shape.
 const LEVELS: [usize; 4] = [230_000, 180_000, 140_000, 100_000];
@@ -28,8 +33,6 @@ const RETRY: Duration = Duration::from_secs(60);
 /// At most this often (a film's every frame, if the GPU has room): between them, the nearest one
 /// is moved along with the picture.
 const MIN_INTERVAL: Duration = Duration::from_millis(41);
-/// Nothing wanted a style for this long: stop.
-const IDLE: Duration = Duration::from_secs(20);
 /// How much of the last picture's colours each norm keeps (see `AnimeGan::run`). Measured on
 /// film, the network hardly pumps: most of what changes is what moves, so this is light.
 const EASE: f32 = 0.5;
@@ -72,78 +75,90 @@ pub struct Restyled {
     pub size: (usize, usize),
     /// The position of the frame it's of.
     pub time: f32,
+    /// The style it's in, by id.
+    pub style: String,
 }
 
 /// A frame handed over: RGBA, bottom row first, its size, its position, and whether there's been
 /// a scene cut since the last one.
 type Input = (Vec<u8>, (usize, usize), f32, bool);
 
-struct State {
+pub struct State {
     status: Status,
-    running: bool,
     /// The style wanted, by id.
     style: String,
     /// A frame waiting.
     input: Option<Input>,
     output: VecDeque<Arc<Restyled>>,
-    last_wanted: Instant,
     not_before: Option<Instant>,
     /// Into `LEVELS`, kept so the next video starts at the size that worked for this one.
     level: usize,
+    /// The painting (or paintings) Magenta's network is painting like.
+    painting: String,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self { status: Status::Off, style: String::new(), input: None, output: VecDeque::new(), not_before: None, level: START_LEVEL, painting: String::new() }
+    }
+}
+
+impl Job for State {
+    type Status = Status;
+    fn status(&self) -> &Status {
+        &self.status
+    }
+    /// A style that failed doesn't stop another being tried.
+    fn failed(&self) -> bool {
+        matches!(&self.status, Status::Failed(_, failed) if *failed == self.style)
+    }
+    fn starting(&mut self) {
+        self.status = Status::Starting;
+    }
+    fn fail(&mut self, why: String) {
+        self.status = Status::Failed(why, self.style.clone());
+    }
+    fn stopped(&mut self) {
+        self.output.clear();
+        self.not_before = None;
+        if matches!(self.status, Status::Ready { .. }) {
+            self.status = Status::Off;
+        }
+    }
 }
 
 /// Shared between the UI, the paint callback and the worker.
-#[derive(Clone)]
-pub struct Link(Arc<(Mutex<State>, Condvar)>);
+pub type Link = Worker<State>;
 
-impl Default for Link {
-    fn default() -> Self {
-        let state = State { status: Status::Off, running: false, style: String::new(), input: None, output: VecDeque::new(), last_wanted: Instant::now(), not_before: None, level: START_LEVEL };
-        Self(Arc::new((Mutex::new(state), Condvar::new())))
-    }
-}
-
-fn path_of(style: &animegan::Style) -> PathBuf {
-    flex_core::data_dir().join("models").join(style.file)
+/// The network for a style id: Magenta's for every `art:` style.
+fn network(id: &str) -> Option<&'static animegan::Style> {
+    if id.starts_with(ART) { Some(&magenta::MODEL) } else { animegan::style(id) }
 }
 
 impl Link {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.0.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// An effect wants the picture in `style` (an `animegan::STYLES` id): starts the worker if it
     /// isn't running. Call every frame.
     pub fn wanted(&self, style: &str) {
-        let mut state = self.lock();
-        state.last_wanted = Instant::now();
-        if state.style != style {
-            state.style = style.to_owned();
-            self.0.1.notify_all();
-        }
-        if state.running || matches!(&state.status, Status::Failed(_, failed) if failed == style) {
-            return;
-        }
-        state.running = true;
-        state.status = Status::Starting;
-        drop(state);
-        let link = self.clone();
-        if let Err(e) = std::thread::Builder::new().name("restyle".into()).spawn(move || link.work()) {
-            let mut state = self.lock();
-            state.running = false;
-            state.status = Status::Failed(format!("couldn't start: {e}"), style.to_owned());
-        }
+        let want = |state: &mut State| {
+            if state.style != style {
+                state.style = style.to_owned();
+                self.notify();
+            }
+        };
+        self.want("restyle", want, |link| link.work());
     }
 
-    pub fn status(&self) -> Status {
-        self.lock().status.clone()
+    /// What it's painting like, for an `art:` style: the painting's name.
+    pub fn painting(&self) -> Option<String> {
+        let state = self.lock();
+        (state.style.starts_with(ART) && !state.painting.is_empty()).then(|| state.painting.clone())
     }
 
     /// The size to hand frames over at, for a picture of this shape (width over height): fewer
     /// pixels for styles that are more work each.
     pub fn size_for(&self, aspect: f32) -> (usize, usize) {
         let state = self.lock();
-        let work = animegan::style(&state.style).map_or(1.0, |s| s.work);
+        let work = network(&state.style).map_or(1.0, |s| s.work);
         animegan::size_for(f64::from(aspect), (LEVELS[state.level] as f32 / work) as usize)
     }
 
@@ -157,7 +172,12 @@ impl Link {
     /// there's been a scene cut since the last frame handed over.
     pub fn submit(&self, rgba: Vec<u8>, size: (usize, usize), time: f32, cut: bool) {
         self.lock().input = Some((rgba, size, time, cut));
-        self.0.1.notify_all();
+        self.notify();
+    }
+
+    /// The style wanted, by id.
+    pub fn style(&self) -> String {
+        self.lock().style.clone()
     }
 
     /// The pictures that have come in since the last call, oldest first.
@@ -167,18 +187,8 @@ impl Link {
 
     /// Downloads `style` if it isn't here yet (showing how far it's got).
     fn fetch(&self, style: &'static animegan::Style) -> anyhow::Result<Vec<u8>> {
-        let path = path_of(style);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let progress = |done: u64| {
-            let pct = (done * 100 / style.bytes.max(1)).min(100) as u8;
-            let mut state = self.lock();
-            if state.status != Status::Downloading(style.label, pct) && done < style.bytes {
-                state.status = Status::Downloading(style.label, pct);
-            }
-        };
-        flex_core::update::download_verified(style.url, &format!("the {} style", style.label), style.bytes, style.sha256, &path, progress)?;
+        let progress = |pct| self.lock().status = Status::Downloading(style.label, pct);
+        let path = fetch_model(style.file, style.url, &format!("the {} style", style.label), style.bytes, style.sha256, progress)?;
         Ok(std::fs::read(&path)?)
     }
 
@@ -188,6 +198,8 @@ impl Link {
         let mut net: Option<AnimeGan> = None;
         let mut pace = Pace::new(self.lock().level, Instant::now());
         let mut first = true;
+        // The style Magenta's network was last given, and its name.
+        let mut painting: Option<(Vec<f32>, String)> = None;
         let fail = |e: anyhow::Error, style: &str| {
             log::warn!("restyle: {e:#}");
             let mut state = self.lock();
@@ -198,7 +210,7 @@ impl Link {
         };
         loop {
             let wanted = self.lock().style.clone();
-            let Some(style) = animegan::style(&wanted) else {
+            let Some(style) = network(&wanted) else {
                 fail(anyhow::anyhow!("there's no {wanted:?} style"), &wanted);
                 return;
             };
@@ -207,37 +219,19 @@ impl Link {
                 drop(net.take());
                 match self.fetch(style) {
                     Ok(bytes) => loaded = Some((style, bytes)),
-                    Err(e) => return fail(e, style.id),
+                    Err(e) => return fail(e, &wanted),
                 }
                 first = true;
                 let mut state = self.lock();
                 state.status = Status::Ready { style, adapter: String::new(), ms: 0.0, size: (0, 0) };
                 state.input = None;
             }
-            let input = {
-                let mut state = self.lock();
-                loop {
-                    if state.style != wanted {
-                        break None;
-                    }
-                    if let Some(input) = state.input.take() {
-                        break Some(input);
-                    }
-                    if state.last_wanted.elapsed() > IDLE {
-                        drop(state);
-                        drop(net);
-                        log::info!("restyle: stopped");
-                        let mut state = self.lock();
-                        state.running = false;
-                        state.output.clear();
-                        state.not_before = None;
-                        if matches!(state.status, Status::Ready { .. }) {
-                            state.status = Status::Off;
-                        }
-                        return;
-                    }
-                    state = self.0.1.wait_timeout(state, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
-                }
+            // Nothing once another style's wanted.
+            let Some(input) = self.next(|state| if state.style != wanted { Some(None) } else { state.input.take().map(Some) }) else {
+                drop(net);
+                log::info!("restyle: stopped");
+                self.stop();
+                return;
             };
             let Some((rgba, size, time, cut)) = input else { continue };
             if net.as_ref().is_none_or(|n| n.size() != size) {
@@ -247,8 +241,9 @@ impl Link {
                     Ok(n) => {
                         log::info!("restyle: {} at {}×{} on {}", style.label, size.0, size.1, n.adapter());
                         net = Some(n);
+                        painting = None;
                     }
-                    Err(e) => return fail(e, style.id),
+                    Err(e) => return fail(e, &wanted),
                 }
                 first = true;
             }
@@ -262,6 +257,17 @@ impl Link {
                     rgb[(y * w + x) * 3..][..3].copy_from_slice(&px[..3]);
                 }
             }
+            if n.takes_styles() {
+                // Paintings that aren't there any more paint like the first.
+                let picked = crate::art::style_at(&wanted, time).or_else(|| crate::art::style_at(&format!("{ART}{}", crate::art::PAINTINGS[0].id), time));
+                if let Some((numbers, name)) = picked.filter(|(numbers, _)| painting.as_ref().is_none_or(|(last, _)| last != numbers)) {
+                    if let Err(e) = n.set_style(&numbers) {
+                        return fail(e, &wanted);
+                    }
+                    self.lock().painting = name.clone();
+                    painting = Some((numbers, name));
+                }
+            }
             let started = Instant::now();
             let turn = crate::gpu::turn(crate::gpu::Net::Restyle);
             let result = n.run(&rgb, if first || cut { 0.0 } else { EASE });
@@ -270,7 +276,7 @@ impl Link {
             first = false;
             let out = match result {
                 Ok(out) => out,
-                Err(e) => return fail(e, style.id),
+                Err(e) => return fail(e, &wanted),
             };
             let mut flipped = vec![0u8; out.len()];
             for y in 0..h {
@@ -279,9 +285,7 @@ impl Link {
             {
                 let mut state = self.lock();
                 state.status = Status::Ready { style, adapter: n.adapter().to_owned(), ms, size };
-                state.output.push_back(Arc::new(Restyled { rgba: flipped, size, time }));
-                let extra = state.output.len().saturating_sub(MOST_WAITING);
-                state.output.drain(..extra);
+                push_capped(&mut state.output, [Arc::new(Restyled { rgba: flipped, size, time, style: wanted.clone() })], MOST_WAITING);
                 state.not_before = Some(started + crate::gpu::rest(crate::gpu::Net::Restyle, MIN_INTERVAL));
             }
             if let Some(level) = pace.update(ms, Instant::now()) {

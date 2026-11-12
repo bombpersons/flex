@@ -1,10 +1,6 @@
 // Echoes: real older frames, each tinted its own colour and added in only where it differs from
 // now, so still things stay as they are.
 
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     vec3 sum = vec3(0.0);

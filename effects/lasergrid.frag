@@ -3,13 +3,8 @@
 // each beam, so a beam shows only where it passes in front of what's there, and where it meets a
 // surface it leaves a bright spot, brightest on people.
 
-float hash(vec3 p) {
-    p = fract(p * vec3(0.1031, 0.1137, 0.1279));
-    p += dot(p, p.yzx + 33.33);
-    return fract((p.x + p.y) * p.z);
-}
-
-float noise(vec2 p) {
+// Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
+float noise_h3(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
     float a = hash(vec3(i, 0.0)), b = hash(vec3(i + vec2(1.0, 0.0), 0.0));
@@ -17,23 +12,14 @@ float noise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-float fbm(vec2 p) {
+float fbm_h3(vec2 p) {
     float sum = 0.0, amount = 0.5;
     for (int i = 0; i < 4; i++) {
-        sum += amount * noise(p);
+        sum += amount * noise_h3(p);
         p = p * 2.03 + vec2(17.1, 9.2);
         amount *= 0.5;
     }
     return sum;
-}
-
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
-// How tall something `size` big in the world looks on screen, `away` from the camera.
-float screen_size(float size, float away) {
-    return u_world_lens.x * size / max(away, 1e-3) / u_world_lens.z * (u_video_rect.w - u_video_rect.y);
 }
 
 vec4 effect(vec2 uv) {
@@ -77,7 +63,7 @@ vec4 effect(vec2 uv) {
             float gap = length(w0 + direction * s - along * u);
             float width = (0.0006 + 0.0008 * max(s, 0.0)) * 640.0 / u_world_lens.x;
             float in_front = step(0.05, s) * (1.0 - smoothstep(scene * 0.97, scene * 1.03, s)) * kept;
-            float shimmer = 0.85 + 0.15 * noise(vec2(u * 30.0 - t * 2.0, cell.x + cell.y * 7.0));
+            float shimmer = 0.85 + 0.15 * noise_h3(vec2(u * 30.0 - t * 2.0, cell.x + cell.y * 7.0));
             light += in_front * shimmer * (exp(-gap * gap / (width * width)) + 0.25 * s_haze / 100.0 * exp(-gap / (width * 6.0)));
             // Where it meets whatever's there.
             float off = length(cross(surface - at, along));

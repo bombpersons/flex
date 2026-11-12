@@ -1,27 +1,5 @@
 // Slow Burn: everything's driven by how long the frame on screen has been in its shot.
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-
-float fbm(vec2 p) {
-    float sum = 0.0, amount = 0.5;
-    for (int i = 0; i < 5; i++) {
-        sum += amount * noise(p);
-        p = p * 2.03 + vec2(17.1, 9.2);
-        amount *= 0.5;
-    }
-    return sum;
-}
-
 vec3 turn(vec3 c, float a) {
     const vec3 k = vec3(0.57735);
     return c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));

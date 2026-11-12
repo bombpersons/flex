@@ -1,24 +1,13 @@
 // Cyborg: on one side of the face's own coordinates the skin gives way to plates and circuits,
 // lit by which way the head is turned.
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     float on = on_face(uv);
     if (on <= 0.0) return vec4(c, 1.0);
     vec2 a = face_uv(uv);
-    int who = face_there(uv);
+    // -1 at the very edge, where the map's blur reaches past the face's own pixels.
+    int who = max(face_there(uv), 0);
     // How far into the metal side, ragged where the skin's torn.
     float x = s_side > 0.5 ? 1.0 - a.x : a.x;
     float tear = noise(a * vec2(9.0, 22.0)) * 0.07 + noise(a * 60.0) * 0.02;

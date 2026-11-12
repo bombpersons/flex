@@ -68,8 +68,11 @@ pub struct Player {
     position: Option<f64>,
     /// The playback clock and sound for the video effect.
     effect_inputs: crate::effects::Inputs,
+    sound_effects: crate::sound_effects::SoundEffects,
     /// What mpv's audio-delay is set to, to match the picture being held back for depth.
     audio_held: f32,
+    /// The styles folder's pictures offered to effects, as of `art::choices`' number.
+    art_generation: u64,
     /// A new shot reached the screen on the last frame, so Shuffle can see what it's like now.
     shot_due: bool,
     /// Hold OK: choosing the effect and changing its settings while the video plays.
@@ -154,7 +157,9 @@ impl Player {
             duration: None,
             position: None,
             effect_inputs: Default::default(),
+            sound_effects: Default::default(),
             audio_held: 0.0,
+            art_generation: 0,
             shot_due: false,
             effect_panel: None,
             session_start: crate::shared::now_unix(),
@@ -486,9 +491,22 @@ impl Player {
             }
             if let Some(restyle) = &frame.restyle {
                 lines.push(format!("Effect style: {}", restyle.status().describe()));
+                if let Some(painting) = restyle.painting() {
+                    lines.push(format!("Painting like: {painting}"));
+                    let note = crate::art::note();
+                    if !note.is_empty() {
+                        lines.push(format!("Styles folder: {note}"));
+                    }
+                }
             }
             if let Some(texture) = &frame.texture {
                 lines.push(format!("Effect texture: {}", texture.status().describe()));
+            }
+            if frame.needs.sound {
+                lines.push(format!("Sound effects: {}", crate::sound_effects::status().describe()));
+                if let Some(line) = crate::sound_effects::instruments_status() {
+                    lines.push(format!("Pitch: {line}"));
+                }
             }
             lines.extend(crate::gpu::describe());
             if frame.needs.scene {
@@ -679,13 +697,23 @@ impl Player {
         // Shuffle waits while the list of effects is open, so it doesn't change what's being tried.
         let picking = self.effect_panel.as_ref().is_some_and(EffectPanel::picking);
         sh.effects.step(ctx.input(|i| i.unstable_dt).min(0.25), self.loaded && !self.paused() && !picking);
+        // Pictures in the styles folder are offered as styles.
+        if crate::art::generation() != self.art_generation {
+            let (generation, mine) = crate::art::choices();
+            sh.effects.set_art_styles(&mine);
+            self.art_generation = generation;
+        }
         let effects = sh.effect_renderer.clone();
         let held = effects.lock().unwrap_or_else(|e| e.into_inner()).held_back();
-        if held != self.audio_held {
-            self.audio_held = held;
-            let _ = self.mpv.set_string("audio-delay", &format!("{held:.3}"));
+        // The sound effects' filter holds the sound back too: that's taken off.
+        let audio_delay = held - self.sound_effects.latency();
+        if audio_delay != self.audio_held {
+            self.audio_held = audio_delay;
+            let _ = self.mpv.set_string("audio-delay", &format!("{audio_delay:.3}"));
         }
         let clock = sh.effects.active().is_some().then(|| self.effect_inputs.tick(&self.mpv, sh.effects.needs().audio));
+        let kinds = clock.as_ref().and_then(|(_, f)| f.as_ref()).map(|f| f.kinds.clone()).unwrap_or_default();
+        self.sound_effects.tick(&self.mpv, &sh.effects, &kinds);
         // Changing as the new shot reaches the screen, which, with the picture held back, is
         // a little after the cut was found.
         if std::mem::take(&mut self.shot_due) {
@@ -735,6 +763,9 @@ impl Player {
                 });
                 let restyle = needs.restyle.as_deref().filter(|_| texture.is_none()).map(|style| {
                     sh.restyle.wanted(style);
+                    if style.starts_with(flex_core::effects::ART) {
+                        crate::art::wanted();
+                    }
                     sh.restyle.clone()
                 });
                 let fading = sh.effects.fading();

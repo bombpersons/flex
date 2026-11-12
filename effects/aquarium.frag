@@ -3,28 +3,6 @@
 // sight meets the water, so the waterline runs along the table and around people on its own. What's seen is then refracted, reflected about where it
 // meets the water, lit by caustics and fogged by how much water is in front of it.
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-
-float fbm(vec2 p) {
-    float sum = 0.0, amount = 0.5;
-    for (int i = 0; i < 5; i++) {
-        sum += amount * noise(p);
-        p = p * 2.03 + vec2(17.1, 9.2);
-        amount *= 0.5;
-    }
-    return sum;
-}
-
 // The waves on the surface, at a point on it.
 float swell(vec2 at, float t) {
     float h = sin(at.x * 5.0 + t * 1.1) * 0.5 + sin(at.y * 7.0 - t * 1.4 + at.x * 2.0) * 0.35;

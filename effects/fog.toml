@@ -2,7 +2,6 @@ name = "Fog Layer"
 description = "A sheet of low mist lies across the room at one height, drifting slowly and churning when wind is heard, with people standing up out of it."
 suits = ["wide", "quiet"]
 camera = true
-cuts = true
 audio = true
 
 [[settings]]
@@ -35,3 +34,4 @@ max = 200
 step = 10
 unit = "%"
 default = 100
+drift = "off"

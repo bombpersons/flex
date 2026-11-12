@@ -159,8 +159,7 @@ impl BarGl {
                 gl.delete_sync(fence);
             }
             if let Some((small, pbo)) = self.objects.take() {
-                gl.delete_framebuffer(small.fbo);
-                gl.delete_texture(small.texture);
+                crate::signals::delete_target(gl, small);
                 gl.delete_buffer(pbo);
             }
         }

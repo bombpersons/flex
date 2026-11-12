@@ -31,7 +31,8 @@ vec4 effect(vec2 uv) {
     float on = on_face(uv);
     if (on <= 0.0) return vec4(c, 1.0);
     vec2 a = face_uv(uv);
-    int who = face_there(uv);
+    // -1 at the very edge, where the map's blur reaches past the face's own pixels.
+    int who = max(face_there(uv), 0);
     float luma = dot(c, vec3(0.3, 0.59, 0.11));
     vec3 turn = u_face_turn[who].xyz;
 

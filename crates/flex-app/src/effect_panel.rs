@@ -8,7 +8,7 @@
 //! before · Hold OK or right-click: in or out of the shuffle, or a favourite with shuffle off.
 
 use eframe::egui::{self, Align2, FontId, Pos2, Rect, TextStyle, pos2, vec2};
-use flex_core::effects::{Drift, Effect, Shuffle};
+use flex_core::effects::{Drift, Effect, Shuffle, SoundEffect, sound_settings_id};
 use flex_core::plugins::{SettingKind, SettingSpec};
 use flex_plugin::serde_json::{Value, json};
 
@@ -33,6 +33,7 @@ const REST: f64 = 0.33;
 const TURN: (f32, f32, f32) = (5.0, 600.0, 5.0);
 const FADE: (f32, f32, f32) = (0.0, 15.0, 0.5);
 const RANDOMISE: (f32, f32, f32) = (0.0, 100.0, 10.0);
+const PAIRING: (f32, f32, f32) = (0.0, 100.0, 10.0);
 const DRIFT: (f32, f32, f32) = (0.0, 100.0, 10.0);
 const DRIFT_SPEED: (f32, f32, f32) = (10.0, 400.0, 10.0);
 
@@ -40,6 +41,10 @@ const DRIFT_SPEED: (f32, f32, f32) = (10.0, 400.0, 10.0);
 enum Line {
     Power,
     Effect,
+    /// Sound effects on or off.
+    SoundPower,
+    /// Which sound effect.
+    Sound,
     Shuffle,
     ByShot,
     Drift,
@@ -48,7 +53,13 @@ enum Line {
     Longest,
     Fade,
     Randomise,
+    /// How often shuffle pairs a sound effect with a turn.
+    SoundPairing,
     Setting(Box<SettingSpec>),
+    /// One of the sound effect's settings.
+    SoundSetting(Box<SettingSpec>),
+    /// Opens the styles folder, for effects that paint like pictures (see `art`).
+    StylesFolder,
     Defaults,
 }
 
@@ -337,24 +348,35 @@ fn lines(page: &Page, sh: &Shared) -> Vec<Line> {
             if sh.effects.shuffle().at_cuts {
                 lines.push(Line::ByShot);
             }
-            lines.extend([Line::Shortest, Line::Longest, Line::Fade, Line::Randomise]);
+            lines.extend([Line::Shortest, Line::Longest, Line::Fade, Line::Randomise, Line::SoundPairing]);
             lines
         }
         Page::Drift => vec![Line::Drift, Line::DriftSpeed],
         Page::Main | Page::Picker(_) => {
-            let mut lines = vec![Line::Power, Line::Effect];
+            let mut lines = vec![Line::Power, Line::Effect, Line::SoundPower, Line::Sound];
             if sh.effects.is_on() {
                 lines.extend([Line::Shuffle, Line::Drift]);
             }
             if let Some(effect) = sh.effects.chosen() {
                 lines.extend(effect.settings().cloned().map(Box::new).map(Line::Setting));
+                if effect.takes_art() {
+                    lines.push(Line::StylesFolder);
+                }
                 if effect.settings().next().is_some() {
                     lines.push(Line::Defaults);
                 }
             }
+            if let Some(sound) = shown_sound(sh).filter(|_| sh.effects.sound_is_on()) {
+                lines.extend(sound.settings.iter().cloned().map(Box::new).map(Line::SoundSetting));
+            }
             lines
         }
     }
+}
+
+/// The sound effect whose settings show: the one playing, or else the one picked.
+fn shown_sound(sh: &Shared) -> Option<&SoundEffect> {
+    sh.effects.sound_playing().or_else(|| sh.effects.chosen_sound())
 }
 
 /// Which way shuffle is: 0 off, 1 at random moments, 2 at scene cuts.
@@ -535,9 +557,16 @@ impl EffectPanel {
         }
         match line {
             Line::Defaults => self.defaults(sh),
+            Line::StylesFolder => {
+                let dir = crate::art::styles_dir();
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    log::warn!("making {}: {e}", dir.display());
+                }
+                crate::logging::open_folder(&dir);
+            }
             // There's no "next" for a value along a bar.
-            Line::Drift | Line::DriftSpeed | Line::Shortest | Line::Longest | Line::Fade | Line::Randomise => {}
-            Line::Setting(spec) if spec.kind == SettingKind::Number => {}
+            Line::Drift | Line::DriftSpeed | Line::Shortest | Line::Longest | Line::Fade | Line::Randomise | Line::SoundPairing => {}
+            Line::Setting(spec) | Line::SoundSetting(spec) if spec.kind == SettingKind::Number => {}
             _ => self.change(sh, line, 1.0, false),
         }
     }
@@ -565,6 +594,9 @@ impl EffectPanel {
             Line::Effect => {
                 // Each effect in turn, either way round.
                 let ids: Vec<String> = sh.effects.list().iter().map(|e| e.id.clone()).collect();
+                if ids.is_empty() {
+                    return;
+                }
                 let current = sh.effects.remembered().map(|e| e.id.clone());
                 let at = ids.iter().position(|id| Some(id) == current.as_ref()).map_or(if direction > 0.0 { -1 } else { 0 }, |at| at as i64);
                 let next = ids[(at + direction as i64).rem_euclid(ids.len() as i64) as usize].clone();
@@ -588,12 +620,35 @@ impl EffectPanel {
             }
             Line::Fade => set_shuffle(sh, Shuffle { fade: timed(shuffle.fade, FADE), ..shuffle }),
             Line::Randomise => set_shuffle(sh, Shuffle { randomise: timed(shuffle.randomise, RANDOMISE), ..shuffle }),
+            Line::SoundPairing => set_shuffle(sh, Shuffle { sounds: timed(shuffle.sounds, PAIRING), ..shuffle }),
+            Line::SoundPower => {
+                let on = sh.effects.sound_is_on();
+                let (effects, db) = sh.effects_mut();
+                effects.set_sound_on(!on, db);
+            }
+            Line::Sound => {
+                // Each sound effect in turn, either way round.
+                let ids: Vec<String> = sh.effects.sound_effects().iter().map(|s| s.id.clone()).collect();
+                if ids.is_empty() {
+                    return;
+                }
+                let current = sh.effects.chosen_sound().map(|s| s.id.clone());
+                let at = ids.iter().position(|id| Some(id) == current.as_ref()).map_or(if direction > 0.0 { -1 } else { 0 }, |at| at as i64);
+                let next = ids[(at + direction as i64).rem_euclid(ids.len() as i64) as usize].clone();
+                let (effects, db) = sh.effects_mut();
+                effects.choose_sound(Some(&next), db);
+            }
             Line::Setting(spec) => {
                 let Some(id) = sh.effects.chosen().map(|e| e.id.clone()) else { return };
                 let Some(value) = changed(spec, sh.effects.value(&id, &spec.key), direction.into()) else { return };
                 self.set(sh, &id, spec, value, held);
             }
-            Line::Defaults => {}
+            Line::SoundSetting(spec) => {
+                let Some(id) = shown_sound(sh).map(|s| sound_settings_id(&s.id)) else { return };
+                let Some(value) = changed(spec, sh.effects.value(&id, &spec.key), direction.into()) else { return };
+                self.set(sh, &id, spec, value, held);
+            }
+            Line::StylesFolder | Line::Defaults => {}
         }
     }
 
@@ -624,8 +679,10 @@ impl EffectPanel {
             }
             Line::Fade => set_shuffle(sh, Shuffle { fade: timed(FADE), ..shuffle }),
             Line::Randomise => set_shuffle(sh, Shuffle { randomise: timed(RANDOMISE), ..shuffle }),
-            Line::Setting(spec) => {
-                let Some(id) = sh.effects.chosen().map(|e| e.id.clone()) else { return };
+            Line::SoundPairing => set_shuffle(sh, Shuffle { sounds: timed(PAIRING), ..shuffle }),
+            Line::Setting(spec) | Line::SoundSetting(spec) => {
+                let id = if matches!(line, Line::Setting(_)) { sh.effects.chosen().map(|e| e.id.clone()) } else { shown_sound(sh).map(|s| sound_settings_id(&s.id)) };
+                let Some(id) = id else { return };
                 let (min, max) = (spec.min.unwrap_or(0.0), spec.max.unwrap_or(100.0));
                 let value = number(along(min + f64::from(fraction) * (max - min), 0.0, min, max, step_of(spec, min, max)));
                 self.set(sh, &id, spec, value, !released);
@@ -639,9 +696,9 @@ impl EffectPanel {
         let (shuffle, drift) = (sh.effects.shuffle(), sh.effects.drift());
         let timed = |value: f32, (min, max, _): (f32, f32, f32)| Some(Bar { min, max, value });
         let chosen = sh.effects.chosen();
-        let on_off = |on: bool| (if on { "on" } else { "off" }).to_owned();
         match line {
-            Line::Power => ("Effects".into(), (if sh.effects.is_on() { "On" } else { "Off" }).into(), None),
+            Line::Power => ("Video effects".into(), (if sh.effects.is_on() { "On" } else { "Off" }).into(), None),
+            Line::SoundPower => ("Sound effects".into(), (if sh.effects.sound_is_on() { "On" } else { "Off" }).into(), None),
             Line::Effect => ("Effect".into(), sh.effects.remembered().map_or("None".into(), |e| e.manifest.name.clone()), None),
             Line::Drift => ("Drift".into(), if drift.amount > 0.0 { format!("{}%", drift.amount) } else { "Off".into() }, timed(drift.amount, DRIFT)),
             Line::DriftSpeed => ("Drift speed".into(), format!("{}%", drift.speed), timed(drift.speed, DRIFT_SPEED)),
@@ -651,23 +708,39 @@ impl EffectPanel {
             Line::Longest => ("Longest turn".into(), seconds(shuffle.longest), timed(shuffle.longest, TURN)),
             Line::Fade => ("Fade".into(), if shuffle.fade > 0.0 { seconds(shuffle.fade) } else { "Off".into() }, timed(shuffle.fade, FADE)),
             Line::Randomise => ("Random settings".into(), if shuffle.randomise > 0.0 { format!("{}%", shuffle.randomise) } else { "Off".into() }, timed(shuffle.randomise, RANDOMISE)),
+            Line::SoundPairing => ("Sound effects".into(), if shuffle.sounds > 0.0 { format!("{}% of turns", shuffle.sounds) } else { "Off".into() }, timed(shuffle.sounds, PAIRING)),
+            Line::Sound => {
+                let picked = sh.effects.chosen_sound().map_or("None".to_owned(), |s| s.name.clone());
+                let value = if sh.effects.pairs_sounds() { format!("Shuffled: {}", sh.effects.sound_playing().map_or("none now", |s| s.name.as_str())) } else { picked };
+                ("Sound".into(), value, None)
+            }
+            Line::SoundSetting(spec) => {
+                let Some(sound) = shown_sound(sh) else { return (spec.label.clone(), String::new(), None) };
+                let value = sh.effects.value(&sound_settings_id(&sound.id), &spec.key);
+                let (_, shown, bar) = Self::describe_value(sh, spec, value, false);
+                (format!("{} · {}", sound.name, spec.label), shown, bar)
+            }
+            Line::StylesFolder => ("Your own styles".into(), "Open the folder".into(), None),
             Line::Defaults => ("Back to the defaults".into(), String::new(), None),
-            Line::Setting(spec) => {
-                let value = chosen.and_then(|e| sh.effects.value(&e.id, &spec.key));
-                match spec.kind {
-                    SettingKind::Bool => (spec.label.clone(), on_off(value.and_then(Value::as_bool).unwrap_or(false)), None),
-                    SettingKind::Choice => {
-                        let id = value.and_then(Value::as_str).unwrap_or("");
-                        (spec.label.clone(), spec.options.iter().find(|o| o.id == id).map_or(id.to_owned(), |o| o.label.clone()), None)
-                    }
-                    _ => {
-                        let (min, max) = (spec.min.unwrap_or(0.0), spec.max.unwrap_or(100.0));
-                        let n = value.and_then(Value::as_f64).unwrap_or(min);
-                        // The bar shows where it's drifted to, the number what it's set to.
-                        let live = sh.effects.live_number(spec).unwrap_or(n);
-                        (spec.label.clone(), format!("{n}{}", spec.unit), Some(Bar { min: min as f32, max: max as f32, value: live as f32 }))
-                    }
-                }
+            Line::Setting(spec) => Self::describe_value(sh, spec, chosen.and_then(|e| sh.effects.value(&e.id, &spec.key)), true),
+        }
+    }
+
+    /// A setting's row, with its value. `drifts`: a video effect's numbers wander (see Drift),
+    /// and the bar shows where they've got to.
+    fn describe_value(sh: &Shared, spec: &SettingSpec, value: Option<&Value>, drifts: bool) -> (String, String, Option<Bar>) {
+        let on_off = |on: bool| (if on { "on" } else { "off" }).to_owned();
+        match spec.kind {
+            SettingKind::Bool => (spec.label.clone(), on_off(value.and_then(Value::as_bool).unwrap_or(false)), None),
+            SettingKind::Choice => {
+                let id = value.and_then(Value::as_str).unwrap_or("");
+                (spec.label.clone(), spec.options.iter().find(|o| o.id == id).map_or(id.to_owned(), |o| o.label.clone()), None)
+            }
+            _ => {
+                let (min, max) = (spec.min.unwrap_or(0.0), spec.max.unwrap_or(100.0));
+                let n = value.and_then(Value::as_f64).unwrap_or(min);
+                let live = if drifts { sh.effects.live_number(spec).unwrap_or(n) } else { n };
+                (spec.label.clone(), format!("{n}{}", spec.unit), Some(Bar { min: min as f32, max: max as f32, value: live as f32 }))
             }
         }
     }
@@ -675,7 +748,11 @@ impl EffectPanel {
     /// The help for the selected row.
     fn help(sh: &Shared, line: &Line) -> String {
         match line {
-            Line::Power => "Turns every effect off or back on. What you've set up here is kept.".into(),
+            Line::Power => "Turns every video effect off or back on. What you've set up here is kept.".into(),
+            Line::SoundPower if crate::sound_effects::unavailable() => {
+                "⚠ Sound effects need Flex's own libmpv, and this one isn't it, so the sound stays as it is.".into()
+            }
+            Line::SoundPower => "Turns sound effects off or on, separately from the video effects.".into(),
             Line::Effect => {
                 match (&sh.effects.status, sh.effects.remembered()) {
                     (Some((false, error)), _) => format!("⚠ {error}"),
@@ -695,8 +772,25 @@ impl EffectPanel {
             Line::Shortest | Line::Longest => "Each effect stays for a random time between these.".into(),
             Line::Fade => "How long one effect takes to fade into the next. Off switches instantly.".into(),
             Line::Randomise => "Each time an effect comes up, its settings move this far at random from yours, which aren't changed.".into(),
+            Line::SoundPairing => "How often an effect comes with a sound effect, picked at random. It changes and fades with the picture. Off: the sound effect picked on the Sound row plays throughout.".into(),
+            Line::Sound if crate::sound_effects::unavailable() => {
+                "⚠ Sound effects need Flex's own libmpv, and this one isn't it, so the sound stays as it is.".into()
+            }
+            Line::Sound => match (sh.effects.pairs_sounds(), sh.effects.chosen_sound()) {
+                (true, _) => "Shuffle is picking the sound effects (Shuffle → Sound effects). The one picked here plays when that's off.".into(),
+                (false, Some(sound)) => sound.description.clone(),
+                (false, None) => "Sound effects change the film's sound, on their own or alongside a video effect.".into(),
+            },
+            Line::StylesFolder => {
+                let note = crate::art::note();
+                let note = if note.is_empty() { String::new() } else { format!(" ({note})") };
+                format!(
+                    "Any picture you put in this folder becomes a style to pick above, named after its file{note}. Bold, textured pictures make the strongest: paintings, prints, mosaics, fabric. {}",
+                    crate::art::styles_dir().display()
+                )
+            }
             Line::Defaults => String::new(),
-            Line::Setting(spec) => spec.detail.clone(),
+            Line::Setting(spec) | Line::SoundSetting(spec) => spec.detail.clone(),
         }
     }
 

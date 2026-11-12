@@ -1,11 +1,6 @@
 // Topographic Map: depth is height. Contour lines every so often, a heavier one every fifth, a
 // colour for each height, and shading as if lit from the north-west.
 
-vec2 depth_slope(vec2 uv, float reach) {
-    vec2 e = reach / u_resolution;
-    return vec2(depth_at(uv + vec2(e.x, 0.0)) - depth_at(uv - vec2(e.x, 0.0)), depth_at(uv + vec2(0.0, e.y)) - depth_at(uv - vec2(0.0, e.y)));
-}
-
 vec3 land(float h) {
     if (h < 0.18) return mix(vec3(0.05, 0.2, 0.5), vec3(0.2, 0.55, 0.75), h / 0.18);
     if (h < 0.45) return mix(vec3(0.3, 0.6, 0.25), vec3(0.75, 0.75, 0.4), (h - 0.18) / 0.27);

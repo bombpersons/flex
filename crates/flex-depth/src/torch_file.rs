@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::Tensors;
 
@@ -58,7 +58,7 @@ enum Value {
 
 fn ints(v: &Value) -> Result<Vec<usize>> {
     match v {
-        Value::Tuple(items) => items.iter().map(|i| if let Value::Int(n) = i { Ok(*n as usize) } else { bail!("pickle: expected a number") }).collect(),
+        Value::Tuple(items) => items.iter().map(|i| if let Value::Int(n) = i { usize::try_from(*n).context("pickle: a negative size") } else { bail!("pickle: expected a number") }).collect(),
         _ => bail!("pickle: expected a tuple of numbers"),
     }
 }
@@ -179,7 +179,7 @@ fn unpickle(data: &[u8]) -> Result<Value> {
                         let (Some(Value::Storage(storage)), Some(Value::Int(offset)), Some(size), Some(stride)) = (args.first(), args.get(1), args.get(2), args.get(3)) else {
                             bail!("pickle: bad tensor")
                         };
-                        Value::Tensor { storage: storage.clone(), offset: *offset as usize, size: ints(size)?, stride: ints(stride)? }
+                        Value::Tensor { storage: storage.clone(), offset: usize::try_from(*offset).context("pickle: a negative offset")?, size: ints(size)?, stride: ints(stride)? }
                     }
                     other => bail!("pickle: won't call {other}"),
                 });
@@ -215,15 +215,17 @@ pub fn read(bytes: &[u8], key: Option<&str>) -> Result<Tensors> {
         let (Value::Str(name), Value::Tensor { storage, offset, size, stride }) = (name, t) else { continue };
         let raw = files.get(&format!("{root}data/{storage}")).with_context(|| format!("{name}: no storage {storage}"))?;
         let floats: Vec<f32> = raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
-        let count: usize = size.iter().product();
-        let mut values = Vec::with_capacity(count);
+        let count = size.iter().try_fold(1usize, |n, s| n.checked_mul(*s)).with_context(|| format!("{name}: too big"))?;
+        ensure!(stride.len() == size.len(), "{name}: {} strides for {} sizes", stride.len(), size.len());
+        // (More values than the storage holds only with a stride of 0: room for what it holds.)
+        let mut values = Vec::with_capacity(count.min(floats.len()));
         for n in 0..count {
-            let (mut rest, mut at) = (n, *offset);
+            let (mut rest, mut at) = (n, Some(*offset));
             for (s, st) in size.iter().zip(stride).rev() {
-                at += (rest % s) * st;
+                at = at.and_then(|at| at.checked_add((rest % s).checked_mul(*st)?));
                 rest /= s;
             }
-            values.push(*floats.get(at).with_context(|| format!("{name}: out of its storage"))?);
+            values.push(*at.and_then(|at| floats.get(at)).with_context(|| format!("{name}: out of its storage"))?);
         }
         out.insert(name.clone(), (size.clone(), values));
     }

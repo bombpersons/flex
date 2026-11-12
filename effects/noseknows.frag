@@ -1,6 +1,6 @@
 // Follow Your Nose: a cone of light from each nose, along the way the head points.
 
-vec3 hue(float h) {
+vec3 soft_hue(float h) {
     return 0.55 + 0.45 * cos(6.2832 * (h + vec3(0.0, 0.33, 0.67)));
 }
 
@@ -21,7 +21,7 @@ vec4 effect(vec2 uv) {
         float spread = (size.y * 0.08 + x * 0.16) * s_width;
         float beam = x > 0.0 ? (1.0 - smoothstep(spread * 0.5, spread, abs(y))) * (1.0 - smoothstep(reach * 0.5, reach, x)) : 0.0;
         float spot = exp(-dot(p, p) / max(size.y * size.y * 0.02, 1e-6));
-        c += hue(float(i) * 0.31 + u_time * 0.05) * (beam * 0.7 + spot * 0.6) * u_face_seen[i];
+        c += soft_hue(float(i) * 0.31 + u_time * 0.05) * (beam * 0.7 + spot * 0.6) * u_face_seen[i];
     }
     return vec4(c, 1.0);
 }

@@ -1,5 +1,5 @@
-//! The networks taking turns on the GPU. Depth, faces and movement each have a thread, and left
-//! to themselves they'd run at once and each take as long as all of them. Here one runs at a
+//! The networks taking turns on the GPU. Depth, faces, movement, the camera and restyling each
+//! have a thread, and left to themselves they'd run at once and each take as long as all of them. Here one runs at a
 //! time, in the order they asked, and they're told how long to rest so that together they leave
 //! the GPU time to draw the picture.
 
@@ -108,6 +108,21 @@ pub fn rest(net: Net, own: Duration) -> Duration {
     own.mul_f32(stretch(&s.nets, Instant::now()))
 }
 
+/// How long a network that failed waits before it's tried again: a failure may not last (no
+/// network while downloading, say), but trying every frame would hammer whatever's wrong.
+pub const RETRY_FAILED: Duration = Duration::from_secs(30);
+
+/// For a worker's `wanted()` when its network has failed: whether to keep waiting before trying
+/// again. `since` is when the failure was first seen here, and is cleared when it's time.
+pub fn still_failed(since: &mut Option<Instant>) -> bool {
+    let first = *since.get_or_insert_with(Instant::now);
+    if first.elapsed() < RETRY_FAILED {
+        return true;
+    }
+    *since = None;
+    false
+}
+
 /// For the F3 window: what each network running costs.
 pub fn describe() -> Option<String> {
     let s = state();
@@ -151,6 +166,15 @@ mod tests {
         let long_ago = now.checked_sub(ACTIVE * 2);
         let nets = [net(40.0, 40.0, Some(now)), net(40.0, 40.0, long_ago), Seen::default(), Seen::default(), Seen::default()];
         assert!((stretch(&nets, now) - 1.0 / BUDGET).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_failure_is_tried_again_after_a_while() {
+        let mut since = None;
+        assert!(still_failed(&mut since), "not straight away");
+        since = Instant::now().checked_sub(RETRY_FAILED * 2);
+        assert!(!still_failed(&mut since));
+        assert_eq!(since, None, "the next failure waits from when it's seen");
     }
 
     #[test]

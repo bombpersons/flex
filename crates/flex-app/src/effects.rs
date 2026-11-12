@@ -23,7 +23,7 @@ use flex_plugin::serde_json;
 use crate::mpv::Mpv;
 use crate::picture::{Picture, Upscale};
 use crate::shared::Shared;
-use crate::signals::{Cuts, FlowGl, HistoryGl, HistorySpot, PlateGl, Stats};
+use crate::signals::{Cuts, FlowGl, HistoryGl, HistorySpot, PlateGl, Stats, delete_target};
 
 /// How often the shader file is checked for changes.
 const RECHECK: Duration = Duration::from_millis(500);
@@ -527,9 +527,11 @@ static SOUND_UNIFORMS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::n
 const HEADER: &str = "\
 uniform sampler2D u_video;
 // With restyle = \"<setting>\": u_video is the picture redrawn in the style picked, once one has
-// come (u_has_restyled is 1), and u_original the real one.
+// come (u_has_restyled is 1), and u_original the real one. u_restyled_size is how many pixels
+// the network drew it at (it's scaled up to the video's size), or 0.
 uniform sampler2D u_original;
 uniform float u_has_restyled;
+uniform vec2 u_restyled_size;
 uniform sampler2D u_prev;
 uniform vec2 u_resolution;
 uniform float u_time;
@@ -576,6 +578,12 @@ uniform vec4 u_ground;
 float depth_at(vec2 uv) {
     vec2 p = (uv - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
     return texture(u_depth, p).r * u_has_depth;
+}
+// How depth changes across a point on screen, from `reach` pixels either side: x to the right
+// and y up, bigger where it comes nearer that way.
+vec2 depth_slope(vec2 uv, float reach) {
+    vec2 e = reach / u_resolution;
+    return vec2(depth_at(uv + vec2(e.x, 0.0)) - depth_at(uv - vec2(e.x, 0.0)), depth_at(uv + vec2(0.0, e.y)) - depth_at(uv - vec2(0.0, e.y)));
 }
 uniform sampler2D u_masks;
 uniform float u_has_masks;
@@ -642,7 +650,8 @@ vec2 world_pin(vec2 uv, float distance) {
     return mix(uv, world_to_screen(ray).xy, u_world_ready);
 }
 // world_pin for something that shouldn't be lost: as it goes out of the picture it comes back
-// towards uv, instead of staying where the camera has left it.
+// towards uv, instead of staying where the camera has left it (and it's uv while the camera isn't
+// known, as world_pin is).
 vec2 world_pin_nearby(vec2 uv, float distance) {
     vec2 pin = world_pin(uv, distance);
     vec2 p = (pin - u_video_rect.xy) / max(u_video_rect.zw - u_video_rect.xy, vec2(1e-6));
@@ -651,6 +660,11 @@ vec2 world_pin_nearby(vec2 uv, float distance) {
 // How far away something is that depth_at would call `near`.
 float world_distance(float near) {
     return 1.0 / max(u_world_depth.x * near + u_world_depth.y, 0.02);
+}
+// How tall something `size` big in the world looks on screen, `away` from the camera, as a share
+// of the screen's height.
+float screen_size(float size, float away) {
+    return u_world_lens.x * size / max(away, 1e-3) / u_world_lens.z * (u_video_rect.w - u_video_rect.y);
 }
 uniform sampler2D u_normals;
 uniform float u_has_normals;
@@ -732,7 +746,8 @@ vec2 face_uv(vec2 uv) {
     return m.xy / max(m.a, 1e-4);
 }
 int face_there(vec2 uv) {
-    vec4 m = texelFetch(u_face_map, ivec2(uv * vec2(textureSize(u_face_map, 0))), 0);
+    ivec2 size = textureSize(u_face_map, 0);
+    vec4 m = texelFetch(u_face_map, clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1), 0);
     return m.a * u_has_face_map > 0.01 ? int(m.z * 8.0 + 0.5) - 1 : -1;
 }
 float skin_at(vec2 uv) { return texture(u_face_parts, uv).r * u_has_face_map; }
@@ -781,6 +796,32 @@ float hair_at(vec2 uv) {
 vec2 face_point(int face, int point) {
     return u_face_points[face * 5 + point];
 }
+// A face's points with the screen's shape taken out (multiplied by `aspect`), and its own up and
+// across: its eyes, the middle between them, nose and middle of the mouth; how far apart the eyes
+// are (spread), and how far it is from them to the mouth (height).
+struct Face {
+    vec2 right, left, eyes, nose, mouth, up, across;
+    float spread, height;
+};
+Face face_frame(int i, vec2 aspect) {
+    Face f;
+    f.right = face_point(i, 0) * aspect;
+    f.left = face_point(i, 1) * aspect;
+    f.eyes = 0.5 * (f.right + f.left);
+    f.nose = face_point(i, 2) * aspect;
+    f.mouth = 0.5 * (face_point(i, 3) + face_point(i, 4)) * aspect;
+    f.height = max(length(f.eyes - f.mouth), 0.004);
+    f.up = (f.eyes - f.mouth) / f.height;
+    f.across = vec2(f.up.y, -f.up.x);
+    f.spread = max(length(f.left - f.right), f.height * 0.55);
+    return f;
+}
+// How much of a soft oval `p` is in, turned with the face; half_size is across and up the face,
+// in face_frame's units.
+float oval(vec2 p, vec2 centre, Face f, vec2 half_size) {
+    vec2 rel = p - centre;
+    return 1.0 - smoothstep(0.7, 1.0, length(vec2(dot(rel, f.across), dot(rel, f.up)) / half_size));
+}
 // How much of a face is at a point on screen, from 0 to 1, soft at the edges.
 float face_at(vec2 uv) {
     float amount = 0.0;
@@ -807,8 +848,8 @@ int who_at(vec2 uv) {
     }
     return best;
 }
-// How long the frame on screen has been in its shot, in seconds, and 1 on a cut, fading to 0 in
-// about half a second (with cuts = true). u_since_cut is huge until the first cut.
+// 1 on a cut, fading to 0 in about half a second; and how long the frame on screen has been in
+// its shot, in seconds (with cuts = true). u_since_cut is huge until the first cut.
 uniform float u_cut;
 uniform float u_since_cut;
 // When this shot began, in seconds into the video: the same all through a shot, and 0 until the
@@ -841,8 +882,9 @@ uniform float u_history_rate;
 vec3 history_at(vec2 uv, float seconds) {
     float frames = clamp(seconds * u_history_rate, 0.0, max(u_history_count - 1.0, 0.0));
     float older = floor(frames);
-    vec3 a = texture(u_history, vec3(uv, mod(u_history_head - older + 240.0, 24.0))).rgb;
-    vec3 b = texture(u_history, vec3(uv, mod(u_history_head - older - 1.0 + 240.0, 24.0))).rgb;
+    float frames_kept = max(float(textureSize(u_history, 0).z), 1.0);
+    vec3 a = texture(u_history, vec3(uv, mod(u_history_head - older, frames_kept))).rgb;
+    vec3 b = texture(u_history, vec3(uv, mod(u_history_head - older - 1.0, frames_kept))).rgb;
     return mix(a, b, u_history_count > older + 1.0 ? frames - older : 0.0);
 }
 // How a point of the screen is moving, in screen widths and heights a second (with flow = true).
@@ -865,6 +907,47 @@ vec3 plate_at(vec2 uv) {
 }
 float plate_known(vec2 uv) {
     return textureLod(u_plate, uv, 0.0).a * u_has_plate;
+}
+// A random number from 0 to 1 for a point.
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+float hash(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.1137, 0.1279));
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+// Smooth noise from 0 to 1, changing about once a unit, and five octaves of it (fbm), from 0 to
+// about 1.
+float noise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+float fbm(vec2 p) {
+    float sum = 0.0, amount = 0.5;
+    for (int i = 0; i < 5; i++) {
+        sum += amount * noise(p);
+        p = p * 2.03 + vec2(17.1, 9.2);
+        amount *= 0.5;
+    }
+    return sum;
+}
+// A rainbow colour, going round once as t goes from 0 to 1.
+vec3 hue(float t) {
+    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
+}
+// A colour with its hue turned by `a` radians.
+vec3 hue_rotate(vec3 c, float a) {
+    vec3 k = vec3(0.57735);
+    return c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
+}
+// A point turned anticlockwise by `a` radians about the origin.
+vec2 rotate(vec2 p, float a) {
+    float c = cos(a), s = sin(a);
+    return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
 }
 ";
 
@@ -900,6 +983,9 @@ fn copy_source(version: &str, embedded: bool) -> String {
          flex_color = vec4(picture * (1.0 - words.a) + words.rgb, 1.0);\n}}\n"
     )
 }
+
+/// Said when the GPU has too few texture units for `u_original`.
+const NO_ORIGINAL: &str = "This GPU can't give effects the real picture beside the restyled one";
 
 /// The first line of a compiler log, for the status line (the whole log goes to the log).
 fn first_line(log: &str) -> &str {
@@ -988,7 +1074,14 @@ impl Renderer {
             if self.objects.as_ref().is_none_or(|o| o.window != window || o.size != size) {
                 self.free_objects(gl);
                 let rgba8 = [(glow::RGBA8, glow::UNSIGNED_BYTE)];
-                match create_target(gl, window, &rgba8).and_then(|video| Ok((video, create_target(gl, size, &rgba8)?))) {
+                let made = create_target(gl, window, &rgba8).and_then(|video| match create_target(gl, size, &rgba8) {
+                    Ok(cropped) => Ok((video, cropped)),
+                    Err(e) => {
+                        delete_target(gl, video);
+                        Err(e)
+                    }
+                });
+                match made {
                     Ok((video, cropped)) => self.objects = Some(Objects { window, size, video, cropped }),
                     Err(e) => {
                         log::warn!("video effects: {e}");
@@ -1022,8 +1115,7 @@ impl Renderer {
             // Subtitles go on top of the effect, not through it.
             if self.words.as_ref().is_some_and(|(_, at)| *at != window || !frame.subtitles) {
                 if let Some((words, _)) = self.words.take() {
-                    gl.delete_framebuffer(words.fbo);
-                    gl.delete_texture(words.texture);
+                    delete_target(gl, words);
                 }
                 self.held_words.free(gl);
             }
@@ -1062,23 +1154,23 @@ impl Renderer {
             }
             match &frame.depth {
                 Some(link) => self.depth.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
-                None => self.depth.delay = 0.0,
+                None => self.depth.lateness.delay = 0.0,
             }
             match &frame.faces {
                 Some(link) => self.faces.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
-                None => self.faces.delay = 0.0,
+                None => self.faces.lateness.delay = 0.0,
             }
             match &frame.motion {
                 Some(link) => self.motion.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
-                None => self.motion.delay = 0.0,
+                None => self.motion.lateness.delay = 0.0,
             }
             match &frame.camera {
                 Some(link) => self.camera.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
-                None => self.camera.delay = 0.0,
+                None => self.camera.lateness.delay = 0.0,
             }
             match &frame.restyle {
                 Some(link) => self.restyle.update(gl, link, &self.cuts, source, size, rect, source_time, frame.video_time),
-                None => self.restyle.delay = 0.0,
+                None => self.restyle.lateness.delay = 0.0,
             }
             // The picture is held back to the frame the networks have caught up with.
             let held_back = self.held_back();
@@ -1148,30 +1240,8 @@ impl Renderer {
             gl.disable(glow::BLEND);
             gl.bind_vertex_array(Some(vao));
 
-            // What every effect is given.
-            let audio = frame.audio.as_deref();
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
-            if let Some(spectrum) = self.spectrum {
-                gl.active_texture(glow::TEXTURE2);
-                gl.bind_texture(glow::TEXTURE_2D, Some(spectrum));
-                if let Some(a) = audio {
-                    let bytes: &[u8] = std::slice::from_raw_parts(a.spectrum.as_ptr().cast(), a.spectrum.len() * 4);
-                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
-                    let (w, h) = (audio::BANDS as i32, audio::HISTORY as i32);
-                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(bytes)));
-                }
-            }
-            gl.active_texture(glow::TEXTURE3);
-            gl.bind_texture(glow::TEXTURE_2D, depth_texture);
-            gl.active_texture(glow::TEXTURE4);
-            gl.bind_texture(glow::TEXTURE_2D, mask_texture);
-            gl.active_texture(glow::TEXTURE13);
-            gl.bind_texture(glow::TEXTURE_2D, normal_texture);
-            gl.active_texture(glow::TEXTURE14);
-            gl.bind_texture(glow::TEXTURE_2D, more_textures.map(|t| t[0]));
-            gl.active_texture(glow::TEXTURE15);
-            gl.bind_texture(glow::TEXTURE_2D, more_textures.map(|t| t[1]));
+            // The restyled picture or living texture first: drawing it uses texture units of its
+            // own, so the ones every effect is given are bound after.
             let history = if frame.needs.history { self.history.texture() } else { None };
             let flow = if frame.needs.flow { network_flow.or_else(|| self.flow.at(pts)) } else { None };
             let plate = if frame.needs.plate { self.plate.texture() } else { None };
@@ -1181,18 +1251,31 @@ impl Renderer {
                 (None, None) => None,
             };
             gl.bind_vertex_array(Some(vao));
-            gl.active_texture(glow::TEXTURE5);
-            gl.bind_texture(glow::TEXTURE_2D_ARRAY, history);
-            gl.active_texture(glow::TEXTURE6);
-            gl.bind_texture(glow::TEXTURE_2D, flow);
-            gl.active_texture(glow::TEXTURE7);
-            gl.bind_texture(glow::TEXTURE_2D, plate);
-            gl.active_texture(glow::TEXTURE8);
-            gl.bind_texture(glow::TEXTURE_2D, if frame.needs.mesh { self.faces.mesh_texture } else { None });
+
+            // What every effect is given.
+            let audio = frame.audio.as_deref();
+            Unit::Video.bind(gl, Some(video_texture));
+            if let Some(spectrum) = self.spectrum {
+                Unit::Spectrum.bind(gl, Some(spectrum));
+                if let Some(a) = audio {
+                    let bytes: &[u8] = std::slice::from_raw_parts(a.spectrum.as_ptr().cast(), a.spectrum.len() * 4);
+                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                    let (w, h) = (audio::BANDS as i32, audio::HISTORY as i32);
+                    gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(bytes)));
+                }
+            }
+            Unit::Depth.bind(gl, depth_texture);
+            Unit::Masks.bind(gl, mask_texture);
+            Unit::Normals.bind(gl, normal_texture);
+            Unit::Masks2.bind(gl, more_textures.map(|t| t[0]));
+            Unit::Masks3.bind(gl, more_textures.map(|t| t[1]));
+            Unit::History.bind(gl, history);
+            Unit::Flow.bind(gl, flow);
+            Unit::Plate.bind(gl, plate);
+            Unit::Mesh.bind(gl, if frame.needs.mesh { self.faces.mesh_texture } else { None });
             let map_textures = self.faces.map.as_ref().filter(|_| has_face_map).map(|m| m.textures());
-            for (i, unit) in [glow::TEXTURE9, glow::TEXTURE10, glow::TEXTURE11, glow::TEXTURE12].into_iter().enumerate() {
-                gl.active_texture(unit);
-                gl.bind_texture(glow::TEXTURE_2D, map_textures.map(|t| t[i]));
+            for (i, unit) in [Unit::FaceMap, Unit::FaceParts, Unit::FaceParts2, Unit::FaceAtlas].into_iter().enumerate() {
+                unit.bind(gl, map_textures.map(|t| t[i]));
             }
             let given = Given {
                 dt,
@@ -1215,22 +1298,25 @@ impl Renderer {
                 shot,
                 world: if frame.camera.is_some() { self.camera.at(pts) } else { None },
                 has_restyled: restyled.is_some(),
-                original: if self.units > 16 { 16 } else { 0 },
+                restyled_size: if frame.restyle.is_some() { self.restyle.shown_size } else { (0, 0) },
+                original: if self.units > 16 { ORIGINAL_UNIT as i32 } else { 0 },
             };
 
             // The effects, each at its working size. One drawing on the restyled picture has it
             // as u_video, and the real one as u_original.
             let picture_for = |effect: &ActiveEffect| if effect.restyle { restyled.unwrap_or(video_texture) } else { video_texture };
+            // Every unit up to 16 is taken: without a 17th, u_original is the restyled picture.
+            if self.units <= 16 && effect.restyle && self.slots[front].status.as_ref().is_some_and(|(_, (ok, _))| *ok) {
+                self.slots[front].status = Some((effect.shader.clone(), (false, NO_ORIGINAL.into())));
+            }
             if self.units > 16 {
-                gl.active_texture(glow::TEXTURE16);
+                gl.active_texture(glow::TEXTURE0 + ORIGINAL_UNIT);
                 gl.bind_texture(glow::TEXTURE_2D, Some(video_texture));
             }
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(picture_for(effect)));
+            Unit::Video.bind(gl, Some(picture_for(effect)));
             self.slots[front].draw(gl, effect, &given);
             if let Some((from, _)) = &frame.fading {
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(picture_for(from)));
+                Unit::Video.bind(gl, Some(picture_for(from)));
                 self.slots[back].draw(gl, from, &given);
             }
 
@@ -1262,17 +1348,13 @@ impl Renderer {
             gl.uniform_1_f32(gl.get_uniform_location(copy, "u_flip").as_ref(), flip);
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
 
-            gl.bind_texture(glow::TEXTURE_2D, None);
-            for unit in [glow::TEXTURE1, glow::TEXTURE2, glow::TEXTURE3, glow::TEXTURE4, glow::TEXTURE6, glow::TEXTURE7, glow::TEXTURE8, glow::TEXTURE9, glow::TEXTURE10, glow::TEXTURE11, glow::TEXTURE12, glow::TEXTURE13] {
-                gl.active_texture(unit);
-                gl.bind_texture(glow::TEXTURE_2D, None);
+            for unit in Unit::ALL {
+                unit.bind(gl, None);
             }
             if self.units > 16 {
-                gl.active_texture(glow::TEXTURE16);
+                gl.active_texture(glow::TEXTURE0 + ORIGINAL_UNIT);
                 gl.bind_texture(glow::TEXTURE_2D, None);
             }
-            gl.active_texture(glow::TEXTURE5);
-            gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_vertex_array(None);
             gl.use_program(None);
@@ -1317,16 +1399,16 @@ impl Renderer {
 
     /// How far behind the picture is being held (seconds), which the sound has to match.
     pub fn held_back(&self) -> f32 {
-        self.depth.delay.max(self.faces.delay).max(self.motion.delay).max(self.camera.delay).max(self.restyle.delay)
+        self.depth.lateness.delay.max(self.faces.lateness.delay).max(self.motion.lateness.delay).max(self.camera.lateness.delay).max(self.restyle.lateness.delay)
     }
 
-    /// Whether a scene cut has reached `shown` in the video since this was last asked.
     /// What's known of the shot on the screen, for choosing an effect to suit it.
     pub fn shot_hint(&self) -> flex_core::effects::ShotHint {
         let r = self.shots.reading();
         flex_core::effects::ShotHint { size: r.knows_size.then_some(r.size), scene: r.knows_scene.then_some(r.scene) }
     }
 
+    /// Whether a scene cut has reached `shown` in the video since this was last asked.
     pub fn cut_shown(&mut self, shown: f32) -> bool {
         self.cuts.due.take_if(|at| *at <= shown).is_some()
     }
@@ -1342,6 +1424,9 @@ impl Renderer {
             match gl.create_vertex_array() {
                 Ok(vao) => {
                     self.units = gl.get_parameter_i32(glow::MAX_TEXTURE_IMAGE_UNITS);
+                    if self.units <= 16 {
+                        log::warn!("video effects: {NO_ORIGINAL} ({} texture units)", self.units);
+                    }
                     self.vao = Some(vao);
                     self.copy = Some(copy);
                     self.spectrum = create_spectrum(gl).map_err(|e| log::warn!("video effects: no spectrum texture: {e}")).ok();
@@ -1360,17 +1445,91 @@ impl Renderer {
             self.held.free(gl);
             self.held_words.free(gl);
             if let Some((words, _)) = self.words.take() {
-                gl.delete_framebuffer(words.fbo);
-                gl.delete_texture(words.texture);
+                delete_target(gl, words);
             }
         }
         if let Some(o) = self.objects.take() {
             unsafe {
                 for t in [o.video, o.cropped] {
-                    gl.delete_framebuffer(t.fbo);
-                    gl.delete_texture(t.texture);
+                    delete_target(gl, t);
                 }
             }
+        }
+    }
+}
+
+/// The texture units every effect is given, each under a uniform of its own: bound before
+/// effects draw (`u_prev` by each), and let go after.
+#[derive(Clone, Copy)]
+enum Unit {
+    Video,
+    Prev,
+    Spectrum,
+    Depth,
+    Masks,
+    History,
+    Flow,
+    Plate,
+    Mesh,
+    FaceMap,
+    FaceParts,
+    FaceParts2,
+    FaceAtlas,
+    Normals,
+    Masks2,
+    Masks3,
+}
+
+/// `u_original`'s unit, when there's a 17th: the real picture, beside a restyled one.
+const ORIGINAL_UNIT: u32 = 16;
+
+impl Unit {
+    const ALL: [Unit; 16] = [
+        Unit::Video,
+        Unit::Prev,
+        Unit::Spectrum,
+        Unit::Depth,
+        Unit::Masks,
+        Unit::History,
+        Unit::Flow,
+        Unit::Plate,
+        Unit::Mesh,
+        Unit::FaceMap,
+        Unit::FaceParts,
+        Unit::FaceParts2,
+        Unit::FaceAtlas,
+        Unit::Normals,
+        Unit::Masks2,
+        Unit::Masks3,
+    ];
+
+    fn uniform(self) -> &'static str {
+        match self {
+            Unit::Video => "u_video",
+            Unit::Prev => "u_prev",
+            Unit::Spectrum => "u_spectrum",
+            Unit::Depth => "u_depth",
+            Unit::Masks => "u_masks",
+            Unit::History => "u_history",
+            Unit::Flow => "u_flow",
+            Unit::Plate => "u_plate",
+            Unit::Mesh => "u_mesh",
+            Unit::FaceMap => "u_face_map",
+            Unit::FaceParts => "u_face_parts",
+            Unit::FaceParts2 => "u_face_parts2",
+            Unit::FaceAtlas => "u_face_atlas",
+            Unit::Normals => "u_normals",
+            Unit::Masks2 => "u_masks2",
+            Unit::Masks3 => "u_masks3",
+        }
+    }
+
+    /// Puts `texture` on this unit, leaving it the active one.
+    unsafe fn bind(self, gl: &glow::Context, texture: Option<glow::Texture>) {
+        let target = if matches!(self, Unit::History) { glow::TEXTURE_2D_ARRAY } else { glow::TEXTURE_2D };
+        unsafe {
+            gl.active_texture(glow::TEXTURE0 + self as u32);
+            gl.bind_texture(target, texture);
         }
     }
 }
@@ -1396,8 +1555,10 @@ struct Given<'a> {
     has_more_masks: bool,
     faces: &'a FaceUniforms,
     has_face_map: bool,
-    /// Whether there's a restyled picture yet, and the unit the real one's on.
+    /// Whether there's a restyled picture yet, the size the network drew it at, and the unit
+    /// the real one's on.
     has_restyled: bool,
+    restyled_size: (usize, usize),
     original: i32,
 }
 
@@ -1473,8 +1634,7 @@ impl Slot {
                 }
                 (a, b) => {
                     for t in [a, b].into_iter().flatten() {
-                        gl.delete_framebuffer(t.fbo);
-                        gl.delete_texture(t.texture);
+                        delete_target(gl, t);
                     }
                     Err("framebuffers incomplete".into())
                 }
@@ -1490,11 +1650,11 @@ impl Slot {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(out.fbo));
             gl.viewport(0, 0, self.size.0, self.size.1);
             gl.use_program(Some(program));
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(prev.texture));
+            Unit::Prev.bind(gl, Some(prev.texture));
             let at = |name: &str| gl.get_uniform_location(program, name);
-            gl.uniform_1_i32(at("u_video").as_ref(), 0);
-            gl.uniform_1_i32(at("u_prev").as_ref(), 1);
+            for unit in Unit::ALL {
+                gl.uniform_1_i32(at(unit.uniform()).as_ref(), unit as i32);
+            }
             gl.uniform_2_f32(at("u_resolution").as_ref(), self.size.0 as f32, self.size.1 as f32);
             let started = *self.started.get_or_insert_with(Instant::now);
             gl.uniform_1_f32(at("u_time").as_ref(), started.elapsed().as_secs_f32());
@@ -1521,15 +1681,12 @@ impl Slot {
             gl.uniform_1_f32(at("u_pace").as_ref(), given.shot.pace);
             gl.uniform_4_f32_slice(at("u_scene").as_ref(), &given.shot.scene);
             gl.uniform_1_f32(at("u_cut").as_ref(), given.since_cut.map_or(0.0, |s| (-s * 6.0).exp()));
-            gl.uniform_1_i32(at("u_history").as_ref(), 5);
             let spot = given.history.unwrap_or_default();
             gl.uniform_1_f32(at("u_has_history").as_ref(), if given.history.is_some() { 1.0 } else { 0.0 });
             gl.uniform_1_f32(at("u_history_head").as_ref(), spot.head);
             gl.uniform_1_f32(at("u_history_count").as_ref(), spot.count);
             gl.uniform_1_f32(at("u_history_rate").as_ref(), spot.rate);
-            gl.uniform_1_i32(at("u_flow").as_ref(), 6);
             gl.uniform_1_f32(at("u_has_flow").as_ref(), if given.has_flow { 1.0 } else { 0.0 });
-            gl.uniform_1_i32(at("u_plate").as_ref(), 7);
             gl.uniform_1_f32(at("u_has_plate").as_ref(), if given.has_plate { 1.0 } else { 0.0 });
             let stats = given.stats;
             gl.uniform_1_f32(at("u_brightness").as_ref(), stats.brightness);
@@ -1544,19 +1701,13 @@ impl Slot {
             gl.uniform_1_f32(at("u_mid").as_ref(), level(|a| a.mid));
             gl.uniform_1_f32(at("u_treble").as_ref(), level(|a| a.treble));
             gl.uniform_1_f32(at("u_beat").as_ref(), level(|a| a.beat));
-            gl.uniform_1_i32(at("u_spectrum").as_ref(), 2);
             for (i, name) in SOUND_UNIFORMS.iter().enumerate() {
                 gl.uniform_1_f32(at(name).as_ref(), given.audio.and_then(|a| a.kinds.get(i).copied()).unwrap_or(0.0));
             }
-            gl.uniform_1_i32(at("u_depth").as_ref(), 3);
             gl.uniform_1_f32(at("u_has_depth").as_ref(), if given.has_depth { 1.0 } else { 0.0 });
             gl.uniform_4_f32(at("u_ground").as_ref(), given.ground[0], given.ground[1], given.ground[2], given.ground[3]);
-            gl.uniform_1_i32(at("u_masks").as_ref(), 4);
             gl.uniform_1_f32(at("u_has_masks").as_ref(), if given.has_masks { 1.0 } else { 0.0 });
-            gl.uniform_1_i32(at("u_normals").as_ref(), 13);
             gl.uniform_1_f32(at("u_has_normals").as_ref(), if given.has_normals { 1.0 } else { 0.0 });
-            gl.uniform_1_i32(at("u_masks2").as_ref(), 14);
-            gl.uniform_1_i32(at("u_masks3").as_ref(), 15);
             gl.uniform_1_f32(at("u_has_more_masks").as_ref(), if given.has_more_masks { 1.0 } else { 0.0 });
             let faces = given.faces;
             gl.uniform_1_i32(at("u_face_count").as_ref(), faces.count);
@@ -1566,14 +1717,12 @@ impl Slot {
             gl.uniform_4_f32_slice(at("u_face_turn").as_ref(), &faces.turn);
             gl.uniform_3_f32_slice(at("u_face_open").as_ref(), &faces.open);
             gl.uniform_1_f32_slice(at("u_face_mesh").as_ref(), &faces.mesh);
-            gl.uniform_1_i32(at("u_mesh").as_ref(), 8);
-            for (i, name) in ["u_face_map", "u_face_parts", "u_face_parts2", "u_face_atlas"].into_iter().enumerate() {
-                gl.uniform_1_i32(at(name).as_ref(), 9 + i as i32);
-            }
             gl.uniform_1_f32(at("u_has_face_map").as_ref(), if given.has_face_map { 1.0 } else { 0.0 });
             let restyled = effect.restyle && given.has_restyled;
             gl.uniform_1_i32(at("u_original").as_ref(), if restyled { given.original } else { 0 });
             gl.uniform_1_f32(at("u_has_restyled").as_ref(), if restyled { 1.0 } else { 0.0 });
+            let drawn = if restyled { given.restyled_size } else { (0, 0) };
+            gl.uniform_2_f32(at("u_restyled_size").as_ref(), drawn.0 as f32, drawn.1 as f32);
             for (name, value) in &effect.uniforms {
                 gl.uniform_1_f32(at(name).as_ref(), *value);
             }
@@ -1595,8 +1744,7 @@ impl Slot {
     unsafe fn free_targets(&mut self, gl: &glow::Context) {
         for t in self.out.take().into_iter().flatten() {
             unsafe {
-                gl.delete_framebuffer(t.fbo);
-                gl.delete_texture(t.texture);
+                delete_target(gl, t);
             }
         }
     }
@@ -1685,6 +1833,256 @@ pub(crate) struct Fence(pub(crate) glow::Fence);
 
 unsafe impl Send for Fence {}
 
+/// The picture without black bars (`rect`, 0–1 from the bottom left) in pixels of a frame of
+/// `size`, at least a pixel each way: x0, y0, x1, y1.
+fn picture_box(rect: [f32; 4], size: (i32, i32)) -> [i32; 4] {
+    let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
+    let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
+    [x0, y0, x1, y1]
+}
+
+/// Draws `from`'s box `src` into `to`'s box `dst`, smoothly.
+unsafe fn blit(gl: &glow::Context, from: glow::Framebuffer, src: [i32; 4], to: glow::Framebuffer, dst: [i32; 4]) {
+    unsafe {
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from));
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(to));
+        gl.blit_framebuffer(src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3], glow::COLOR_BUFFER_BIT, glow::LINEAR);
+    }
+}
+
+/// What a frame is drawn small into to be read back, and the buffer it's read back through.
+struct Capture {
+    target: Target,
+    pbo: glow::Buffer,
+    size: (usize, usize),
+}
+
+/// Frames read back for a worker, a frame late so the CPU never waits for the GPU. `X` is
+/// anything else that goes with a frame.
+struct Readback<X = ()> {
+    capture: Option<Capture>,
+    /// The frame being read back: its fence, its position, and what goes with it.
+    pending: Option<(Fence, f32, X)>,
+    /// The position of the last frame read back, so a paused frame isn't read again and again.
+    last_time: Option<f32>,
+    /// The position of the last frame handed to the worker.
+    handed: Option<f32>,
+}
+
+impl<X> Default for Readback<X> {
+    fn default() -> Self {
+        Self { capture: None, pending: None, last_time: None, handed: None }
+    }
+}
+
+impl<X: Copy> Readback<X> {
+    /// Makes sure frames are read back at `size`, letting go of anything at another size.
+    unsafe fn ensure(&mut self, gl: &glow::Context, size: (usize, usize)) -> Result<(), String> {
+        if self.capture.as_ref().is_some_and(|c| c.size == size) {
+            return Ok(());
+        }
+        unsafe {
+            self.free(gl);
+            let target = create_target(gl, (size.0 as i32, size.1 as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)])?;
+            let pbo = match gl.create_buffer() {
+                Ok(pbo) => pbo,
+                Err(e) => {
+                    delete_target(gl, target);
+                    return Err(e);
+                }
+            };
+            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
+            gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (size.0 * size.1 * 4) as i32, glow::STREAM_READ);
+            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+            self.capture = Some(Capture { target, pbo, size });
+        }
+        Ok(())
+    }
+
+    /// Whether to read back the frame at `time`: nothing's being read back, and it's a new one.
+    fn wants(&self, time: f32) -> bool {
+        self.pending.is_none() && self.last_time != Some(time)
+    }
+
+    /// Starts reading back the frame at `time`, once `draw` has drawn it into the capture;
+    /// what `draw` returns goes with it.
+    unsafe fn read(&mut self, gl: &glow::Context, time: f32, draw: impl FnOnce(&Capture) -> X) {
+        let Some(c) = &self.capture else { return };
+        self.last_time = Some(time);
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            let extra = draw(c);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(c.target.fbo));
+            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(c.pbo));
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+            gl.read_pixels(0, 0, c.size.0 as i32, c.size.1 as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
+            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+            if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+                self.pending = Some((Fence(fence), time, extra));
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+    }
+
+    /// Starts reading back the frame at `time`: the box `from` of `video`, filling the capture.
+    unsafe fn read_box(&mut self, gl: &glow::Context, video: glow::Framebuffer, from: [i32; 4], time: f32, extra: X) {
+        let draw = |c: &Capture| {
+            unsafe { blit(gl, video, from, c.target.fbo, [0, 0, c.size.0 as i32, c.size.1 as i32]) };
+            extra
+        };
+        unsafe { self.read(gl, time, draw) }
+    }
+
+    /// Picks up the frame being read back, if it's there and `ready` says so for its position:
+    /// `take` gets its pixels (RGBA, bottom row first), their size, its position and what goes
+    /// with it.
+    unsafe fn collect(&mut self, gl: &glow::Context, ready: impl FnOnce(f32) -> bool, take: impl FnOnce(&[u8], (usize, usize), f32, X)) {
+        let Some((Fence(fence), time, extra)) = self.pending.filter(|p| ready(p.1)) else { return };
+        unsafe {
+            match gl.client_wait_sync(fence, 0, 0) {
+                glow::TIMEOUT_EXPIRED => {}
+                status => {
+                    gl.delete_sync(fence);
+                    self.pending = None;
+                    if let (true, Some(c)) = (status != glow::WAIT_FAILED, &self.capture) {
+                        let bytes = c.size.0 * c.size.1 * 4;
+                        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(c.pbo));
+                        let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
+                        if !ptr.is_null() {
+                            take(std::slice::from_raw_parts(ptr, bytes), c.size, time, extra);
+                            gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                        }
+                        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hands a network the frame read back, once the cut finder's seen it: `give` gets its
+    /// pixels, their size, its position, whether the network should start again since the
+    /// last one it was given, and what goes with it.
+    unsafe fn hand_over(&mut self, gl: &glow::Context, cuts: &CutGl, give: impl FnOnce(Vec<u8>, (usize, usize), f32, bool, X)) {
+        let handed = self.handed;
+        let mut taken = None;
+        unsafe {
+            self.collect(gl, |time| cuts.has_seen(time), |pixels, size, time, extra| {
+                taken = Some(time);
+                give(pixels.to_vec(), size, time, cuts.reset_between(handed, time), extra);
+            });
+        }
+        if taken.is_some() {
+            self.handed = taken;
+        }
+    }
+
+    /// Lets go of the capture, and any frame being read back.
+    unsafe fn free(&mut self, gl: &glow::Context) {
+        unsafe {
+            if let Some((Fence(fence), _, _)) = self.pending.take() {
+                gl.delete_sync(fence);
+            }
+            if let Some(c) = self.capture.take() {
+                delete_target(gl, c.target);
+                gl.delete_buffer(c.pbo);
+            }
+        }
+    }
+
+    /// Back to having read nothing back.
+    unsafe fn release(&mut self, gl: &glow::Context) {
+        unsafe { self.free(gl) };
+        self.last_time = None;
+    }
+}
+
+/// How late what a worker makes arrives after its frame, and how far the picture is held back to
+/// match (seconds).
+#[derive(Default)]
+struct Lateness {
+    arrived: u32,
+    late: f32,
+    delay: f32,
+}
+
+impl Lateness {
+    /// Something made from the frame at `time` arrived at `clock`. `spare` is extra hold, as
+    /// `late` is an average.
+    fn arrived(&mut self, clock: f32, time: f32, spare: f32) {
+        let late = clock - time;
+        // Outside this, it's a seek and says nothing about how long the worker takes.
+        if (0.0..0.5).contains(&late) {
+            self.arrived += 1;
+            self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
+            if self.arrived >= HOLD_AFTER_MAPS {
+                self.delay = next_delay(self.delay, self.late + spare);
+            }
+        }
+    }
+}
+
+/// Of things made from frames at these positions, the one nearest `time`, and how far it is.
+pub(crate) fn nearest<T>(items: impl Iterator<Item = (T, f32)>, time: f32) -> Option<(T, f32)> {
+    items.map(|(item, at)| (item, (at - time).abs())).min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// Things made from frames, in a ring, each with its frame's position once it's been filled.
+struct TimedRing<T> {
+    items: Vec<(T, Option<f32>)>,
+    next: usize,
+}
+
+impl<T> Default for TimedRing<T> {
+    fn default() -> Self {
+        Self { items: Vec::new(), next: 0 }
+    }
+}
+
+impl<T> TimedRing<T> {
+    /// The one made from the frame nearest `time`, and its position, if it's within `reach`.
+    fn nearest(&self, time: f32, reach: f32) -> Option<(&T, f32)> {
+        let found = nearest(self.items.iter().filter_map(|(item, at)| at.map(|at| ((item, at), at))), time);
+        found.filter(|(_, away)| *away <= reach).map(|(item, _)| item)
+    }
+
+    /// Which slot the next goes in, going round `most`.
+    fn take_next(&mut self, most: usize) -> usize {
+        let slot = self.next;
+        self.next = (slot + 1) % most;
+        slot
+    }
+
+    /// None is shown again until it's filled anew.
+    fn forget(&mut self) {
+        self.items.iter_mut().for_each(|item| item.1 = None);
+    }
+
+    /// Going backwards to `time`: what's kept is from somewhere else.
+    fn forget_after(&mut self, time: f32) {
+        if self.items.iter().any(|(_, at)| at.is_some_and(|at| at > time)) {
+            self.forget();
+        }
+    }
+
+    /// Hands back everything, empty.
+    fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
+        self.next = 0;
+        self.items.drain(..).map(|(item, _)| item)
+    }
+}
+
+/// Adds what's come in for a frame to `list` (oldest first, at most `most`), after letting go of
+/// everything if it's gone backwards: what's kept is from somewhere else.
+fn keep_in_order<T>(list: &mut VecDeque<T>, item: T, time: impl Fn(&T) -> f32, most: usize) {
+    if list.back().is_some_and(|last| time(last) > time(&item)) {
+        list.clear();
+    }
+    list.push_back(item);
+    if list.len() > most {
+        list.pop_front();
+    }
+}
+
 /// Faces as the shader's uniforms.
 #[derive(Clone, Copy)]
 struct FaceUniforms {
@@ -1704,17 +2102,14 @@ impl Default for FaceUniforms {
     }
 }
 
-struct DepthObjects {
-    /// The picture shrunk to the model's size, and a buffer to read it back through.
-    capture: Target,
-    pbo: glow::Buffer,
-    /// The latest depth maps and the video frames they're of, for `u_depth`.
-    maps: Vec<(glow::Texture, Option<f32>)>,
-    /// `u_masks`, each to go with the depth map in the same place in `maps`.
-    masks: Vec<glow::Texture>,
-    /// `u_normals`, and `u_masks2` and `u_masks3`, likewise.
-    normals: Vec<glow::Texture>,
-    more: Vec<[glow::Texture; 2]>,
+/// What one depth map comes in: for `u_depth`, `u_masks`, `u_normals`, and `u_masks2` and
+/// `u_masks3`.
+#[derive(Clone, Copy)]
+struct DepthTextures {
+    depth: glow::Texture,
+    masks: glow::Texture,
+    normals: glow::Texture,
+    more: [glow::Texture; 2],
 }
 
 /// Depth maps kept, so a held-back frame can have the one made from it.
@@ -1802,23 +2197,24 @@ impl HeldFrames {
         self.frames.clear();
         for t in self.slots.drain(..) {
             unsafe {
-                gl.delete_framebuffer(t.fbo);
-                gl.delete_texture(t.texture);
+                delete_target(gl, t);
             }
         }
     }
 }
 
-/// Small frames read back for the depth worker (a frame late, so the CPU never waits for
-/// the GPU), and the depth maps it sends back as a texture.
+/// The furthest (seconds) a depth map is used from its frame: well past the time between maps
+/// on a slow GPU, but a map from before a seek, or from a worker that's stopped, isn't kept on.
+const DEPTH_REACH: f32 = 1.0;
+
+/// Small frames read back for the depth worker, and the depth maps it sends back as textures.
 #[derive(Default)]
 struct DepthGl {
-    gl: Option<DepthObjects>,
+    readback: Readback,
+    /// The latest depth maps and the video frames they're of.
+    maps: TimedRing<DepthTextures>,
     failed: bool,
-    pending: Option<Fence>,
-    /// The video time of the last frame sent, so a paused frame isn't sent again and again.
-    last_time: Option<f32>,
-    /// Whether masks have arrived, and normals and more masks with the latest map.
+    /// Whether masks, normals and more masks came with the latest map.
     has_masks: bool,
     has_normals: bool,
     has_more_masks: bool,
@@ -1826,28 +2222,20 @@ struct DepthGl {
     ground: [f32; 4],
     /// New clues to the shot, and the positions they're from.
     clues: Vec<(f32, crate::shot_type::Clues)>,
-    /// The newest depth map, and how many have arrived.
+    /// The newest depth map.
     serial: u64,
-    arrived: u32,
-    /// Which of `maps` the next depth map goes in.
-    next_map: usize,
-    /// The position of the frame being read back.
-    /// The position of the last frame handed to the worker.
-    handed: Option<f32>,
-    pending_time: f32,
-    /// How late depth maps arrive after their frame (seconds), on average.
-    late: f32,
-    /// How far the picture is being held back to match (seconds).
-    delay: f32,
+    lateness: Lateness,
 }
 
 impl DepthGl {
-    /// The depth map, masks, normals and more masks made from the frame nearest `time`.
+    /// The depth map, masks, normals and more masks made from the frame nearest `time`, if one's
+    /// within `DEPTH_REACH` of it.
     #[allow(clippy::type_complexity)]
     fn map_for(&self, time: f32) -> (Option<glow::Texture>, Option<glow::Texture>, Option<glow::Texture>, Option<[glow::Texture; 2]>) {
-        let Some(o) = self.gl.as_ref() else { return (None, None, None, None) };
-        let nearest = o.maps.iter().enumerate().filter_map(|(i, (_, at))| at.map(|at| (i, (at - time).abs()))).min_by(|a, b| a.1.total_cmp(&b.1)).map_or(0, |(i, _)| i);
-        (o.maps.get(nearest).map(|m| m.0), o.masks.get(nearest).copied(), o.normals.get(nearest).copied(), o.more.get(nearest).copied())
+        match self.maps.nearest(time, DEPTH_REACH) {
+            Some((m, _)) => (Some(m.depth), Some(m.masks), Some(m.normals), Some(m.more)),
+            None => (None, None, None, None),
+        }
     }
 
     /// Picks up a frame read back last time and hands it over, stores a new depth map, and
@@ -1860,62 +2248,40 @@ impl DepthGl {
             if self.failed {
                 return;
             }
-            if self.gl.is_none() {
-                match create_depth(gl) {
-                    Ok(o) => self.gl = Some(o),
+            if self.maps.items.is_empty() {
+                match self.readback.ensure(gl, (WIDTH, HEIGHT)).and_then(|()| create_depth_maps(gl)) {
+                    Ok(maps) => self.maps.items = maps.into_iter().map(|m| (m, None)).collect(),
                     Err(e) => {
                         log::warn!("depth: {e}");
+                        self.readback.free(gl);
                         self.failed = true;
                         return;
                     }
                 }
             }
-            let Some(o) = self.gl.as_mut() else { return };
-            let bytes = WIDTH * HEIGHT * 4;
-            if let Some(Fence(fence)) = self.pending.filter(|_| cuts.has_seen(self.pending_time)) {
-                match gl.client_wait_sync(fence, 0, 0) {
-                    glow::TIMEOUT_EXPIRED => {}
-                    status => {
-                        gl.delete_sync(fence);
-                        self.pending = None;
-                        if status != glow::WAIT_FAILED {
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(o.pbo));
-                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
-                            if !ptr.is_null() {
-                                let cut = cuts.reset_between(self.handed, self.pending_time);
-                                self.handed = Some(self.pending_time);
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), self.pending_time, cut);
-                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
-                            }
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                        }
-                    }
-                }
-            }
+            self.readback.hand_over(gl, cuts, |rgba, _, at, cut, ()| link.submit(rgba, at, cut));
             for map in link.take_maps() {
                 // A map carried to a frame may be followed by a better one of that frame.
-                let same = o.maps.iter().position(|(_, at)| *at == Some(map.time));
-                let slot = same.unwrap_or(self.next_map);
-                if same.is_none() {
-                    self.next_map = (slot + 1) % o.maps.len();
-                }
-                gl.bind_texture(glow::TEXTURE_2D, Some(o.maps[slot].0));
+                let most = self.maps.items.len();
+                let slot = self.maps.items.iter().position(|(_, at)| *at == Some(map.time)).unwrap_or_else(|| self.maps.take_next(most));
+                let o = self.maps.items[slot].0;
+                gl.bind_texture(glow::TEXTURE_2D, Some(o.depth));
                 gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
                 let data: &[u8] = std::slice::from_raw_parts(map.values.as_ptr().cast(), map.values.len() * 4);
                 let (w, h) = (WIDTH as i32, HEIGHT as i32);
                 gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(data)));
                 if let Some(masks) = &map.masks {
-                    gl.bind_texture(glow::TEXTURE_2D, Some(o.masks[slot]));
+                    gl.bind_texture(glow::TEXTURE_2D, Some(o.masks));
                     gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(masks)));
-                    self.has_masks = true;
                 }
+                self.has_masks = map.masks.is_some();
                 if let Some(normals) = &map.normals {
-                    gl.bind_texture(glow::TEXTURE_2D, Some(o.normals[slot]));
+                    gl.bind_texture(glow::TEXTURE_2D, Some(o.normals));
                     gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(normals)));
                 }
                 self.has_normals = map.normals.is_some();
                 if let Some(more) = &map.more_masks {
-                    for (texture, bytes) in o.more[slot].iter().zip(more) {
+                    for (texture, bytes) in o.more.iter().zip(more) {
                         gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
                         gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(bytes)));
                     }
@@ -1927,70 +2293,42 @@ impl DepthGl {
                 if let Some(clues) = map.clues {
                     self.clues.push((map.time, clues));
                 }
-                o.maps[slot].1 = Some(map.time);
-                let late = clock - map.time;
-                // Outside this, it's a seek and says nothing about how long depth takes.
-                if !map.ahead && (0.0..0.5).contains(&late) {
-                    self.arrived += 1;
-                    self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
-                    if self.arrived >= HOLD_AFTER_MAPS {
-                        self.delay = next_delay(self.delay, self.late);
-                    }
+                self.maps.items[slot].1 = Some(map.time);
+                if !map.ahead {
+                    self.lateness.arrived(clock, map.time, 0.0);
                 }
             }
-            if self.pending.is_none() && link.ready_for_frame(cuts.reset_between(self.handed, time)) && self.last_time != Some(time) {
-                self.last_time = Some(time);
-                self.pending_time = time;
+            if self.readback.wants(time) && link.ready_for_frame(cuts.reset_between(self.readback.handed, time)) {
                 // Just the picture, without black bars.
-                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
-                let (x1, y1) = ((rect[2] * size.0 as f32) as i32, (rect[3] * size.1 as f32) as i32);
-                gl.disable(glow::SCISSOR_TEST);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(o.capture.fbo));
-                gl.blit_framebuffer(x0, y0, x1.max(x0 + 1), y1.max(y0 + 1), 0, 0, WIDTH as i32, HEIGHT as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(o.capture.fbo));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(o.pbo));
-                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-                gl.read_pixels(0, 0, WIDTH as i32, HEIGHT as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                    self.pending = Some(Fence(fence));
-                }
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                self.readback.read_box(gl, video, picture_box(rect, size), time, ());
             }
         }
     }
 
     unsafe fn release(&mut self, gl: &glow::Context) {
         unsafe {
-            if let Some(Fence(fence)) = self.pending.take() {
-                gl.delete_sync(fence);
-            }
-            if let Some(o) = self.gl.take() {
-                gl.delete_framebuffer(o.capture.fbo);
-                gl.delete_texture(o.capture.texture);
-                gl.delete_buffer(o.pbo);
-                for (texture, _) in o.maps {
-                    gl.delete_texture(texture);
-                }
-                for texture in o.masks.into_iter().chain(o.normals).chain(o.more.into_iter().flatten()) {
+            self.readback.release(gl);
+            for o in self.maps.drain() {
+                for texture in [o.depth, o.masks, o.normals, o.more[0], o.more[1]] {
                     gl.delete_texture(texture);
                 }
             }
-            self.has_masks = false;
-            self.has_normals = false;
-            self.has_more_masks = false;
-            self.serial = 0;
-            self.arrived = 0;
-            self.next_map = 0;
-            self.delay = 0.0;
-            self.last_time = None;
         }
+        self.has_masks = false;
+        self.has_normals = false;
+        self.has_more_masks = false;
+        self.serial = 0;
+        self.lateness = Lateness::default();
+        self.failed = false;
     }
 }
 
 /// Restyled pictures kept, so a held-back frame can have the one made from it.
 const RESTYLED: usize = 4;
+/// The furthest (seconds) a restyled picture is moved along to a frame: well past the time
+/// between pictures, but not so far that one from before a seek, or from a worker that's
+/// stopped, is dragged about for long.
+const RESTYLE_REACH: f32 = 0.5;
 
 /// The fragment shader that moves a restyled picture along the movement to the frame shown,
 /// leaving the black bars as they are.
@@ -2007,29 +2345,22 @@ fn restyle_source(version: &str, embedded: bool) -> String {
     )
 }
 
-/// Frames read back for the restyling worker (a frame late, so the CPU never waits for the GPU),
-/// the restyled pictures it sends back, and the one for the frame shown, moved along with the
-/// picture to it.
+/// Frames read back for the restyling worker, at the size it asks for, the restyled pictures it
+/// sends back, and the one for the frame shown, moved along with the picture to it.
 #[derive(Default)]
 struct RestyleGl {
-    /// What frames are read back into, at the size the worker asked for.
-    capture: Option<(Target, glow::Buffer, (usize, usize))>,
+    readback: Readback,
     failed: bool,
-    pending: Option<Fence>,
-    pending_time: f32,
-    /// The video time of the last frame sent, and of the last handed over.
-    last_time: Option<f32>,
-    handed: Option<f32>,
-    /// Restyled pictures: texture, size, and the position of their frame.
-    pictures: Vec<(glow::Texture, (usize, usize), Option<f32>)>,
-    next: usize,
-    /// The restyled picture for the frame shown, the size of the video.
+    /// Restyled pictures: texture and size, with the position of their frame.
+    pictures: TimedRing<(glow::Texture, (usize, usize))>,
+    /// The style they're in, by id.
+    style: String,
+    /// The restyled picture for the frame shown, the size of the video, and the size the
+    /// network drew it at.
     out: Option<(Target, (i32, i32))>,
+    shown_size: (usize, usize),
     program: Option<glow::Program>,
-    /// How late pictures arrive after their frame (seconds), and the hold to match.
-    arrived: u32,
-    late: f32,
-    delay: f32,
+    lateness: Lateness,
 }
 
 impl RestyleGl {
@@ -2041,32 +2372,21 @@ impl RestyleGl {
             if self.failed {
                 return;
             }
-            if let Some(Fence(fence)) = self.pending.filter(|_| cuts.has_seen(self.pending_time)) {
-                match gl.client_wait_sync(fence, 0, 0) {
-                    glow::TIMEOUT_EXPIRED => {}
-                    status => {
-                        gl.delete_sync(fence);
-                        self.pending = None;
-                        if let (true, Some((_, pbo, (w, h)))) = (status != glow::WAIT_FAILED, &self.capture) {
-                            let bytes = w * h * 4;
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
-                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
-                            if !ptr.is_null() {
-                                let cut = cuts.reset_between(self.handed, self.pending_time);
-                                self.handed = Some(self.pending_time);
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), (*w, *h), self.pending_time, cut);
-                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
-                            }
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                        }
-                    }
-                }
+            self.readback.hand_over(gl, cuts, |rgba, size, at, cut, ()| link.submit(rgba, size, at, cut));
+            // Pictures in another style aren't shown once a new one's wanted.
+            let style = link.style();
+            if style != self.style {
+                self.pictures.forget();
+                self.style = style;
             }
             for picture in link.take() {
-                let slot = self.next;
-                if self.pictures.len() < RESTYLED {
+                if picture.style != self.style {
+                    continue;
+                }
+                let slot = self.pictures.take_next(RESTYLED);
+                if slot == self.pictures.items.len() {
                     match gl.create_texture() {
-                        Ok(t) => self.pictures.push((t, (0, 0), None)),
+                        Ok(t) => self.pictures.items.push(((t, (0, 0)), None)),
                         Err(e) => {
                             log::warn!("restyle: {e}");
                             self.failed = true;
@@ -2074,8 +2394,7 @@ impl RestyleGl {
                         }
                     }
                 }
-                self.next = (slot + 1) % RESTYLED;
-                let (texture, kept, at) = &mut self.pictures[slot];
+                let ((texture, kept), at) = &mut self.pictures.items[slot];
                 let (w, h) = (picture.size.0 as i32, picture.size.1 as i32);
                 gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
                 gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
@@ -2091,64 +2410,30 @@ impl RestyleGl {
                 }
                 gl.bind_texture(glow::TEXTURE_2D, None);
                 *at = Some(picture.time);
-                let late = clock - picture.time;
-                if (0.0..0.5).contains(&late) {
-                    self.arrived += 1;
-                    self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
-                    if self.arrived >= HOLD_AFTER_MAPS {
-                        self.delay = next_delay(self.delay, self.late);
-                    }
-                }
+                self.lateness.arrived(clock, picture.time, 0.0);
             }
-            if self.pending.is_none() && link.ready_for_frame(cuts.reset_between(self.handed, time)) && self.last_time != Some(time) {
+            if self.readback.wants(time) && link.ready_for_frame(cuts.reset_between(self.readback.handed, time)) {
                 // Just the picture, without black bars, at the size the worker wants for its shape.
-                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
-                let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
-                let wanted = link.size_for((x1 - x0) as f32 / (y1 - y0) as f32);
-                if self.capture.as_ref().is_none_or(|c| c.2 != wanted) {
-                    self.free_capture(gl);
-                    let made = create_target(gl, (wanted.0 as i32, wanted.1 as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|target| {
-                        let pbo = gl.create_buffer()?;
-                        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
-                        gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (wanted.0 * wanted.1 * 4) as i32, glow::STREAM_READ);
-                        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                        Ok((target, pbo, wanted))
-                    });
-                    match made {
-                        Ok(c) => self.capture = Some(c),
-                        Err(e) => {
-                            log::warn!("restyle: {e}");
-                            self.failed = true;
-                            return;
-                        }
-                    }
+                let from = picture_box(rect, size);
+                let wanted = link.size_for((from[2] - from[0]) as f32 / (from[3] - from[1]) as f32);
+                if let Err(e) = self.readback.ensure(gl, wanted) {
+                    log::warn!("restyle: {e}");
+                    self.failed = true;
+                    return;
                 }
-                let Some((target, pbo, (w, h))) = &self.capture else { return };
-                self.last_time = Some(time);
-                self.pending_time = time;
-                gl.disable(glow::SCISSOR_TEST);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target.fbo));
-                gl.blit_framebuffer(x0, y0, x1, y1, 0, 0, *w as i32, *h as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.fbo));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
-                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-                gl.read_pixels(0, 0, *w as i32, *h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                    self.pending = Some(Fence(fence));
-                }
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                self.readback.read_box(gl, video, from, time, ());
             }
         }
     }
 
     /// The restyled picture for the frame at `time`, the size of the video (`size`): the one
-    /// nearest it, moved along `flow` (if there's any) to it. None until there is one.
+    /// nearest it, moved along `flow` (if there's any) to it. None until there is one within
+    /// `RESTYLE_REACH`.
     #[allow(clippy::too_many_arguments)]
     unsafe fn draw(&mut self, gl: &glow::Context, version: egui_glow::ShaderVersion, vao: glow::VertexArray, video: glow::Texture, flow: Option<glow::Texture>, size: (i32, i32), rect: [f32; 4], time: f32) -> Option<glow::Texture> {
         unsafe {
-            let (texture, at) = self.pictures.iter().filter_map(|(t, _, at)| at.map(|at| (*t, at))).min_by(|a, b| (a.1 - time).abs().total_cmp(&(b.1 - time).abs()))?;
+            let (&(texture, drawn), at) = self.pictures.nearest(time, RESTYLE_REACH)?;
+            self.shown_size = drawn;
             if self.program.is_none() {
                 let decl = version.version_declaration();
                 match compile(gl, &vertex_source(decl), &restyle_source(decl, version.is_embedded())) {
@@ -2162,8 +2447,7 @@ impl RestyleGl {
             }
             if self.out.as_ref().is_none_or(|(_, s)| *s != size) {
                 if let Some((t, _)) = self.out.take() {
-                    gl.delete_framebuffer(t.fbo);
-                    gl.delete_texture(t.texture);
+                    delete_target(gl, t);
                 }
                 match create_target(gl, size, &[(glow::RGBA8, glow::UNSIGNED_BYTE)]) {
                     Ok(t) => self.out = Some((t, size)),
@@ -2205,39 +2489,22 @@ impl RestyleGl {
         }
     }
 
-    unsafe fn free_capture(&mut self, gl: &glow::Context) {
-        unsafe {
-            if let Some((target, pbo, _)) = self.capture.take() {
-                gl.delete_framebuffer(target.fbo);
-                gl.delete_texture(target.texture);
-                gl.delete_buffer(pbo);
-            }
-        }
-    }
-
     unsafe fn release(&mut self, gl: &glow::Context) {
         unsafe {
-            if let Some(Fence(fence)) = self.pending.take() {
-                gl.delete_sync(fence);
-            }
-            self.free_capture(gl);
-            for (texture, _, _) in self.pictures.drain(..) {
+            self.readback.release(gl);
+            for (texture, _) in self.pictures.drain() {
                 gl.delete_texture(texture);
             }
             if let Some((t, _)) = self.out.take() {
-                gl.delete_framebuffer(t.fbo);
-                gl.delete_texture(t.texture);
+                delete_target(gl, t);
             }
             if let Some(p) = self.program.take() {
                 gl.delete_program(p);
             }
-            self.next = 0;
-            self.arrived = 0;
-            self.delay = 0.0;
-            self.last_time = None;
-            self.handed = None;
-            self.failed = false;
         }
+        self.lateness = Lateness::default();
+        self.readback.handed = None;
+        self.failed = false;
     }
 }
 
@@ -2245,28 +2512,17 @@ impl RestyleGl {
 /// the next so faces glide at the screen's rate.
 #[derive(Default)]
 struct FaceGl {
-    objects: Option<(Target, glow::Buffer)>,
-    /// How many times the detector's size `objects` are.
-    scale: usize,
+    /// With each frame, how much of the capture the picture fills.
+    readback: Readback<(f32, f32)>,
     failed: bool,
-    pending: Option<(Fence, (f32, f32))>,
     /// Each face's mesh, a row each, for `u_mesh`.
     mesh_texture: Option<glow::Texture>,
     /// That mesh drawn into a map of the picture.
     map: Option<crate::face_map::FaceMap>,
     map_failed: bool,
-    /// The position of the last frame sent, and of the one being read back.
-    last_time: Option<f32>,
-    pending_time: f32,
-    /// The position of the last frame handed to the worker.
-    handed: Option<f32>,
     /// What's come in lately, oldest first.
     reports: VecDeque<crate::faces::Report>,
-    arrived: u32,
-    /// How late reports arrive after their frame (seconds), on average.
-    late: f32,
-    /// How far the picture is being held back to match (seconds).
-    delay: f32,
+    lateness: Lateness,
 }
 
 /// How long a camera report can be used from the frame it's of (seconds), and how many are kept.
@@ -2278,22 +2534,16 @@ const CAMERA_WIDTH: usize = 640;
 /// Gets frames to the camera worker, and keeps what it finds.
 #[derive(Default)]
 struct CameraGl {
-    objects: Option<(Target, glow::Buffer, (usize, usize))>,
+    readback: Readback,
     failed: bool,
-    pending: Option<Fence>,
-    pending_time: f32,
-    last_time: Option<f32>,
-    handed: Option<f32>,
     reports: VecDeque<crate::camera::Report>,
-    arrived: u32,
-    late: f32,
-    delay: f32,
+    lateness: Lateness,
 }
 
 impl CameraGl {
     /// The report for the frame nearest `time`.
     fn at(&self, time: f32) -> Option<crate::camera::Report> {
-        self.reports.iter().filter(|r| (r.time - time).abs() < CAMERA_REACH).min_by(|a, b| (a.time - time).abs().total_cmp(&(b.time - time).abs())).copied()
+        nearest(self.reports.iter().map(|r| (r, r.time)), time).filter(|(_, away)| *away < CAMERA_REACH).map(|(r, _)| *r)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2302,111 +2552,29 @@ impl CameraGl {
             if self.failed {
                 return;
             }
-            let aspect = (rect[2] - rect[0]) * size.0 as f32 / ((rect[3] - rect[1]) * size.1 as f32).max(1.0);
-            let want = (CAMERA_WIDTH, (((CAMERA_WIDTH as f32 / aspect.max(0.1)) / 2.0).round() as usize * 2).clamp(64, 1024));
-            if self.objects.as_ref().is_none_or(|o| o.2 != want) {
-                if self.pending.is_some() {
+            self.readback.hand_over(gl, cuts, |rgba, size, at, cut, ()| link.submit(rgba, size, at, cut));
+            for report in link.take_reports() {
+                self.lateness.arrived(clock, report.time, MOTION_SPARE);
+                keep_in_order(&mut self.reports, report, |r| r.time, CAMERA_KEPT);
+            }
+            if self.readback.wants(time) && link.ready_for_frame() {
+                let aspect = (rect[2] - rect[0]) * size.0 as f32 / ((rect[3] - rect[1]) * size.1 as f32).max(1.0);
+                let want = (CAMERA_WIDTH, (((CAMERA_WIDTH as f32 / aspect.max(0.1)) / 2.0).round() as usize * 2).clamp(64, 1024));
+                if let Err(e) = self.readback.ensure(gl, want) {
+                    log::warn!("camera: {e}");
+                    self.failed = true;
                     return;
                 }
-                if let Some((target, pbo, _)) = self.objects.take() {
-                    gl.delete_framebuffer(target.fbo);
-                    gl.delete_texture(target.texture);
-                    gl.delete_buffer(pbo);
-                }
-                let made = create_target(gl, (want.0 as i32, want.1 as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|capture| {
-                    let pbo = gl.create_buffer()?;
-                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
-                    gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (want.0 * want.1 * 4) as i32, glow::STREAM_READ);
-                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                    Ok((capture, pbo))
-                });
-                match made {
-                    Ok((capture, pbo)) => self.objects = Some((capture, pbo, want)),
-                    Err(e) => {
-                        log::warn!("camera: {e}");
-                        self.failed = true;
-                        return;
-                    }
-                }
-            }
-            let Some((capture, pbo, (w, h))) = self.objects.as_ref() else { return };
-            let (w, h) = (*w, *h);
-            let bytes = w * h * 4;
-            if let Some(Fence(fence)) = self.pending.filter(|_| cuts.has_seen(self.pending_time)) {
-                match gl.client_wait_sync(fence, 0, 0) {
-                    glow::TIMEOUT_EXPIRED => {}
-                    status => {
-                        gl.delete_sync(fence);
-                        self.pending = None;
-                        if status != glow::WAIT_FAILED {
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
-                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
-                            if !ptr.is_null() {
-                                let cut = cuts.reset_between(self.handed, self.pending_time);
-                                self.handed = Some(self.pending_time);
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), (w, h), self.pending_time, cut);
-                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
-                            }
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                        }
-                    }
-                }
-            }
-            for report in link.take_reports() {
-                let late = clock - report.time;
-                if (0.0..0.5).contains(&late) {
-                    self.arrived += 1;
-                    self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
-                    if self.arrived >= HOLD_AFTER_MAPS {
-                        self.delay = next_delay(self.delay, self.late + MOTION_SPARE);
-                    }
-                }
-                // Going backwards: what's kept is from somewhere else.
-                if self.reports.back().is_some_and(|r| r.time > report.time) {
-                    self.reports.clear();
-                }
-                self.reports.push_back(report);
-                if self.reports.len() > CAMERA_KEPT {
-                    self.reports.pop_front();
-                }
-            }
-            if self.pending.is_none() && link.ready_for_frame() && self.last_time != Some(time) {
-                self.last_time = Some(time);
-                self.pending_time = time;
-                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
-                let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
-                gl.disable(glow::SCISSOR_TEST);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(capture.fbo));
-                gl.blit_framebuffer(x0, y0, x1, y1, 0, 0, w as i32, h as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(capture.fbo));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
-                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-                gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                    self.pending = Some(Fence(fence));
-                }
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                self.readback.read_box(gl, video, picture_box(rect, size), time, ());
             }
         }
     }
 
     unsafe fn release(&mut self, gl: &glow::Context) {
-        unsafe {
-            if let Some(Fence(fence)) = self.pending.take() {
-                gl.delete_sync(fence);
-            }
-            if let Some((target, pbo, _)) = self.objects.take() {
-                gl.delete_framebuffer(target.fbo);
-                gl.delete_texture(target.texture);
-                gl.delete_buffer(pbo);
-            }
-            self.reports.clear();
-            self.arrived = 0;
-            self.delay = 0.0;
-            self.last_time = None;
-        }
+        unsafe { self.readback.release(gl) };
+        self.reports.clear();
+        self.lateness = Lateness::default();
+        self.failed = false;
     }
 }
 
@@ -2419,19 +2587,11 @@ const MOTION_SPARE: f32 = 0.02;
 /// Gets frames to the movement worker, and what it finds back into textures for effects.
 #[derive(Default)]
 struct NetFlowGl {
-    objects: Option<(Target, glow::Buffer)>,
+    readback: Readback,
     failed: bool,
-    pending: Option<Fence>,
-    pending_time: f32,
-    last_time: Option<f32>,
-    /// The position of the last frame handed to the worker.
-    handed: Option<f32>,
-    /// A texture of movement for each frame, with the frame's position once there's something in it.
-    kept: Vec<(Target, Option<f32>)>,
-    next: usize,
-    arrived: u32,
-    late: f32,
-    delay: f32,
+    /// A texture of movement for each frame.
+    kept: TimedRing<Target>,
+    lateness: Lateness,
     /// What the newest movement says about the camera, and how fast things are going in it.
     fit: Option<(crate::shot_type::Fit, f32)>,
 }
@@ -2444,127 +2604,73 @@ impl NetFlowGl {
             if self.failed {
                 return;
             }
-            if self.objects.is_none() {
+            if self.kept.items.is_empty() {
                 let float = [(glow::RGBA16F, glow::HALF_FLOAT)];
-                let made = create_target(gl, (WIDTH as i32, HEIGHT as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|capture| {
-                    let pbo = gl.create_buffer()?;
-                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
-                    gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (WIDTH * HEIGHT * 4) as i32, glow::STREAM_READ);
-                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                let made = self.readback.ensure(gl, (WIDTH, HEIGHT)).and_then(|()| {
                     let mut kept = Vec::with_capacity(MOTION_KEPT);
                     for _ in 0..MOTION_KEPT {
-                        kept.push((create_target(gl, (FLOW_WIDTH as i32, FLOW_HEIGHT as i32), &float)?, None));
+                        match create_target(gl, (FLOW_WIDTH as i32, FLOW_HEIGHT as i32), &float) {
+                            Ok(target) => kept.push((target, None)),
+                            Err(e) => {
+                                // Nothing made is kept.
+                                for (target, _) in kept {
+                                    delete_target(gl, target);
+                                }
+                                return Err(e);
+                            }
+                        }
                     }
-                    Ok((capture, pbo, kept))
+                    Ok(kept)
                 });
                 match made {
-                    Ok((capture, pbo, kept)) => {
-                        self.objects = Some((capture, pbo));
-                        self.kept = kept;
-                    }
+                    Ok(kept) => self.kept.items = kept,
                     Err(e) => {
                         log::warn!("flow: {e}");
+                        self.readback.free(gl);
                         self.failed = true;
                         return;
                     }
                 }
             }
-            let Some((capture, pbo)) = self.objects.as_ref() else { return };
-            let bytes = WIDTH * HEIGHT * 4;
-            if let Some(Fence(fence)) = self.pending.filter(|_| cuts.has_seen(self.pending_time)) {
-                match gl.client_wait_sync(fence, 0, 0) {
-                    glow::TIMEOUT_EXPIRED => {}
-                    status => {
-                        gl.delete_sync(fence);
-                        self.pending = None;
-                        if status != glow::WAIT_FAILED {
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
-                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
-                            if !ptr.is_null() {
-                                let cut = cuts.reset_between(self.handed, self.pending_time);
-                                self.handed = Some(self.pending_time);
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), self.pending_time, cut);
-                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
-                            }
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                        }
-                    }
-                }
-            }
+            self.readback.hand_over(gl, cuts, |rgba, _, at, cut, ()| link.submit(rgba, at, cut));
             for report in link.take_reports() {
-                let late = clock - report.time;
-                // Outside this, it's a seek and says nothing about how long the network takes.
-                if (0.0..0.5).contains(&late) {
-                    self.arrived += 1;
-                    self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
-                    if self.arrived >= HOLD_AFTER_MAPS {
-                        self.delay = next_delay(self.delay, self.late + MOTION_SPARE);
-                    }
-                }
-                // Going backwards: what's kept is from somewhere else.
-                if self.kept.iter().any(|(_, t)| t.is_some_and(|t| t > report.time)) {
-                    self.kept.iter_mut().for_each(|k| k.1 = None);
-                }
+                self.lateness.arrived(clock, report.time, MOTION_SPARE);
+                self.kept.forget_after(report.time);
                 if let Some(flow) = &report.flow {
                     let aspect = (rect[2] - rect[0]) * size.0 as f32 / ((rect[3] - rect[1]) * size.1 as f32).max(1.0);
                     self.fit = Some((crate::shot_type::fit(flow, (FLOW_WIDTH, FLOW_HEIGHT), aspect), crate::depth::fast_speed(flow)));
                 }
                 let texels = crate::flow::texels(report.flow.as_deref());
-                let slot = self.next;
-                self.next = (slot + 1) % MOTION_KEPT;
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.kept[slot].0.texture));
+                let slot = self.kept.take_next(MOTION_KEPT);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.kept.items[slot].0.texture));
                 gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
                 let data: &[u8] = std::slice::from_raw_parts(texels.as_ptr().cast(), texels.len() * 4);
                 gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, FLOW_WIDTH as i32, FLOW_HEIGHT as i32, glow::RGBA, glow::FLOAT, glow::PixelUnpackData::Slice(Some(data)));
                 gl.bind_texture(glow::TEXTURE_2D, None);
-                self.kept[slot].1 = Some(report.time);
+                self.kept.items[slot].1 = Some(report.time);
             }
-            if self.pending.is_none() && link.ready_for_frame() && self.last_time != Some(time) {
-                self.last_time = Some(time);
-                self.pending_time = time;
+            if self.readback.wants(time) && link.ready_for_frame() {
                 // The picture without black bars, squeezed to fill it, as flow is in fractions
                 // of the picture. In GL's rows, as everything else here.
-                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
-                let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
-                gl.disable(glow::SCISSOR_TEST);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(capture.fbo));
-                gl.blit_framebuffer(x0, y0, x1, y1, 0, 0, WIDTH as i32, HEIGHT as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(capture.fbo));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
-                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-                gl.read_pixels(0, 0, WIDTH as i32, HEIGHT as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                    self.pending = Some(Fence(fence));
-                }
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                self.readback.read_box(gl, video, picture_box(rect, size), time, ());
             }
         }
     }
 
     /// The movement worked out for the frame nearest `time`, if it's near enough.
     fn at(&self, time: f32) -> Option<glow::Texture> {
-        let nearest = self.kept.iter().filter_map(|(target, t)| t.map(|t| (target, (t - time).abs()))).min_by(|a, b| a.1.total_cmp(&b.1))?;
-        (nearest.1 <= MOTION_REACH).then_some(nearest.0.texture)
+        self.kept.nearest(time, MOTION_REACH).map(|(target, _)| target.texture)
     }
 
     unsafe fn release(&mut self, gl: &glow::Context) {
         unsafe {
-            if let Some((capture, pbo)) = self.objects.take() {
-                crate::signals::delete_target(gl, capture);
-                gl.delete_buffer(pbo);
-            }
-            for (target, _) in self.kept.drain(..) {
-                crate::signals::delete_target(gl, target);
-            }
-            if let Some(Fence(fence)) = self.pending.take() {
-                gl.delete_sync(fence);
+            self.readback.release(gl);
+            for target in self.kept.drain() {
+                delete_target(gl, target);
             }
         }
-        self.last_time = None;
-        self.delay = 0.0;
-        self.arrived = 0;
+        self.failed = false;
+        self.lateness = Lateness::default();
     }
 }
 
@@ -2620,10 +2726,10 @@ impl CutFinder {
 /// Reads back a tiny copy of each new frame (a frame late, so the CPU never waits for the GPU).
 #[derive(Default)]
 struct CutGl {
-    objects: Option<(Target, Target, glow::Buffer)>,
+    /// The tiny copy, and a halfway size it's made through.
+    readback: Readback,
+    halfway: Option<Target>,
     failed: bool,
-    pending: Option<(Fence, f32)>,
-    last_time: Option<f32>,
     finder: CutFinder,
     /// The newest cut found that hasn't reached the screen yet.
     due: Option<f32>,
@@ -2640,7 +2746,7 @@ struct CutGl {
 impl CutGl {
     /// Whether this has seen the frame at `time` yet, so a network can be told about it.
     fn has_seen(&self, time: f32) -> bool {
-        self.failed || self.objects.is_none() || self.seen_at.is_some_and(|seen| seen >= time)
+        self.failed || self.halfway.is_none() || self.seen_at.is_some_and(|seen| seen >= time)
     }
 
     /// Whether the networks should start again at the frame at `time`, having last been given
@@ -2650,103 +2756,59 @@ impl CutGl {
     }
 
     unsafe fn update(&mut self, gl: &glow::Context, video: glow::Framebuffer, size: (i32, i32), rect: [f32; 4], time: f32) {
-        let bytes = (CUT_SIZE.0 * CUT_SIZE.1 * 4) as usize;
-        let rgba8 = [(glow::RGBA8, glow::UNSIGNED_BYTE)];
         unsafe {
             if self.failed {
                 return;
             }
-            if self.objects.is_none() {
-                let made = create_target(gl, CUT_HALFWAY, &rgba8).and_then(|halfway| {
-                    let small = create_target(gl, CUT_SIZE, &rgba8)?;
-                    let pbo = gl.create_buffer()?;
-                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
-                    gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, bytes as i32, glow::STREAM_READ);
-                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                    Ok((halfway, small, pbo))
-                });
+            if self.halfway.is_none() {
+                let made = self.readback.ensure(gl, (CUT_SIZE.0 as usize, CUT_SIZE.1 as usize)).and_then(|()| create_target(gl, CUT_HALFWAY, &[(glow::RGBA8, glow::UNSIGNED_BYTE)]));
                 match made {
-                    Ok(o) => self.objects = Some(o),
+                    Ok(halfway) => self.halfway = Some(halfway),
                     Err(e) => {
                         log::warn!("scene cuts: {e}");
+                        self.readback.free(gl);
                         self.failed = true;
                         return;
                     }
                 }
             }
-            let Some((halfway, small, pbo)) = self.objects.as_ref() else { return };
-            if let Some((Fence(fence), at)) = self.pending {
-                match gl.client_wait_sync(fence, 0, 0) {
-                    glow::TIMEOUT_EXPIRED => {}
-                    status => {
-                        gl.delete_sync(fence);
-                        self.pending = None;
-                        if status != glow::WAIT_FAILED {
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
-                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
-                            if !ptr.is_null() {
-                                let tiny = std::slice::from_raw_parts(ptr, bytes);
-                                if self.seen_at.is_some_and(|last| at < last || at > last + 1.0) {
-                                    self.found.clear();
-                                    self.resets.clear();
-                                }
-                                self.seen_at = Some(at);
-                                let (cut, reset) = self.finder.look(tiny, at);
-                                if cut {
-                                    log::debug!("scene cut at {at:.3}");
-                                    self.due = Some(at);
-                                    self.found.add(at);
-                                    self.fresh = Some(at);
-                                }
-                                if reset || cut {
-                                    self.resets.add(at);
-                                }
-                                self.stats = self.stats.measure(tiny);
-                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
-                            }
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                        }
-                    }
+            let Some(halfway) = self.halfway.as_ref() else { return };
+            self.readback.collect(gl, |_| true, |tiny, _, at, ()| {
+                if self.seen_at.is_some_and(|last| at < last || at > last + 1.0) {
+                    self.found.clear();
+                    self.resets.clear();
                 }
-            }
-            if self.pending.is_none() && self.last_time != Some(time) {
-                self.last_time = Some(time);
-                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
-                let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
-                gl.disable(glow::SCISSOR_TEST);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(halfway.fbo));
-                gl.blit_framebuffer(x0, y0, x1, y1, 0, 0, CUT_HALFWAY.0, CUT_HALFWAY.1, glow::COLOR_BUFFER_BIT, glow::LINEAR);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(halfway.fbo));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(small.fbo));
-                gl.blit_framebuffer(0, 0, CUT_HALFWAY.0, CUT_HALFWAY.1, 0, 0, CUT_SIZE.0, CUT_SIZE.1, glow::COLOR_BUFFER_BIT, glow::LINEAR);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(small.fbo));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
-                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-                gl.read_pixels(0, 0, CUT_SIZE.0, CUT_SIZE.1, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                    self.pending = Some((Fence(fence), time));
+                self.seen_at = Some(at);
+                let (cut, reset) = self.finder.look(tiny, at);
+                if cut {
+                    log::debug!("scene cut at {at:.3}");
+                    self.due = Some(at);
+                    self.found.add(at);
+                    self.fresh = Some(at);
                 }
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                if reset || cut {
+                    self.resets.add(at);
+                }
+                self.stats = self.stats.measure(tiny);
+            });
+            if self.readback.wants(time) {
+                let halfway_box = [0, 0, CUT_HALFWAY.0, CUT_HALFWAY.1];
+                self.readback.read(gl, time, |small| {
+                    blit(gl, video, picture_box(rect, size), halfway.fbo, halfway_box);
+                    blit(gl, halfway.fbo, halfway_box, small.target.fbo, [0, 0, CUT_SIZE.0, CUT_SIZE.1]);
+                });
             }
         }
     }
 
     unsafe fn release(&mut self, gl: &glow::Context) {
         unsafe {
-            if let Some((Fence(fence), _)) = self.pending.take() {
-                gl.delete_sync(fence);
-            }
-            if let Some((halfway, small, pbo)) = self.objects.take() {
-                for t in [halfway, small] {
-                    gl.delete_framebuffer(t.fbo);
-                    gl.delete_texture(t.texture);
-                }
-                gl.delete_buffer(pbo);
+            self.readback.release(gl);
+            if let Some(halfway) = self.halfway.take() {
+                delete_target(gl, halfway);
             }
         }
-        self.last_time = None;
+        self.failed = false;
         self.finder = CutFinder::default();
         self.due = None;
         self.found.clear();
@@ -2814,96 +2876,33 @@ impl FaceGl {
             if self.failed {
                 return;
             }
+            // How many times the detector's size frames are read back at.
             let scale = link.scale();
-            if self.scale != scale {
-                self.free_capture(gl);
-                self.scale = scale;
-            }
             let (width, height) = (crate::faces::WIDTH * scale, crate::faces::HEIGHT * scale);
-            if self.objects.is_none() {
-                let made = create_target(gl, (width as i32, height as i32), &[(glow::RGBA8, glow::UNSIGNED_BYTE)]).and_then(|capture| {
-                    let pbo = gl.create_buffer()?;
-                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
-                    gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (width * height * 4) as i32, glow::STREAM_READ);
-                    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                    Ok((capture, pbo))
-                });
-                match made {
-                    Ok(o) => self.objects = Some(o),
-                    Err(e) => {
-                        log::warn!("faces: {e}");
-                        self.failed = true;
-                        return;
-                    }
-                }
+            if let Err(e) = self.readback.ensure(gl, (width, height)) {
+                log::warn!("faces: {e}");
+                self.failed = true;
+                return;
             }
-            let Some((capture, pbo)) = self.objects.as_ref() else { return };
-            let bytes = width * height * 4;
-            if let Some((Fence(fence), filled)) = self.pending.filter(|_| cuts.has_seen(self.pending_time)) {
-                match gl.client_wait_sync(fence, 0, 0) {
-                    glow::TIMEOUT_EXPIRED => {}
-                    status => {
-                        gl.delete_sync(fence);
-                        self.pending = None;
-                        if status != glow::WAIT_FAILED {
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
-                            let ptr = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, bytes as i32, glow::MAP_READ_BIT);
-                            if !ptr.is_null() {
-                                let cut = cuts.reset_between(self.handed, self.pending_time);
-                                self.handed = Some(self.pending_time);
-                                link.submit(std::slice::from_raw_parts(ptr, bytes).to_vec(), scale, filled, self.pending_time, cut);
-                                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
-                            }
-                            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                        }
-                    }
-                }
-            }
+            self.readback.hand_over(gl, cuts, |rgba, _, at, cut, filled| link.submit(rgba, scale, filled, at, cut));
             for report in link.take_reports() {
-                // Going backwards: what's kept is from somewhere else.
-                if self.reports.back().is_some_and(|r| report.time < r.time) {
-                    self.reports.clear();
-                }
-                let late = clock - report.time;
-                // Outside this, it's a seek and says nothing about how long faces take.
-                if (0.0..0.5).contains(&late) {
-                    self.arrived += 1;
-                    self.late = if self.arrived == 1 { late } else { self.late + (late - self.late) * 0.1 };
-                    if self.arrived >= HOLD_AFTER_MAPS {
-                        self.delay = next_delay(self.delay, self.late + FACE_SPARE);
-                    }
-                }
-                self.reports.push_back(report);
-                if self.reports.len() > FACE_REPORTS {
-                    self.reports.pop_front();
-                }
+                self.lateness.arrived(clock, report.time, FACE_SPARE);
+                keep_in_order(&mut self.reports, report, |r| r.time, FACE_REPORTS);
             }
-            if self.pending.is_none() && link.ready_for_frame() && self.last_time != Some(time) {
-                self.last_time = Some(time);
-                self.pending_time = time;
+            if self.readback.wants(time) && link.ready_for_frame() {
                 // The picture without black bars, its shape kept and the rest left black: a
                 // squashed face is harder to find. In GL's rows, the top of the picture is
                 // at the top of the capture.
-                let (x0, y0) = ((rect[0] * size.0 as f32) as i32, (rect[1] * size.1 as f32) as i32);
-                let (x1, y1) = (((rect[2] * size.0 as f32) as i32).max(x0 + 1), ((rect[3] * size.1 as f32) as i32).max(y0 + 1));
+                let [x0, y0, x1, y1] = picture_box(rect, size);
                 let fit = (width as f32 / (x1 - x0) as f32).min(height as f32 / (y1 - y0) as f32);
                 let (w, h) = ((((x1 - x0) as f32 * fit) as i32).clamp(1, width as i32), (((y1 - y0) as f32 * fit) as i32).clamp(1, height as i32));
-                gl.disable(glow::SCISSOR_TEST);
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(capture.fbo));
-                gl.clear_color(0.0, 0.0, 0.0, 1.0);
-                gl.clear(glow::COLOR_BUFFER_BIT);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video));
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(capture.fbo));
-                gl.blit_framebuffer(x0, y0, x1, y1, 0, height as i32 - h, w, height as i32, glow::COLOR_BUFFER_BIT, glow::LINEAR);
-                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(capture.fbo));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(*pbo));
-                gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-                gl.read_pixels(0, 0, width as i32, height as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
-                gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                if let Ok(fence) = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                    self.pending = Some((Fence(fence), (w as f32 / width as f32, h as f32 / height as f32)));
-                }
-                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                self.readback.read(gl, time, |capture| {
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(capture.target.fbo));
+                    gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                    blit(gl, video, [x0, y0, x1, y1], capture.target.fbo, [0, height as i32 - h, w, height as i32]);
+                    (w as f32 / width as f32, h as f32 / height as f32)
+                });
             }
         }
     }
@@ -2987,70 +2986,35 @@ impl FaceGl {
         }
     }
 
-    unsafe fn free_capture(&mut self, gl: &glow::Context) {
-        unsafe {
-            if let Some((Fence(fence), _)) = self.pending.take() {
-                gl.delete_sync(fence);
-            }
-            if let Some((capture, pbo)) = self.objects.take() {
-                gl.delete_framebuffer(capture.fbo);
-                gl.delete_texture(capture.texture);
-                gl.delete_buffer(pbo);
-            }
-        }
-    }
-
     unsafe fn release(&mut self, gl: &glow::Context) {
         unsafe {
-            self.free_capture(gl);
+            self.readback.release(gl);
             if let Some(texture) = self.mesh_texture.take() {
                 gl.delete_texture(texture);
             }
             if let Some(map) = self.map.take() {
                 map.release(gl);
             }
-            self.map_failed = false;
-            self.last_time = None;
-            self.reports.clear();
-            self.arrived = 0;
-            self.late = 0.0;
-            self.delay = 0.0;
         }
+        self.map_failed = false;
+        self.failed = false;
+        self.reports.clear();
+        self.lateness = Lateness::default();
     }
 }
 
-unsafe fn create_depth(gl: &glow::Context) -> Result<DepthObjects, String> {
+/// Textures for `DEPTH_MAPS` depth maps, starting empty.
+unsafe fn create_depth_maps(gl: &glow::Context) -> Result<Vec<DepthTextures>, String> {
     use crate::depth::{HEIGHT, WIDTH};
     unsafe {
         let size = (WIDTH as i32, HEIGHT as i32);
-        let capture = create_target(gl, size, &[(glow::RGBA8, glow::UNSIGNED_BYTE)])?;
-        let pbo = gl.create_buffer()?;
-        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
-        gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, (WIDTH * HEIGHT * 4) as i32, glow::STREAM_READ);
-        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
         let zeros = vec![0u8; WIDTH * HEIGHT * 4];
-        let mut maps = Vec::with_capacity(DEPTH_MAPS);
-        let mut masks = Vec::with_capacity(DEPTH_MAPS);
-        let mut normals = Vec::with_capacity(DEPTH_MAPS);
-        let (mut more_a, mut more_b) = (Vec::with_capacity(DEPTH_MAPS), Vec::with_capacity(DEPTH_MAPS));
-        for _ in 0..DEPTH_MAPS {
-            for list in [&mut masks, &mut normals, &mut more_a, &mut more_b] {
-                let texture = gl.create_texture()?;
-                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, size.0, size.1, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&zeros)));
-                for (param, value) in [
-                    (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
-                    (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
-                    (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
-                    (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
-                ] {
-                    gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
-                }
-                list.push(texture);
-            }
+        let mut made = Vec::new();
+        let mut texture = |internal: u32, format: u32, kind: u32| -> Result<glow::Texture, String> {
             let texture = gl.create_texture()?;
+            made.push(texture);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::R16F as i32, size.0, size.1, 0, glow::RED, glow::FLOAT, glow::PixelUnpackData::Slice(Some(&zeros)));
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, internal as i32, size.0, size.1, 0, format, kind, glow::PixelUnpackData::Slice(Some(&zeros)));
             for (param, value) in [
                 (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
                 (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
@@ -3059,11 +3023,23 @@ unsafe fn create_depth(gl: &glow::Context) -> Result<DepthObjects, String> {
             ] {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, param, value as i32);
             }
-            maps.push((texture, None));
-        }
+            Ok(texture)
+        };
+        let maps: Result<Vec<DepthTextures>, String> = (0..DEPTH_MAPS)
+            .map(|_| {
+                let mut rgba = || texture(glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE);
+                let (masks, normals, more) = (rgba()?, rgba()?, [rgba()?, rgba()?]);
+                Ok(DepthTextures { masks, normals, more, depth: texture(glow::R16F, glow::RED, glow::FLOAT)? })
+            })
+            .collect();
         gl.bind_texture(glow::TEXTURE_2D, None);
-        let more = more_a.into_iter().zip(more_b).map(|(a, b)| [a, b]).collect();
-        Ok(DepthObjects { capture, pbo, maps, masks, normals, more })
+        if maps.is_err() {
+            // Nothing made is kept.
+            for texture in made {
+                gl.delete_texture(texture);
+            }
+        }
+        maps
     }
 }
 
@@ -3177,6 +3153,29 @@ mod hold_tests {
         // Nothing's due yet: the oldest there is.
         assert_eq!(pick_frame(&newest_first, 1.0), Some(3));
         assert_eq!(pick_frame(&[], 1.0), None);
+    }
+
+    #[test]
+    fn every_unit_is_its_own_number_and_name() {
+        for (i, unit) in Unit::ALL.into_iter().enumerate() {
+            assert_eq!(unit as usize, i);
+            assert_eq!(Unit::ALL.iter().filter(|u| u.uniform() == unit.uniform()).count(), 1);
+        }
+        assert_eq!(ORIGINAL_UNIT as usize, Unit::ALL.len());
+    }
+
+    #[test]
+    fn the_nearest_is_found_within_reach() {
+        let mut ring = TimedRing { items: vec![("a", Some(1.0)), ("b", Some(2.0)), ("c", None)], next: 0 };
+        assert_eq!(ring.nearest(1.7, 0.5).map(|(x, at)| (*x, at)), Some(("b", 2.0)));
+        assert!(ring.nearest(3.0, 0.5).is_none());
+        ring.forget_after(1.5);
+        assert!(ring.nearest(1.0, 1.0).is_none(), "gone backwards: all forgotten");
+        let mut list = VecDeque::from([1.0, 2.0]);
+        keep_in_order(&mut list, 3.0, |t| *t, 2);
+        assert_eq!(list, [2.0, 3.0]);
+        keep_in_order(&mut list, 0.5, |t| *t, 2);
+        assert_eq!(list, [0.5]);
     }
 
     #[test]

@@ -310,8 +310,7 @@ fn pointwise_with(x: &[f32], c: usize, k: &[f32], b: &[f32], y: &mut Vec<f32>, t
 
 /// A string from a safetensors file's metadata.
 fn read_metadata(bytes: &[u8], key: &str) -> Result<String> {
-    let len = u64::from_le_bytes(bytes.get(..8).context("not a safetensors file")?.try_into()?) as usize;
-    let header: serde_json::Value = serde_json::from_slice(bytes.get(8..8 + len).context("truncated safetensors header")?)?;
+    let (header, _) = super::safetensors_header(bytes)?;
     header["__metadata__"][key].as_str().map(str::to_owned).with_context(|| format!("no {key} in the metadata"))
 }
 

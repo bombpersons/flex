@@ -1,10 +1,6 @@
 // Third Eye: copies each face's right eye, turned upright, to the middle of the forehead, with
 // rings of light rolling out from it. Bangs, explosions and screams make it fly wide open.
 
-vec3 palette(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) {
@@ -41,8 +37,9 @@ vec4 effect(vec2 uv) {
         }
         float r = length(rel) / across;
         float rings = sin(r * 14.0 - u_time * 5.0 - 6.0 * u_bass) * 0.5 + 0.5;
-        light += palette(r * 0.5 - u_time * 0.2 + float(i) * 0.3) * pow(rings, 3.0) * exp(-r * 0.75) * seen * s_aura / 100.0 * (0.5 + 1.2 * max(u_beat, startle));
-        light += vec3(1.0, 0.8, 0.5) * exp(-pow(shape - 1.0, 2.0) * 22.0) * seen * 0.9;
+        light += hue(r * 0.5 - u_time * 0.2 + float(i) * 0.3) * pow(rings, 3.0) * exp(-r * 0.75) * seen * s_aura / 100.0 * (0.5 + 1.2 * max(u_beat, startle));
+        float rim = shape - 1.0;
+        light += vec3(1.0, 0.8, 0.5) * exp(-rim * rim * 22.0) * seen * 0.9;
     }
     return vec4(c + light, 1.0);
 }

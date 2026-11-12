@@ -10,16 +10,12 @@
 //   u_video_time  the playback position (stops when paused)
 //   u_level, u_bass, u_mid, u_treble, u_beat             the sound, 0-1 (audio = true in melt.toml)
 //   u_spectrum    x: frequency, y: age (0 = now)
-//   s_speed, s_segments, s_trails, s_colours, s_react, s_spill   the settings in melt.toml
+//   s_speed, s_segments, s_trails, s_colours, s_react, s_spill, s_relief
+//                 the settings in melt.toml
 //
 // Edit this file while a video plays: Flex reloads it as soon as it's saved.
 
 const float TAU = 6.2831853;
-
-vec2 rotate(vec2 p, float a) {
-    float c = cos(a), s = sin(a);
-    return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
-}
 
 // Turns a colour around the grey axis.
 vec3 hue_shift(vec3 c, float a) {

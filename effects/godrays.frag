@@ -5,19 +5,7 @@
 // them. Bright windows and sky pour out their own beams, surfaces the light lands on brighten,
 // beams take their colour from the film, and dust glitters in them and swirls when things move.
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-
-float fbm(vec2 p) {
+float fbm4(vec2 p) {
     float sum = 0.0, amount = 0.5;
     for (int i = 0; i < 4; i++) {
         sum += amount * noise(p);
@@ -25,10 +13,6 @@ float fbm(vec2 p) {
         amount *= 0.5;
     }
     return sum;
-}
-
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
 }
 
 float distance_of(float near) {
@@ -119,7 +103,7 @@ vec4 effect(vec2 uv) {
     vec2 moving = flow_at(uv);
     float stirred = clamp(length(moving * aspect) * 1.4, 0.0, 1.0);
     vec2 drift = vec2(u_time * 0.05, -u_time * 0.03);
-    float haze = 0.62 + 0.7 * fbm(uv * aspect * 5.0 - moving * 0.35 + drift) + 0.4 * stirred;
+    float haze = 0.62 + 0.7 * fbm4(uv * aspect * 5.0 - moving * 0.35 + drift) + 0.4 * stirred;
 
     float rays = through * through * air * shafts * haze * 1.15 + pours * 1.5 * mix(0.45, 1.0, through);
     rays *= smoothstep(0.0, 0.7, u_since_cut);

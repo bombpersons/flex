@@ -1,44 +1,18 @@
 // Wallpaper Crawl: the walls flow along a moving noise field, and a grid of eyes hides in them.
 // Each eye opens now and then and looks at the first face it can find.
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-
-float fbm(vec2 p) {
-    float sum = 0.0, amount = 0.5;
-    for (int i = 0; i < 5; i++) {
-        sum += amount * noise(p);
-        p = p * 2.03 + vec2(17.1, 9.2);
-        amount *= 0.5;
-    }
-    return sum;
-}
-
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 // An eye at `q` (roughly -1 to 1 inside it), looking along `look`, opened by `open`.
 vec4 eye(vec2 q, vec2 look, float open) {
     float lid = 0.05 + 0.5 * open;
     float top = lid * (1.0 - q.x * q.x);
     float shape = (1.0 - smoothstep(-0.03, 0.03, abs(q.y) - top)) * step(abs(q.x), 1.0);
     if (shape <= 0.0) return vec4(0.0);
-    vec2 iris_at = look * vec2(0.3, 0.12);
-    float d = length(q - iris_at);
+    vec2 iris_centre = look * vec2(0.3, 0.12);
+    float d = length(q - iris_centre);
     vec3 c = vec3(0.92, 0.88, 0.8) * (0.75 + 0.25 * smoothstep(0.0, top, top - abs(q.y)));
-    c = mix(c, vec3(0.5, 0.25, 0.06) + 0.25 * sin(atan(q.y - iris_at.y, q.x - iris_at.x) * 18.0), (1.0 - smoothstep(0.3, 0.34, d)));
+    c = mix(c, vec3(0.5, 0.25, 0.06) + 0.25 * sin(atan(q.y - iris_centre.y, q.x - iris_centre.x) * 18.0), (1.0 - smoothstep(0.3, 0.34, d)));
     c = mix(c, vec3(0.01), (1.0 - smoothstep(0.12, 0.15, d)));
-    c += vec3(0.9) * (1.0 - smoothstep(0.03, 0.05, length(q - iris_at - vec2(0.07, 0.07))));
+    c += vec3(0.9) * (1.0 - smoothstep(0.03, 0.05, length(q - iris_centre - vec2(0.07, 0.07))));
     return vec4(c, shape);
 }
 

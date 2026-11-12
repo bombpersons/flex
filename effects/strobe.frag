@@ -2,10 +2,6 @@
 // part and its brightness in the fraction. It has to be alpha, as the colours are in use showing
 // the film, and people are drawn over their own statues.
 
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     if (u_frame < 2 || uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) return vec4(c, 0.0);

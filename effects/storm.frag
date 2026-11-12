@@ -1,33 +1,6 @@
 // Thunderstorm: layers of falling streaks each at their own distance, hidden by anything nearer,
 // and splashing on the top of things. Lightning is kept soft and brief, as flashes are hard on eyes.
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-
-float fbm(vec2 p) {
-    float sum = 0.0, amount = 0.5;
-    for (int i = 0; i < 5; i++) {
-        sum += amount * noise(p);
-        p = p * 2.03 + vec2(17.1, 9.2);
-        amount *= 0.5;
-    }
-    return sum;
-}
-
-vec2 depth_slope(vec2 uv, float reach) {
-    vec2 e = reach / u_resolution;
-    return vec2(depth_at(uv + vec2(e.x, 0.0)) - depth_at(uv - vec2(e.x, 0.0)), depth_at(uv + vec2(0.0, e.y)) - depth_at(uv - vec2(0.0, e.y)));
-}
-
 // One layer of rain. Every column of it falls at its own speed, with drops of its own spacing and
 // length, so nothing lines up from one column to the next.
 float streaks(vec2 p, float scale, float t, float wind, float rain) {

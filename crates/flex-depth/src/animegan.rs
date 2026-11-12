@@ -18,13 +18,18 @@
 //!
 //! The line drawings are Informative Drawings' (Chan, Durand and Isola, CVPR 2022; MIT licence),
 //! from the copy of its weights ControlNet's annotators use, saved by PyTorch (`lines`).
+//!
+//! Magenta's arbitrary stylization paints in any style, given as numbers (see `magenta`): its
+//! painting network is fast neural style's with four times the residual blocks, and every
+//! instance norm's scales and shifts from the style (`magenta_plan`).
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::{ACCUMULATE, Conv, Kernel, LEAKY2, LEAKY2_LAST, Linear, NONE, Ops, Params, REFLECT, Runner, Upload, groups};
+use crate::proto::{Field, Proto, packed};
+use crate::{ACCUMULATE, Conv, Kernel, LEAKY2, LEAKY2_LAST, Linear, Mem, NONE, Ops, Params, REFLECT, RELU, Runner, Upload, groups, magenta, transpose};
 
 /// One of the styles: the file for it, and where it comes from.
 #[derive(Debug, PartialEq)]
@@ -189,69 +194,6 @@ pub fn size_for(aspect: f64, pixels: usize) -> (usize, usize) {
 
 // ---- Reading ONNX ---------------------------------------------------------------------------
 
-/// Just enough of protobuf's wire format to read an ONNX file's graph.
-struct Proto<'a> {
-    b: &'a [u8],
-}
-
-enum Field<'a> {
-    Varint(u64),
-    Bytes(&'a [u8]),
-    Fixed,
-}
-
-impl<'a> Proto<'a> {
-    fn varint(&mut self) -> Result<u64> {
-        let mut v = 0u64;
-        for shift in (0..64).step_by(7) {
-            let (&byte, rest) = self.b.split_first().context("ONNX: cut short")?;
-            self.b = rest;
-            v |= u64::from(byte & 0x7f) << shift;
-            if byte < 0x80 {
-                return Ok(v);
-            }
-        }
-        bail!("ONNX: a number too long")
-    }
-
-    fn next(&mut self) -> Result<Option<(u64, Field<'a>)>> {
-        if self.b.is_empty() {
-            return Ok(None);
-        }
-        let key = self.varint()?;
-        let field = match key & 7 {
-            0 => Field::Varint(self.varint()?),
-            1 | 5 => {
-                let len = if key & 7 == 1 { 8 } else { 4 };
-                ensure!(self.b.len() >= len, "ONNX: cut short");
-                self.b = &self.b[len..];
-                Field::Fixed
-            }
-            2 => {
-                let len = self.varint()? as usize;
-                ensure!(self.b.len() >= len, "ONNX: cut short");
-                let (bytes, rest) = self.b.split_at(len);
-                self.b = rest;
-                Field::Bytes(bytes)
-            }
-            other => bail!("ONNX: unexpected wire type {other}"),
-        };
-        Ok(Some((key >> 3, field)))
-    }
-
-    /// Each field `number` that holds bytes.
-    fn all(b: &'a [u8], number: u64) -> Result<Vec<&'a [u8]>> {
-        let mut out = Vec::new();
-        let mut p = Proto { b };
-        while let Some((n, f)) = p.next()? {
-            if let (true, Field::Bytes(bytes)) = (n == number, f) {
-                out.push(bytes);
-            }
-        }
-        Ok(out)
-    }
-}
-
 /// An ONNX graph's float tensors (name → shape, values) and its convolutions' weights (and
 /// biases) in order.
 struct Graph {
@@ -273,12 +215,7 @@ fn read_onnx(bytes: &[u8]) -> Result<Graph> {
         while let Some((n, f)) = p.next()? {
             match (n, f) {
                 (1, Field::Varint(d)) => dims.push(d as usize),
-                (1, Field::Bytes(packed)) => {
-                    let mut q = Proto { b: packed };
-                    while !q.b.is_empty() {
-                        dims.push(q.varint()? as usize);
-                    }
-                }
+                (1, Field::Bytes(b)) => dims.extend(packed(b)?.into_iter().map(|d| d as usize)),
                 (2, Field::Varint(k)) => kind = k,
                 (4, Field::Bytes(packed)) => floats.extend(packed.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b))),
                 (8, Field::Bytes(s)) => name = String::from_utf8_lossy(s).into_owned(),
@@ -318,12 +255,7 @@ fn read_onnx(bytes: &[u8]) -> Result<Graph> {
                     while let Some((n, f)) = q.next()? {
                         match (n, f) {
                             (8, Field::Varint(v)) => axes.push(v),
-                            (8, Field::Bytes(packed)) => {
-                                let mut r = Proto { b: packed };
-                                while !r.b.is_empty() {
-                                    axes.push(r.varint()?);
-                                }
-                            }
+                            (8, Field::Bytes(b)) => axes.extend(packed(b)?),
                             _ => {}
                         }
                     }
@@ -462,8 +394,8 @@ const PAINT: [(usize, usize, usize); 16] = [
     (3, 64, 32),
     (9, 32, 3),
 ];
-/// Its instance norms' epsilon (PyTorch's).
-const PAINT_EPS: f32 = 1e-5;
+/// The instance norms' epsilon (PyTorch's, and Magenta's).
+const INSTANCE_EPS: f32 = 1e-5;
 // ag_norm's, ag_join's, ag_double's and ag_pack's (animegan.wgsl).
 const NORM_RELU: u32 = 4096;
 const NORM_LINEAR: u32 = 8192;
@@ -471,8 +403,9 @@ const AFFINE: u32 = 16384;
 const NEAREST: u32 = 32768;
 const BYTES: u32 = 65536;
 const GREY: u32 = 131072;
-/// The line drawings' instance norms' epsilon (PyTorch's).
-const LINES_EPS: f32 = 1e-5;
+const GAMMA_MEM: u32 = 262144;
+const NORM_SIGMOID: u32 = 524288;
+const UNIT: u32 = 1048576;
 const TANH: u32 = 256;
 const ADD_BEFORE: u32 = 512;
 /// ag_softmax divides each row by f0 + its sum instead.
@@ -509,20 +442,6 @@ struct Stage {
     after: usize,
     at: u32,
     len: usize,
-}
-
-/// Floats in `mem`, handed out in order.
-#[derive(Default)]
-struct Mem {
-    end: u32,
-}
-
-impl Mem {
-    fn take(&mut self, len: usize) -> u32 {
-        let at = self.end;
-        self.end += len as u32;
-        at
-    }
 }
 
 /// What both networks' plans make.
@@ -598,20 +517,16 @@ impl Plan {
     }
 
     /// An instance norm of `a` (cout channels of `pixels`) to `out`, with the scales and then
-    /// shifts at `gamma` in `w`, its own statistics at `stats` [cout][2] (eased by `ease`), and
+    /// shifts at `gamma` (in `w`, or in `mem` with GAMMA_MEM), its own statistics at
+    /// `stats` [cout][2] (eased by `ease`), `join` for ag_join (AFFINE, and GAMMA_MEM), and
     /// `flags` for ag_norm (NORM_RELU, or NORM_LINEAR with `add` added, or NONE).
     #[allow(clippy::too_many_arguments)]
-    fn instance(&mut self, a: u32, cout: usize, pixels: usize, gamma: u32, parts: u32, stats: u32, add: u32, out: u32, flags: u32) {
-        self.instance_eps(a, cout, pixels, gamma, parts, stats, add, out, flags, PAINT_EPS);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn instance_eps(&mut self, a: u32, cout: usize, pixels: usize, gamma: u32, parts: u32, stats: u32, add: u32, out: u32, flags: u32, eps: f32) {
+    fn instance(&mut self, a: u32, cout: usize, pixels: usize, gamma: u32, parts: u32, stats: u32, add: u32, out: u32, flags: u32, join: u32) {
         let p = (pixels / 4096).clamp(1, 64);
         self.ops.push(Kernel::Stats, Params { m: pixels as u32, x0: p as u32, a_off: a, c_off: parts, ..Default::default() }, [p as u32, cout as u32, 1]);
         self.ops.push(
             Kernel::Join,
-            Params { m: pixels as u32, x0: p as u32, x1: cout as u32, a_off: parts, b_off: gamma, c_off: stats, bias_off: self.ease, f0: eps, flags: AFFINE, ..Default::default() },
+            Params { m: pixels as u32, x0: p as u32, x1: cout as u32, a_off: parts, b_off: gamma, c_off: stats, bias_off: self.ease, f0: INSTANCE_EPS, flags: join, ..Default::default() },
             [groups(cout, 64), 1, 1],
         );
         self.ops.push(Kernel::AgNorm, Params { m: pixels as u32, k: cout as u32, a_off: a, x0: stats, b_off: add, c_off: out, flags, ..Default::default() }, [groups(pixels, 256), cout as u32, 1]);
@@ -682,6 +597,8 @@ enum Kind {
     Painting,
     /// 0 to 1.
     Lines,
+    /// 0 to 1, and painting in a style given as numbers.
+    Magenta,
 }
 
 pub struct AnimeGan {
@@ -691,6 +608,10 @@ pub struct AnimeGan {
     input: u32,
     packed: u32,
     ease: u32,
+    /// Magenta's: from a style to its norms' scales and shifts, and where those go in `mem`.
+    projection: Option<(magenta::Projection, u32)>,
+    /// Whether `set_style` has given those norms anything (until then they're all zero).
+    styled: bool,
     #[cfg(test)]
     stages: Vec<Stage>,
 }
@@ -704,6 +625,15 @@ impl AnimeGan {
 
     pub fn from_bytes(bytes: &[u8], (width, height): (usize, usize)) -> Result<Self> {
         ensure!(width % MULTIPLE == 0 && height % MULTIPLE == 0 && width >= 32 && height >= 32, "restyling needs sizes in multiples of {MULTIPLE}, not {width}x{height}");
+        // Magenta's is a .tar.gz.
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            let t = magenta::read(bytes)?;
+            let mut up = Upload::default();
+            let (plan, norms) = magenta_plan(&t, &mut up, (width, height))?;
+            let mut net = Self::new(up, plan, (width, height), Kind::Magenta)?;
+            net.projection = Some((magenta::Projection::new(&t)?, norms));
+            return Ok(net);
+        }
         // PyTorch's files are zips.
         if bytes.starts_with(b"PK") {
             let t = crate::torch_file::read(bytes, None)?;
@@ -725,13 +655,7 @@ impl AnimeGan {
             ensure!(dims == &[cout, cin, size, size], "not an AnimeGANv3 network: {name} is {dims:?}");
             let w = if size == 1 {
                 // [out][in] to [in][out] for the matrix multiply.
-                let mut t = vec![0.0; cin * cout];
-                for o in 0..cout {
-                    for i in 0..cin {
-                        t[i * cout + o] = v[o * cin + i];
-                    }
-                }
-                up.push(&t)
+                up.push(&transpose(v, cout, cin))
             } else {
                 up.push(v)
             };
@@ -796,6 +720,7 @@ impl AnimeGan {
             Kind::Anime => "AnimeGANv3",
             Kind::Painting => "fast neural style",
             Kind::Lines => "Informative Drawings",
+            Kind::Magenta => "Magenta stylization",
         };
         let run = Runner::new(&up, plan.ops, plan.mem.end, name)?;
         Ok(Self {
@@ -805,9 +730,26 @@ impl AnimeGan {
             input: plan.input,
             packed: plan.packed,
             ease: plan.ease,
+            projection: None,
+            styled: false,
             #[cfg(test)]
             stages: plan.stages,
         })
+    }
+
+    /// Whether it paints in a style given as numbers (`set_style`).
+    pub fn takes_styles(&self) -> bool {
+        self.projection.is_some()
+    }
+
+    /// The style to paint in from now on: `magenta::STYLE` numbers (from `magenta::StyleNet`, or
+    /// a mix of those). Only for Magenta's network.
+    pub fn set_style(&mut self, style: &[f32]) -> Result<()> {
+        let (projection, at) = self.projection.as_ref().context("this network doesn't take styles")?;
+        ensure!(style.len() == magenta::STYLE, "a style is {} numbers, not {}", magenta::STYLE, style.len());
+        self.run.write(*at, &projection.apply(style));
+        self.styled = true;
+        Ok(())
     }
 
     pub fn size(&self) -> (usize, usize) {
@@ -825,6 +767,8 @@ impl AnimeGan {
         let (w, h) = self.size;
         let n = w * h;
         ensure!(rgb.len() == 3 * n, "expected {w}x{h} RGB, got {} bytes", rgb.len());
+        // Without a style every norm's scale is zero, and the picture comes out flat grey.
+        ensure!(self.styled || self.projection.is_none(), "this network needs a style (set_style) first");
         let mut planes = vec![0.0f32; 3 * n];
         for (i, p) in rgb.as_chunks::<3>().0.iter().enumerate() {
             for c in 0..3 {
@@ -832,7 +776,7 @@ impl AnimeGan {
                 planes[c * n + i] = match self.kind {
                     Kind::Anime => v / 127.5 - 1.0,
                     Kind::Painting => v,
-                    Kind::Lines => v / 255.0,
+                    Kind::Lines | Kind::Magenta => v / 255.0,
                 };
             }
         }
@@ -957,29 +901,50 @@ fn small(layers: &[Layer], (w, h): (usize, usize), eps: f32, layer_norm: Option<
     plan
 }
 
+/// Where both painting networks (fast neural style's and Magenta's) work in `mem`.
+struct PaintMem {
+    full: u32,
+    out: u32,
+    half: u32,
+    wide: u32,
+    x: u32,
+    r: u32,
+    r2: u32,
+    planes: u32,
+    parts: u32,
+}
+
+impl PaintMem {
+    fn new(m: &mut Mem, n: usize) -> Self {
+        // Full size: 64 channels (the half's doubled), then 32; a half: 64, and 128 doubled; a
+        // quarter: the residual blocks' stream and their insides.
+        Self {
+            full: m.take(64 * n),
+            out: m.take(32 * n),
+            half: m.take(64 * n / 4),
+            wide: m.take(128 * n / 4),
+            x: m.take(128 * n / 16),
+            r: m.take(128 * n / 16),
+            r2: m.take(128 * n / 16),
+            planes: m.take(3 * n),
+            parts: m.take(128 * 64 * 2),
+        }
+    }
+}
+
 /// The painting network, for pictures (w, h). `norms`: where each instance norm's scales (and
 /// then shifts) are in `w`.
 fn painting(layers: &[Layer], norms: &[u32], (w, h): (usize, usize)) -> Plan {
     let n = w * h;
     let mut plan = Plan::new(n);
+    let PaintMem { full, out, half, wide, x, r, r2, planes, parts } = PaintMem::new(&mut plan.mem, n);
     let m = &mut plan.mem;
-    // Full size: 64 channels (the half's doubled), then 32; a half: 64, and 128 doubled; a
-    // quarter: the residual blocks' stream and their insides.
-    let full = m.take(64 * n);
-    let out = m.take(32 * n);
-    let half = m.take(64 * n / 4);
-    let wide = m.take(128 * n / 4);
-    let x = m.take(128 * n / 16);
-    let r = m.take(128 * n / 16);
-    let r2 = m.take(128 * n / 16);
-    let planes = m.take(3 * n);
-    let parts = m.take(128 * 64 * 2);
     let stats: Vec<u32> = (0..norms.len()).map(|_| m.take(128 * 2)).collect();
     let input = plan.input;
     let (hh, qq) = ((h / 2, w / 2), (h / 4, w / 4));
     let (nh, nq) = (n / 4, n / 16);
     // Layer i's instance norm of `a` (in place), with a ReLU.
-    let norm = |plan: &mut Plan, i: usize, a: u32, pixels: usize| plan.instance(a, layers[i].cout, pixels, norms[i], parts, stats[i], NONE, a, NORM_RELU);
+    let norm = |plan: &mut Plan, i: usize, a: u32, pixels: usize| plan.instance(a, layers[i].cout, pixels, norms[i], parts, stats[i], NONE, a, NORM_RELU, AFFINE);
 
     // Down.
     plan.conv_k(layers[0], input, (h, w), full, 0);
@@ -998,7 +963,7 @@ fn painting(layers: &[Layer], norms: &[u32], (w, h): (usize, usize)) -> Plan {
         plan.conv3(layers[i], x, qq, r, 1, 0);
         norm(&mut plan, i, r, nq);
         plan.conv3(layers[i + 1], r, qq, r2, 1, 0);
-        plan.instance(r2, 128, nq, norms[i + 1], parts, stats[i + 1], x, x, NORM_LINEAR);
+        plan.instance(r2, 128, nq, norms[i + 1], parts, stats[i + 1], x, x, NORM_LINEAR, AFFINE);
         plan.stage(name, x, 128 * nq);
     }
 
@@ -1016,6 +981,105 @@ fn painting(layers: &[Layer], norms: &[u32], (w, h): (usize, usize)) -> Plan {
     plan.stage("out", planes, 3 * n);
     plan.pack(planes, n, BYTES);
     plan
+}
+
+/// Magenta's painting network, for pictures (w, h), with its weights from the SavedModel's
+/// tensors put in `up`: a 9x9 and two 3x3s of stride 2 (each with a batch norm, folded in, and a
+/// ReLU) down to a quarter of the size, twenty residual blocks of two 3x3s there, then twice the
+/// size (nearest) and a 3x3, twice, and a 9x9 to the picture, through a sigmoid. Every convolution
+/// after the first three has an instance norm whose scales and shifts are the style's: all of
+/// them side by side in `mem` at what's returned with the plan, in `magenta::norms()` order, each
+/// norm's scales then its shifts. Edges are mirrored throughout.
+fn magenta_plan(t: &crate::Tensors, up: &mut Upload, (w, h): (usize, usize)) -> Result<(Plan, u32)> {
+    let mut conv = |name: &str, size: usize, cin: usize, cout: usize, folded: bool| -> Result<Layer> {
+        let wrong = |dims: &[usize]| format!("not Magenta's stylization network: {name} is {dims:?}");
+        let (weights, bias) = if folded {
+            let (dims, weights, bias) = magenta::folded(t, name)?;
+            ensure!(dims == [size, size, cin, cout], wrong(&dims));
+            (weights, bias)
+        } else {
+            let (dims, v) = t.get(&format!("{name}/weights")).with_context(|| format!("not Magenta's stylization network: no {name}"))?;
+            ensure!(dims == &[size, size, cin, cout], wrong(dims));
+            (magenta::channels_first(dims, v, &vec![1.0; cout]), Vec::new())
+        };
+        let w = up.push(&weights);
+        let b = if folded { up.push(&bias) } else { NONE };
+        Ok(Layer { w, b, size, cin, cout })
+    };
+    let down = [
+        conv("transformer/contract/conv1", 9, 3, 32, true)?,
+        conv("transformer/contract/conv2", 3, 32, 64, true)?,
+        conv("transformer/contract/conv3", 3, 64, 128, true)?,
+    ];
+    let ups = [
+        conv("transformer/expand/conv1/conv", 3, 128, 64, false)?,
+        conv("transformer/expand/conv2/conv", 3, 64, 32, false)?,
+        conv("transformer/expand/conv3/conv", 9, 32, 3, false)?,
+    ];
+    // (Winograd's is slower for these: 64 ms against 49 at 512x216 on an RX 580.)
+    let mut blocks = Vec::new();
+    for b in 1..=magenta::BLOCKS {
+        for c in 1..=2 {
+            blocks.push(conv(&format!("transformer/residual/residual{b}/conv{c}"), 3, 128, 128, false)?);
+        }
+    }
+
+    let n = w * h;
+    let mut plan = Plan::new(n);
+    let PaintMem { full, out, half, wide, x, r, r2, planes, parts } = PaintMem::new(&mut plan.mem, n);
+    let m = &mut plan.mem;
+    let sizes = magenta::norms();
+    let stats: Vec<u32> = sizes.iter().map(|_| m.take(128 * 2)).collect();
+    let all: usize = sizes.iter().map(|(_, c)| 2 * c).sum();
+    let norms = m.take(all);
+    let gammas: Vec<u32> = sizes.iter().scan(norms, |at, (_, c)| {
+        let here = *at;
+        *at += 2 * *c as u32;
+        Some(here)
+    }).collect();
+    let input = plan.input;
+    let (hh, qq) = ((h / 2, w / 2), (h / 4, w / 4));
+    let (nh, nq) = (n / 4, n / 16);
+    // Norm i of `a` (cout channels of `pixels`) to `out`, with `add` added (or NONE), and flags
+    // for ag_norm.
+    let norm = |plan: &mut Plan, i: usize, a: u32, pixels: usize, add: u32, out: u32, flags: u32| {
+        plan.instance(a, sizes[i].1, pixels, gammas[i], parts, stats[i], add, out, flags, AFFINE | GAMMA_MEM);
+    };
+
+    // Down.
+    plan.conv_k(down[0], input, (h, w), out, RELU);
+    plan.stage("down.0", out, 32 * n);
+    plan.conv3(down[1], out, (h, w), half, 2, RELU);
+    plan.stage("down.1", half, 64 * nh);
+    plan.conv3(down[2], half, hh, x, 2, RELU);
+    plan.stage("down.2", x, 128 * nq);
+
+    // The residual blocks, each added back into x (the second's norm has no ReLU).
+    const NAMES: [&str; magenta::BLOCKS] = ["res.0", "res.1", "res.2", "res.3", "res.4", "res.5", "res.6", "res.7", "res.8", "res.9", "res.10", "res.11", "res.12", "res.13", "res.14", "res.15", "res.16", "res.17", "res.18", "res.19"];
+    for (b, name) in NAMES.into_iter().enumerate() {
+        plan.conv3(blocks[2 * b], x, qq, r, 1, 0);
+        norm(&mut plan, 2 * b, r, nq, NONE, r, NORM_RELU);
+        plan.conv3(blocks[2 * b + 1], r, qq, r2, 1, 0);
+        norm(&mut plan, 2 * b + 1, r2, nq, x, x, NORM_LINEAR);
+        plan.stage(name, x, 128 * nq);
+    }
+
+    // Up.
+    let e = 2 * magenta::BLOCKS;
+    let s = plan.double(x, 128, qq, wide, NEAREST);
+    plan.conv3(ups[0], wide, s, half, 1, 0);
+    norm(&mut plan, e, half, nh, NONE, half, NORM_RELU);
+    plan.stage("up.0", half, 64 * nh);
+    let s = plan.double(half, 64, s, full, NEAREST);
+    debug_assert_eq!(s, (h, w));
+    plan.conv3(ups[1], full, s, out, 1, 0);
+    norm(&mut plan, e + 1, out, n, NONE, out, NORM_RELU);
+    plan.stage("up.1", out, 32 * n);
+    plan.conv_k(ups[2], out, (h, w), planes, 0);
+    norm(&mut plan, e + 2, planes, n, NONE, planes, NORM_SIGMOID);
+    plan.stage("out", planes, 3 * n);
+    plan.pack(planes, n, UNIT);
+    Ok((plan, norms))
 }
 
 /// The line drawings' network (Informative Drawings' generator, from PyTorch's `state_dict`),
@@ -1084,7 +1148,7 @@ fn lines(t: &crate::Tensors, up: &mut Upload, (w, h): (usize, usize)) -> Result<
     let mut norm = |plan: &mut Plan, a: u32, cout: usize, pixels: usize, add: u32, flags: u32| {
         let s = next.next().expect("a norm too many");
         let out = if add == NONE { a } else { add };
-        plan.instance_eps(a, cout, pixels, plain[&cout], parts, s, add, out, flags, LINES_EPS);
+        plan.instance(a, cout, pixels, plain[&cout], parts, s, add, out, flags, AFFINE);
     };
 
     // Down: the 3x3s of stride 2 pad with zeros.
@@ -1245,6 +1309,9 @@ mod tests {
         let (h, w) = (shape[0], shape[1]);
         let rgb: Vec<u8> = rgb.iter().map(|v| *v as u8).collect();
         let mut net = AnimeGan::load(Path::new(&model), (w, h)).unwrap();
+        if net.takes_styles() {
+            net.set_style(&reference["style"].1).unwrap();
+        }
         let started = std::time::Instant::now();
         let out = net.run(&rgb, 0.0).unwrap();
         eprintln!("{w}x{h}: first run {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
@@ -1260,9 +1327,11 @@ mod tests {
         };
         let mut worst = 0.0f32;
         for s in net.stages.clone() {
+            // Magenta's reference has only some of its residual blocks.
+            let Some((_, expected)) = reference.get(s.name) else { continue };
+            let mut expected = expected.clone();
             net.run.time_first(s.after, 0);
             let got = net.run.read(s.at, s.len).unwrap();
-            let mut expected = reference[s.name].1.clone();
             if let Some(other) = added(s.name) {
                 expected.iter_mut().zip(&reference[other].1).for_each(|(e, o)| *e += o);
             }
@@ -1282,6 +1351,7 @@ mod tests {
                 Kind::Painting => v,
                 // One channel, through a sigmoid, as grey.
                 Kind::Lines => 255.0 / (1.0 + (-v).exp()),
+                Kind::Magenta => v * 255.0,
             }
             .clamp(0.0, 255.0)
             .round() as i32;

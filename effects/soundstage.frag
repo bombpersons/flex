@@ -2,11 +2,6 @@
 // ago, so sounds appear on whatever's closest and roll back through the scene in shells.
 // Bass is red, the middle green and treble blue, turning slowly with s_speed.
 
-vec3 hue(vec3 c, float a) {
-    vec3 k = vec3(0.57735);
-    return c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
-}
-
 vec4 effect(vec2 uv) {
     // The black bars stay black.
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) {
@@ -23,5 +18,5 @@ vec4 effect(vec2 uv) {
     float loud = max(v.r, max(v.g, v.b));
     vec2 push = (uv - 0.5) * 0.04 * loud * amount;
     vec3 video = texture(u_video, uv + push).rgb * (1.0 - s_dim / 100.0 * (1.0 - loud));
-    return vec4(video + hue(v * v, 0.1 * u_time * s_speed) * amount * 1.2, 1.0);
+    return vec4(video + hue_rotate(v * v, 0.1 * u_time * s_speed) * amount * 1.2, 1.0);
 }

@@ -7,8 +7,8 @@ while watching it.
 
 Hold OK (or right-click) while a video plays to open the effects panel beside the picture.
 Up and Down pick a row, Left and Right change it, OK opens the rows with an arrow, and Back goes
-out a level and closes the panel. The cursor starts on the Effects row, so holding OK and then
-pressing OK turns effects off, and doing it again brings back the same effect, shuffle and drift.
+out a level and closes the panel. The cursor starts on the Video effects row, so holding OK and
+then pressing OK turns them off, and doing it again brings back the same effect, shuffle and drift.
 They're also in Settings → Picture → Video effects.
 
 OK on the Effect row opens the list of effects, and whichever one you rest on shows behind it.
@@ -27,9 +27,13 @@ before any comes round again, and the clock stops while the video's paused or th
 is open. Set it to Scene cuts and the next effect starts on the frame the shot changes instead,
 once the shortest turn is up. OK on the row opens the rest: Fade sets how long the change takes,
 and Off makes it instant. Random settings moves an effect's settings at random each time it comes
-up, without changing the ones you've set. Shuffle keeps sound, depth, masks and faces running for
+up, without changing the ones you've set. Sound effects says how often a turn comes with a sound
+effect (see Changing the sound). Shuffle keeps sound, depth, masks and faces running for
 whatever it might pick next, so that nothing stutters at the changes; untick the effects that use
 them if the GPU struggles.
+
+Sound effects have their own switch, under Effect, and the Sound row picks which: the Voice
+changer, so far. They play on their own or alongside a video effect (see Changing the sound).
 
 Flex comes with these to start from, in [`effects`](effects):
 
@@ -51,6 +55,9 @@ Flex comes with these to start from, in [`effects`](effects):
   Miyazaki's films, Makoto Shinkai's or Studio Ghibli's, or as an ink sketch, with inked outlines.
 - **Painting**: the whole film repainted by a neural network in a painting's style: a
   stained-glass mosaic, pop colours, brushstrokes, flat cubist planes or pointillist dots.
+- **Paint Like**: the film painted in the style of any picture, with the film's own fine detail kept: twenty-one famous paintings
+  (The Starry Night, The Great Wave, The Scream…), drifting from one to the next, or your own
+  pictures dropped in the styles folder.
 - **Line Art**: the film as a line drawing by a neural network, in ink on paper or over the
   film's own colours in flat comic-book bands.
 - **Living Textures**: the film grown over with a living texture (honeycomb, cobwebs, chrome,
@@ -131,6 +138,8 @@ Flex comes with these to start from, in [`effects`](effects):
 - **Fire People**: people burn from the feet up, with flames that follow them.
 - **Tiny People**: people shrink where they are, leaving the room huge.
 - **Time-Lagged Body**: the tops of people run behind their bottoms, so they ripple as they move.
+- **Stop Motion People**: people move like stop-motion puppets, a few poses a second, while
+  everything around them plays on smoothly.
 - **Colour Thief**: the world is grey and only people have colour, or the other way round.
 - **Glitch Bodies**: people tear into sliding strips on each beat.
 - **Swarm**: people dissolve into buzzing specks that scatter with the bass.
@@ -168,12 +177,27 @@ Flex comes with these to start from, in [`effects`](effects):
 - **God Rays**: shafts of light through the air, from the brightest thing in the shot and in its colour, with people cutting dark shadows through them and dust that swirls as things move.
 - **Film Mountains**: the picture as a landscape: close things are peaks, far things are valleys.
 - **Signals**: shows what Flex can work out from the picture, for checking and making effects.
+- **Shot and Scene**: shows what Flex makes of the shot and the scene, for checking and making
+  effects.
+- **World Grid**: a lattice fixed to the world, to show how well Flex can tell where the camera
+  is, for checking and making effects.
 - **Motion Paint**: only what's moving shows, painted in a colour for each direction.
 - **Echoes**: everything leaves a trail of coloured copies of where it was a moment ago.
 - **Everyone's Colour**: each person is washed in their own colour, which follows them about.
 - **Film Palette**: the film redrawn in just its own four main colours.
 - **Slow Burn**: the picture gets stranger the longer a shot goes on, and every cut snaps it back.
 - **Soundstage**: sounds light up what's closest and roll back through the scene.
+- **Fog Layer**: a sheet of low mist across the room at one height, churning when wind is heard,
+  with people standing up out of it.
+- **Ghosts**: pale see-through figures drift through the room and stay put as the camera moves,
+  coming out in silence and with sad or scary music.
+- **Graffiti**: neon tags, stencils and splashes sprayed on the walls, staying on them as the
+  camera moves.
+- **Paper Lanterns**: glowing paper lanterns hang in the air where they are as the camera moves,
+  with people passing in front of them.
+- **Laser Grid**: security laser beams strung across the room, glowing where anyone breaks them.
+- **Fish Shoal**: a shoal of glowing fish swims loops through the room, behind and in front of
+  people, scattering when something bangs or someone shouts.
 
 ## Making one
 
@@ -208,7 +232,7 @@ vec4 effect(vec2 uv) {
 ```
 
 It's GLSL 1.40 / 3.30 (or ES 3.00 where that's all there is). Flex adds these, so
-don't declare them yourself:
+don't declare them yourself, or functions of your own with the same names:
 
 | Uniform | What |
 |---|---|
@@ -227,31 +251,40 @@ don't declare them yourself:
 | `float depth_at(vec2 uv)` | a function: how near that point of the screen is, from 0 (far) to 1 (near) (with `depth = true`; 0 until the first depth map arrives) |
 | `vec4 u_ground` | with `depth = true`: the floor, a table or whatever else is flat and level, found from depth. At a point of the picture (0 to 1, y up) its depth is `dot(vec3(x, y, 1.0), u_ground.xyz)`, and `u_ground.w` is how sure that is, from 0 to 1 |
 | `sampler2D u_depth`, `float u_has_depth` | the depth map itself, covering the picture rather than the screen, and 1 once there is one |
-| `vec3 normal_at(vec2 uv)` | a function: which way the surface at that point of the screen faces, x to the right, y up and z towards the viewer, unit length (with `depth = true`). From MoGe-2 it has the shape of things in it: faces, arms, folds. From Depth Anything (or before the first map) it's worked out from depth's slopes, so shows outlines more than shape. Use it for lighting rather than slopes of `depth_at` |
+| `vec3 normal_at(vec2 uv)` | a function: which way the surface at that point of the screen faces, x to the right, y up and z towards the viewer, unit length (with `depth = true`). It has the shape of things in it: faces, arms, folds (before the first map, it's worked out from depth's slopes, so shows outlines more than shape). Use it for lighting rather than slopes of `depth_at` |
+| `vec2 depth_slope(vec2 uv, float reach)` | a function: how much `depth_at` changes from `reach` pixels to one side of the point to the same distance the other, across in x and up in y (with `depth = true`) |
 | `sampler2D u_normals`, `float u_has_normals` | the normals themselves (x, y and z from 0 to 1 for -1 to 1), covering the picture, and 1 when the depth network gives them |
 | `float person_at(vec2 uv)`, `wall_at`, `sky_at` | functions: how much of that point of the screen is a person, a wall or sky, from 0 to 1 (with `segment = true`; 0 until the first masks arrive). `vec4 masks_at(vec2 uv)` gives all three in r, g and b |
+| `vec4 more_masks_at(vec2 uv, int which)`, `float u_has_more_masks` | a function: more masks (with `segment = true`), all 0 until the first arrive: `which` 0 is ground, ceiling, water and plants in r, g, b and a, and 1 is window, body skin, hair and clothes; `u_has_more_masks` is 1 when they're there. The functions below read them |
 | `float ground_at(vec2 uv)`, `ceiling_at`, `water_at`, `plant_at`, `window_at` | functions: how much of that point is ground (floors, roads, grass, sand, snow: anything underfoot), ceiling, water, plants and trees, or a window, from 0 to 1 (with `segment = true`, from MoGe-2's head; 0 without it, and `u_has_more_masks` says which) |
 | `float body_skin_at(vec2 uv)`, `clothes_at` | functions: how much of that point is a person's bare skin, or their clothes (with `segment = true`, from MoGe-2's head). With `hair_at` they add up to `person_at`. `skin_at` is the face's skin, from the face mesh |
 | `int u_face_count`, `vec4 u_faces[MAX_FACES]` | how far through the arrays to look, and each face's box on screen: x0, y0, x1, y1 (with `faces = true`) |
 | `float u_face_seen[MAX_FACES]` | 1 while a face is found, blending in over a moment when it's first found, and 0 as soon as it's lost (a face's slot is kept for a moment in case it comes back, so don't draw it there). Multiply by it. It's 0 for empty slots |
 | `vec2 face_point(int face, int point)` | where on the screen a face's point is: 0 right eye, 1 left eye, 2 nose, 3 right corner of the mouth, 4 left (the person's own right and left) |
+| `Face face_frame(int face, vec2 aspect)`, `float oval(vec2 p, vec2 centre, Face f, vec2 half_size)` | functions: a face's points multiplied by `aspect` (to take the screen's shape out), as a `Face`: `right`, `left` and the `eyes` between them, `nose`, `mouth` (its middle), `up` and `across` (unit length, the face's own directions), `spread` (between the eyes) and `height` (from eyes to mouth); and how much of a soft oval turned with that face, `half_size` across and up it, `p` is in, from 0 to 1 (with `faces = true`) |
 | `float face_at(vec2 uv)` | a function: how much of any face is at that point of the screen, from 0 to 1, soft at the edges |
 | `vec3 mesh_point(int face, int n)`, `float u_face_mesh[MAX_FACES]` | a function: the mesh's point `n` (0 to 477, MediaPipe's numbering): x, y on screen and z, smaller nearer, in picture widths (with `mesh = true`). `u_face_mesh` says how much of a mesh that face has, from 0 for faces side-on |
 | `vec3 u_face_open[MAX_FACES]` | how open the person's right eye, left eye and mouth are, from 0 to 1 (with `mesh = true`, and only where `u_face_mesh` is above 0) |
 | `vec4 u_face_turn[MAX_FACES]` | which way a head points: x to the right of the picture, y up, z towards the viewer, and w 1 if that's known (with `mesh = true`). Side-on faces have this even with no mesh |
-| `float on_face(vec2 uv)`, `vec2 face_uv(vec2 uv)`, `int face_there(vec2 uv)` | functions: how much of a face a point on screen is, from 0 to 1; where it is on the face (x 0 to 1 across it, y from the chin up, the same spot on every face whichever way it's turned); and which face it is, or -1 (with `mesh = true`) |
+| `float on_face(vec2 uv)`, `vec2 face_uv(vec2 uv)`, `int face_there(vec2 uv)` | functions: how much of a face a point on screen is, from 0 to 1; where it is on the face (x 0 to 1 across it, y from the chin up, the same spot on every face whichever way it's turned); and which face it is, or -1 (with `mesh = true`). `face_there` can be -1 at the very edge of a face where `on_face` is still above 0, so clamp it before indexing an array |
 | `float skin_at(vec2 uv)`, `lips_at`, `nose_at`, `brows_at`, `eye_at`, `iris_at`, `mouth_at` | functions: how much of a point on screen is that part of a face, from 0 to 1 (with `mesh = true`). `mouth_at` is the gap between the lips, `eye_at` the whole opening of the eye and `iris_at` the coloured part of it |
 | `vec4 face_texture(int face, vec2 at)` | a function: a face's pixels at a position on it (as `face_uv` gives), for drawing it somewhere else; alpha is 0 off the face (with `mesh = true`) |
 | `float hair_at(vec2 uv)` | a function: where hair is (with `segment = true`), from MoGe-2's head when it's running; otherwise, with `mesh = true` too, roughly, as the person above and around each face |
+| `bool meshed(int face)`, `vec2 iris_of(int face, int eye)` | functions: whether a face has a mesh worth using, and where on screen the middle of its right (0) or left (1) iris is, from the mesh (with `mesh = true`) |
 | `float face_roll(int face)` | a function: how far a head tilts to the side, anticlockwise, in radians (with `faces = true`) |
 | `int who_at(vec2 uv)` | a function: which face a point of the picture belongs with, as an index into `u_faces`, or -1 (with `faces = true`). Use it with `person_at` to treat people separately |
 | `float u_dt` | seconds since the last frame was drawn |
-| `float u_cut`, `u_since_cut` | 1 on a scene cut, fading to 0 in about half a second, and seconds since the last one, for the frame on screen (with `cuts = true`) |
+| `float u_cut`, `u_since_cut` | 1 on a scene cut, fading to 0 in about half a second, and seconds since the last one, for the frame on screen (with `cuts = true`). `u_since_cut` is huge (a million) until the first cut |
+| `float u_shot_start` | when this shot began, in seconds into the video: the same all through a shot, and 0 until the first cut (with `cuts = true`), so something random can be chosen once for a whole shot |
 | `vec3 history_at(vec2 uv, float seconds)` | a function: the picture that many seconds ago, up to about one, at half size (with `history = true`) |
 | `vec2 flow_at(vec2 uv)` | a function: how a point is moving, in screen widths and heights a second (with `flow = true`). Comes from a small network once it has started, and from block matching before that or if it can't run |
-| `vec3 plate_at(vec2 uv)`, `float plate_known(vec2 uv)` | functions: the room with people taken out, and how much of that point has really been seen since the last cut rather than filled in from around it (with `plate = true`) |
+| `vec3 plate_at(vec2 uv)`, `float plate_known(vec2 uv)` | functions: the room with people taken out, and how much of that point has really been seen since the last cut rather than filled in from around it (with `plate = true`). `float u_has_plate` is 1 once there's a room to give, and `plate_known` is 0 until then |
 | `float u_brightness`, `u_colourfulness`, `u_warmth`, `vec3 u_palette[4]`, `float u_palette_share[4]` | the look of the picture: 0–1, 0–1, -1 (blue) to 1 (orange), its four main colours, and how much of the picture each covers (with `stats = true`). Colours keep their slots as they change |
 | `vec3 u_light` | with `stats = true`: where the brightest part of the picture is, x and y from 0 to 1 across the picture, and in z how much it stands out as one place |
+| `float hash(vec2 p)`, `float hash(vec3 p)` | functions: a random number from 0 to 1 for a point, the same each time |
+| `float noise(vec2 p)`, `float fbm(vec2 p)` | functions: smooth noise from 0 to 1, changing about once a unit, and five octaves of it, from 0 to about 1 |
+| `vec3 hue(float t)`, `vec3 hue_rotate(vec3 c, float a)` | functions: a rainbow colour, going round once as `t` goes from 0 to 1; and a colour with its hue turned by `a` radians |
+| `vec2 rotate(vec2 p, float a)` | a function: a point turned anticlockwise by `a` radians about the origin |
 
 `uv` and `u_video_rect` run from 0 to 1 over the picture, starting at the bottom left.
 
@@ -350,15 +383,82 @@ follow voices rather than music, anime faces cry when someone does, and so on.
 | `u_sound_silence` | silence |
 | `u_sound_happy_music`, `u_sound_sad_music`, `u_sound_tender_music`, `u_sound_exciting_music`, `u_sound_angry_music`, `u_sound_scary_music` | how the music feels, as shares of `u_sound_music`: together they come to about as much as it does, split by which mood it sounds most like. They're rougher guesses than the rest, so lean on them gently |
 
+### Changing the sound
+
+Sound effects change the film's sound. They're switched on with the panel's Sound effects row,
+separately from the video effects, and picked on the Sound row; they play on their own or
+alongside whichever video effect is showing, and their settings are rows at the bottom of the
+panel. There are:
+
+- **Voice changer**: chipmunk, deep, robot, telephone, monster, alien, whisper, megaphone, a
+  giant's, a child's, or high and low voices swapped.
+- **Instrument**: the voice played on a flute, violin, trumpet, saxophone, clarinet, trombone,
+  tuba, bassoon, melodica, sitar or sung vowels.
+- **Auto-tune**: the voice snapped to the notes of a key and scale, hard or gently, with
+  harmonies (a third, a triad, an octave below, or a choir).
+- **Synth voice**: the voice played by a chiptune, a theremin or a vocoder.
+- **Reverb**: a room, bathroom, concert hall, cathedral or cave, or far away; everything or
+  only the voices.
+- **Underwater**: muffled and wobbling, with bubbles.
+- **Echo**: everything or only the voices, coming back darker each time.
+- **Old sound**: an old radio, a gramophone, a walkie-talkie (only open while someone's
+  talking), worn tape, or 8-bit.
+- **Stutter**: short slices played again, sometimes backwards; on the voices, people stutter.
+- **8D**: the sound going round your head, for headphones.
+- **Voices**: the background dropping while people talk, the voices taken out, or only the
+  voices.
+
+The ones that change voices do so only while someone's talking. With video effects and shuffle on, Shuffle → Sound effects says how often a turn
+comes with a sound effect picked at random (Off keeps the one picked on the Sound row). A paired sound effect
+changes and fades at the same moment as the picture.
+
+They're written in Rust (`crates/flex-sound`), each with a `sounds/<id>.toml` giving its name,
+description and settings in the same form as an effect's. The sound mpv is about to play goes
+through a filter Flex adds to mpv's own (from Flex's patched libmpv), so nothing is decoded
+twice and the sound stays in time with the picture. Each 10 ms block is split into the voice
+and everything else, changed, and put back together; with no change, what comes out is exactly
+what went in, 0.09 s later (made up by holding the picture back as long).
+
+The voice is found in two steps. First by where films put dialogue: the centre channel when
+there is one, otherwise the middle of the stereo picture. Then
+[DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) (MIT or Apache-2.0), a small
+network made to take noise out of speech, takes what isn't voice out of that, and it goes back
+into the background, so music and effects are left alone. What it gives back is clean, dry
+speech, so the voice's reverb is split off as well, as its echo: wherever the voice was most of
+a band of the spectrum, lately, that much of what's left there. Effects that replace the voice
+take the echo out with it (so the voice as it was isn't heard behind them); others leave it. It runs on the CPU, about a twentieth
+of one core, on sound turned to 48 kHz. [Silero VAD](https://github.com/snakers4/silero-vad)
+(MIT) says, every 32 ms, how likely it is someone's talking. The first time a sound effect is
+on, Flex downloads both (8 and 1.3 MB) into its data folder; until they're ready the voice is
+split by channel alone. Singing mostly counts as background.
+
+Instrument plays the voice with [DDSP-VST](https://github.com/magenta/ddsp-vst)'s networks
+(Apache-2.0): every 20 ms a small pitch network (CREPE micro) hears the voice's pitch and
+loudness, and the instrument's network (trained on recordings of that instrument) says how loud
+each of 60 harmonics and 65 bands of noise should be, which an oscillator bank and a noise filter
+play. Each speaker's voice is moved by whole octaves to the middle of the instrument's range,
+and brought to the loudness it was trained on. The networks are run from the weights in their
+TFLite files (by Flex's own code, checked against TensorFlow's); the first time an instrument's
+picked, Flex downloads Google's release of all eleven (77 MB) and the pitch network (0.7 MB).
+
+Auto-tune, Synth voice and the giant, child and swapped voices use the same pitch network. The
+voice's pitch is moved by a pitch-synchronous shifter (TD-PSOLA): grains two of the voice's
+periods long are cut where the voice is and laid down closer together or further apart, so the
+voice keeps its own sound (its formants); squeezing each grain moves the formants too, which is
+what makes a voice sound like a bigger or smaller person's. The other effects are plain signal
+processing: filters, delay lines, and a reverb of eight delay lines fed back into each other.
+
+A sound effect can change the voice, the background or both, and is told how likely it is
+someone's talking and the kinds of sound heard. With a libmpv that isn't Flex's, the sound stays
+as it is.
+
 ### Depth
 
 With `depth = true`, Flex works out how far away everything in the picture is, using
 [MoGe-2](https://github.com/microsoft/MoGe) ViT-S (MIT), which also says which way every
-surface faces, or [Depth Anything V2 Small](https://github.com/DepthAnything/Depth-Anything-V2)
-(Apache-2.0) where people, walls and sky are wanted and MoGe-2 can't give them yet. Both run on
-the GPU as compute shaders, built on the kernels from Maisy's
+surface faces. It runs on the GPU as compute shaders, built on the kernels from Maisy's
 [neurofield](https://github.com/bombpersons/neurofield). The first time an effect asks for
-it Flex downloads the model (141 or 99 MB) into its data folder.
+it Flex downloads the model (141 MB) into its data folder.
 
 Real people are thin next to the room they're in, so in depth from 0 to 1 across the whole
 picture a person is nearly flat: their shape is a few hundredths of the range, and the step
@@ -397,6 +497,18 @@ style picked by its choice setting `<key>`, whose options' ids name the networks
   dark lines on white, the same in all three channels. MIT licence; downloaded from the copy
   ControlNet's annotators use (17 MB each) the first time a style is wanted. It's about
   2.4 times the work a pixel, so it's drawn smaller.
+- Painting in the style of any picture, by Magenta's
+  [arbitrary image stylization](https://www.kaggle.com/models/google/arbitrary-image-stylization-v1)
+  (Ghiasi, Lee, Kudlur, Dumoulin and Shlens; Apache-2.0 licence): `art:<painting>` for one of
+  the twenty-one public-domain paintings Flex knows (`art:starry-night`, `art:great-wave`,
+  `art:scream` and the rest in `effects/paint-like.toml`), `art:morph` to drift from one to
+  the next along the film (ten seconds each, five blending), and `art:morph-mine` through the
+  pictures in the styles folder (`styles` in the data folder) only. Every choice setting that
+  offers an `art:` style also offers each picture in the styles folder, as
+  `art:mine:<file name>`, and the effect panel shows a row that opens the folder: Flex turns
+  each new picture into a style once (a third of a second on the CPU) and remembers it. The
+  model (86 MB) is downloaded from Kaggle Models the first time an `art:` style is wanted. It's
+  about 3.1 times the work a pixel of AnimeGANv3's, so it's drawn smaller.
 - Living textures, `tex-honeycomb`, `tex-cobwebs`, `tex-bubbles`, `tex-swirls`, `tex-marble`,
   `tex-cracked`, `tex-chrome`, `tex-fingerprints`, `tex-candy`, `tex-zebra`, `tex-foam`,
   `tex-mondrian`, `tex-leopard`, `tex-feathers`, `tex-scales`, `tex-eyes`, `tex-staring`,
@@ -430,15 +542,18 @@ it takes and at what size.
 ```glsl
 uniform sampler2D u_original;  // the real picture (u_video is the drawing)
 uniform float u_has_restyled;  // 1 once there's a drawing
+uniform vec2 u_restyled_size;  // the pixels the network drew it at (it's scaled up), or 0
 ```
 
 ### People, walls and sky
 
-With `segment = true`, a small network that runs on top of the depth model tells people,
-walls and sky apart, so an effect can use them alongside `depth_at` without paying for depth
-twice (it costs depth's time plus about a fifth). It was trained on COCO and ADE20K. People
-and sky are solid, including in animation; walls are the weakest, so anything flat and dark
-behind someone can be called a wall, and their edges are worth treating as soft.
+With `segment = true`, a small network that runs on top of the depth model (Flex's own head on
+MoGe-2's features) tells people, walls, sky and the rest apart, so an effect can use them
+alongside `depth_at` without paying for depth twice (it adds about 2 ms to a depth map). It was
+trained on COCO, ADE20K, ATR, DensePose, CIHP and anime pictures. People and sky are solid,
+including in animation and crowds; walls are the weakest, so anything flat and dark behind
+someone can be called a wall, and their edges are worth treating as soft. Black bars are left
+out before it looks, as they'd otherwise pass for sky.
 
 ### Faces
 
@@ -490,11 +605,16 @@ and drops back to 0 for a moment if the tracking is lost: multiply what you draw
 thing is, and it says where that thing is on screen now. `shot_uv(uv)` says where a point on screen
 was when the shot began, so a pattern drawn there sticks to what it's on. `world_pin_nearby` is
 `world_pin` for one thing that shouldn't be lost: it comes back into view when the camera leaves it. `world_distance(near)`
-turns a depth value into a distance. `world_ray(uv, origin, direction)` gives the camera's place
+turns a depth value into a distance. `screen_size(size, away)` is how tall something `size` big in the world
+looks `away` from the camera, as a share of the screen's height. `world_ray(uv, origin, direction)` gives the camera's place
 and the line of sight through a point, for testing what it passes in front of, and
 `world_point(uv, near)` is `world_at` for a depth of your own, such as one from `u_ground`. The
-world's y points down. All three do nothing useful until `u_world_ready` is above 0,
-and the first two just give back `uv`, so an effect still works without the camera. It needs
+world's y points down. None of them mean anything until `u_world_ready` is above 0, but
+`world_pin`, `world_pin_nearby` and `shot_uv` just give back `uv` then, so an effect built on them
+still works without the camera. Underneath are `mat3 u_world_rotation` and `vec3 u_world_offset`
+(world to camera: `u_world_rotation * world + u_world_offset`), `vec3 u_world_lens` (the focal
+length in x, and the size of the picture the camera was tracked in, in y and z, all in pixels) and
+`vec2 u_world_depth` (a `depth_at` value `near` is `1 / (x * near + y)` away). It needs
 something in the picture to hold on to, so plain walls and fast action lose it. The World Grid
 effect shows how well it's doing.
 

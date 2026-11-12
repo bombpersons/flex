@@ -2,19 +2,7 @@
 // each breath, in a wave from the far end, buckling along folds that the light catches, with a
 // wet sheen and veins that throb. Nobody in the room moves with them.
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-
-float fbm(vec2 p) {
+float fbm4(vec2 p) {
     float sum = 0.0, amount = 0.5;
     for (int i = 0; i < 4; i++) {
         sum += amount * noise(p);
@@ -32,9 +20,9 @@ float lungs(float phase) {
 
 // The ribs and folds of the wall at a point, and how far they're standing out just now.
 float flesh(vec2 s, float t, float full) {
-    vec2 w = s + 0.35 * vec2(fbm(s * 1.3 + 11.0 + t * 0.03), fbm(s * 1.3 + 37.0 - t * 0.02));
+    vec2 w = s + 0.35 * vec2(fbm4(s * 1.3 + 11.0 + t * 0.03), fbm4(s * 1.3 + 37.0 - t * 0.02));
     float ribs = pow(1.0 - abs(sin(w.x * 5.5 + 1.2 * sin(w.y * 1.6))), 1.8);
-    float folds = fbm(w * 3.2 + vec2(0.0, t * 0.05));
+    float folds = fbm4(w * 3.2 + vec2(0.0, t * 0.05));
     return mix(folds, ribs, 0.45 + 0.3 * full) * (0.55 + 0.75 * full);
 }
 
@@ -96,8 +84,8 @@ vec4 effect(vec2 uv) {
     vec3 meat = mix(vec3(0.5, 0.08, 0.1), vec3(1.0, 0.55, 0.47), clamp(luma * 1.4, 0.0, 1.0)) * (0.3 + luma * 1.3);
     w = mix(w, meat, s_flesh / 100.0);
 
-    vec2 vp = s * 2.1 + 0.4 * vec2(fbm(s * 2.0 + 5.0), fbm(s * 2.0 + 19.0));
-    float veins = pow(1.0 - abs(2.0 * fbm(vp) - 1.0), 26.0) + 0.6 * pow(1.0 - abs(2.0 * fbm(vp * 2.3 + 8.0) - 1.0), 40.0);
+    vec2 vp = s * 2.1 + 0.4 * vec2(fbm4(s * 2.0 + 5.0), fbm4(s * 2.0 + 19.0));
+    float veins = pow(1.0 - abs(2.0 * fbm4(vp) - 1.0), 26.0) + 0.6 * pow(1.0 - abs(2.0 * fbm4(vp * 2.3 + 8.0) - 1.0), 40.0);
     float throb = 0.55 + 0.45 * full + 0.6 * u_beat * react;
     w = mix(w, vec3(0.32, 0.02, 0.1) * (0.6 + 1.6 * throb), clamp(veins * throb, 0.0, 1.0) * s_veins / 100.0);
 

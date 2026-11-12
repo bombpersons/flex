@@ -22,12 +22,6 @@ float lit_for(int i) {
     return u_sound_silence;
 }
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
 // Whether a pixel of the font is on: column `col` across the word, row `row` from the top.
 bool lit(int word, int col, int row) {
     int len = WORDS[word * 10];

@@ -31,6 +31,8 @@ FFMPEG_SHA256=4d2060a8b34a940aa47d785142055bb92a63053781e55f2ace4546edd519a8f5
 MPV_BUILDS=shinchiro/mpv-winbuild-cmake
 
 fail() { echo "error: $*" >&2; exit 1; }
+# shellcheck source=notices.sh
+source "$ROOT/.github/scripts/notices.sh"
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
 # --- Checks ---------------------------------------------------------------------------
@@ -80,12 +82,7 @@ done
 # --- Flex -----------------------------------------------------------------------------
 
 cp "$ROOT/crates/flex-web/web/vendor/jassub/LICENSE.txt" "$DIR/licenses/jassub-LICENSE.txt"
-cp "$ROOT/models/yunet.LICENSE" "$DIR/licenses/yunet-LICENSE.txt"
-cp "$ROOT/models/flow.LICENSE" "$DIR/licenses/neuflow-LICENSE.txt"
-cp "$ROOT/models/face_mesh.LICENSE" "$DIR/licenses/face-mesh-LICENSE.txt"
-cp "$ROOT/models/head_angle.LICENSE" "$DIR/licenses/head-angle-LICENSE.txt"
-cp "$ROOT/models/sound.LICENSE" "$DIR/licenses/yamnet-LICENSE.txt"
-JASSUB_VERSION=$(sed -n 's/^JASSUB \([0-9.]*\).*/\1/p' "$ROOT/crates/flex-web/web/vendor/jassub/README.txt")
+copy_model_licenses "$ROOT" "$DIR/licenses"
 
 cp "$EXE" "$DIR/flex.exe"
 # Plugins: plugins/<id>/plugin.toml plus its program. They're off until switched on in
@@ -121,7 +118,8 @@ release's.
 The plugins folder has optional add-ons (such as lighting an LED strip behind the TV);
 they only run once switched on in Settings → Plugins.
 
-Everything in this folder besides flex.exe and the plugins is third-party software; see
+flex.exe, the plugins, the effects folder and models/moge-segment.safetensors are Flex's own
+(LICENSE.txt). Everything else in this folder is third-party software; see
 THIRD-PARTY-NOTICES.txt.
 EOF
 
@@ -145,64 +143,8 @@ libmpv (libmpv-2.dll), mpv commit $MPV_COMMIT
     (build scripts and the versions of its dependencies:
     https://github.com/$MPV_BUILDS)
 
-NeuFlow v2 (models/flow.safetensors; finds how the picture moves for video effects)
-  License: Apache 2.0 (licenses/neuflow-LICENSE.txt).
-  Source: https://github.com/neufieldrobotics/NeuFlow_v2
-
-YuNet (models/yunet.bin; finds faces for video effects)
-  License: MIT (licenses/yunet-LICENSE.txt).
-  Source: https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
-
-MediaPipe Face Mesh V2 (models/face_mesh.bin; a detailed mesh of a face for video effects)
-  License: Apache 2.0 (licenses/face-mesh-LICENSE.txt).
-  Source: https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker
-
-Head pose network (models/head_angle.bin; which way heads point for video effects)
-  License: MIT (licenses/head-angle-LICENSE.txt).
-  Source: https://github.com/yakhyo/head-pose-estimation
-
-YAMNet (models/sound.safetensors; what kind of sound is playing, for video effects)
-  License: Apache 2.0 (licenses/yamnet-LICENSE.txt).
-  Source: https://github.com/tensorflow/models/tree/master/research/audioset/yamnet
-
-AnimeGANv3 by Asher Chan (redraws the picture as anime for the Anime, Drawn World and Drawn
-People effects)
-  Not included: downloaded from the author's own releases the first time a style is used.
-  License: free for non-commercial use only; commercial use needs the author's permission.
-  Source: https://github.com/TachibanaYoshino/AnimeGANv3 and
-  https://github.com/TachibanaYoshino/AnimeGANv3_Portrait_Inference (Ghibli and sketch styles)
-
-Fast neural style (repaints the picture in a painting's style for the Painting, Drawn World and
-Drawn People effects)
-  Not included: downloaded from the ONNX Model Zoo the first time a style is used.
-  License: BSD 3-Clause (the ONNX Model Zoo's; trained with PyTorch's examples).
-  Source: https://huggingface.co/onnxmodelzoo (mosaic-9, candy-9, rain-princess-9, udnie-9,
-  pointilism-9) and https://github.com/pytorch/examples/tree/main/fast_neural_style
-
-Informative Drawings by Caroline Chan, Fredo Durand and Phillip Isola (line drawings for the
-Line Art, Drawn World and Drawn People effects)
-  Not included: downloaded the first time a style is used, from the copy of its weights in
-  ControlNet's annotators (https://huggingface.co/lllyasviel/Annotators: sk_model.pth and
-  sk_model2.pth).
-  License: MIT.
-  Source: https://github.com/carolineec/informative-drawings
-
-Self-Organising Textures by Eyvind Niklasson, Alexander Mordvintsev, Ettore Randazzo and Michael
-Levin (the living textures grown for the Living Textures, Drawn World and Drawn People effects)
-  Not included: the article's trained models are downloaded the first time a texture is used.
-  License: CC BY 4.0 (the article and its models; its demo's code, which Flex's follows, is
-  Apache 2.0).
-  Source: https://distill.pub/selforg/2021/textures and
-  https://github.com/distillpub/post--selforg-textures
-
-JASSUB $JASSUB_VERSION (built into flex.exe; draws subtitles in the web UI's player)
-  JASSUB itself: MIT (licenses/jassub-LICENSE.txt). Its WebAssembly contains libass
-  (ISC), FreeType (FTL or GPL 2), HarfBuzz (MIT), FriBidi (LGPL 2.1 or later) and their
-  dependencies; Liberation Sans (SIL Open Font License) is its default font.
-  Source, including those libraries: https://github.com/ThaUnknown/jassub/tree/v$JASSUB_VERSION
-
-Rust crates compiled into flex.exe and the plugins: licenses/rust-crates.txt
 EOF
+common_notices "$ROOT" "$TAG" flex.exe >>"$DIR/THIRD-PARTY-NOTICES.txt"
 
 cat >"$OUT/release-notes.md" <<EOF
 Run **$NAME-setup.exe** to install or update Flex: it installs for your account only (no admin prompt), and if Flex is running it's stopped first and started again afterwards. For unattended updates, run it with \`/SILENT\` or \`/VERYSILENT\`. Your libraries and history are kept in \`%APPDATA%\\Flex\`.

@@ -3,12 +3,6 @@
 // picture with it. Without music the film looks as it is. A ring in the corner shows the mood's
 // colour, like the stone in a mood ring.
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
 float luma(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
 }

@@ -1,15 +1,6 @@
 // Neon Grid: outlines from jumps in depth and in the picture, coloured by distance, and a grid
 // laid out in perspective using depth as how far away each point is.
 
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
-vec2 depth_slope(vec2 uv, float reach) {
-    vec2 e = reach / u_resolution;
-    return vec2(depth_at(uv + vec2(e.x, 0.0)) - depth_at(uv - vec2(e.x, 0.0)), depth_at(uv + vec2(0.0, e.y)) - depth_at(uv - vec2(0.0, e.y)));
-}
-
 float luma(vec2 uv) {
     return dot(texture(u_video, uv).rgb, vec3(0.3, 0.59, 0.11));
 }

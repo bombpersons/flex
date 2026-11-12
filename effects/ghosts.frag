@@ -1,13 +1,8 @@
 // Ghosts: hung through the air of the shot's world, a few to each cell of a grid around where the
 // camera is looking, each drifting on a slow loop of its own. Whatever's nearer stands in front.
 
-float hash(vec3 p) {
-    p = fract(p * vec3(0.1031, 0.1137, 0.1279));
-    p += dot(p, p.yzx + 33.33);
-    return fract((p.x + p.y) * p.z);
-}
-
-float noise(vec2 p) {
+// Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
+float noise_h3(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
     float a = hash(vec3(i, 0.0)), b = hash(vec3(i + vec2(1.0, 0.0), 0.0));
@@ -15,23 +10,19 @@ float noise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-float fbm(vec2 p) {
+float fbm_h3(vec2 p) {
     float sum = 0.0, amount = 0.5;
     for (int i = 0; i < 4; i++) {
-        sum += amount * noise(p);
+        sum += amount * noise_h3(p);
         p = p * 2.03 + vec2(17.1, 9.2);
         amount *= 0.5;
     }
     return sum;
 }
 
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 // How tall something looks on screen `away` from the camera, if it's `size` of the picture's height
 // 1 away. A shot's world has no real scale, so sizes go by the picture instead.
-float screen_size(float size, float away) {
+float picture_size(float size, float away) {
     return size / max(away, 1e-3) * (u_video_rect.w - u_video_rect.y);
 }
 
@@ -46,7 +37,7 @@ float ghost(vec2 q, float t, float seed) {
     float body = (1.0 - smoothstep(width - 0.03, width, abs(q.x))) * smoothstep(hem, hem + 0.06, q.y) * step(q.y, 0.32);
     float shape = max(head, body);
     // Thinning out towards the hem.
-    shape *= mix(0.35, 1.0, smoothstep(-0.5, 0.0, q.y)) * (0.75 + 0.25 * noise(q * 9.0 + vec2(0.0, t)));
+    shape *= mix(0.35, 1.0, smoothstep(-0.5, 0.0, q.y)) * (0.75 + 0.25 * noise_h3(q * 9.0 + vec2(0.0, t)));
     // Hollow eyes and an open mouth.
     float eyes = 1.0 - smoothstep(0.03, 0.045, length(vec2(abs(q.x) - 0.065, (q.y - 0.33) * 0.8)));
     float mouth = 1.0 - smoothstep(0.025, 0.04, length(vec2(q.x, (q.y - 0.21) * 0.6)));
@@ -94,7 +85,7 @@ vec4 effect(vec2 uv) {
             if (kept <= 0.0) continue;
             vec3 place = world_to_screen(world);
             if (place.z < 0.15) continue;
-            float tall = screen_size(0.22 * s_size / 100.0, place.z);
+            float tall = picture_size(0.22 * s_size / 100.0, place.z);
             vec2 q = (uv - place.xy) * aspect / tall;
             q.x += startled * 0.08 * sin(t * 37.0 + phase * 5.0);
             if (abs(q.x) > 0.6 || abs(q.y) > 0.6) continue;

@@ -80,10 +80,10 @@ impl SystemSound {
 
 impl Drop for SystemSound {
     fn drop(&mut self) {
+        // Not waited for: this is dropped on the UI thread, and the recording thread may be in
+        // the middle of opening the output, which can take seconds. It stops by itself.
         self.shared.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        drop(self.thread.take());
     }
 }
 

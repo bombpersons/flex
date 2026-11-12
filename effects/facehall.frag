@@ -1,10 +1,5 @@
 // Hall of Faces: draws each face again, several times, in a ring that turns around it.
 
-vec3 hue(vec3 c, float a) {
-    vec3 k = vec3(0.57735);
-    return c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
-}
-
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) {
@@ -36,7 +31,7 @@ vec4 effect(vec2 uv) {
                     copy = skin.rgb;
                     mask = skin.a * u_face_seen[i];
                 }
-                c = mix(c, hue(copy, a + u_time * 0.5) * 1.15, mask);
+                c = mix(c, hue_rotate(copy, a + u_time * 0.5) * 1.15, mask);
             }
         }
     }

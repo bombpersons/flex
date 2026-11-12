@@ -256,9 +256,10 @@ fn softmax(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l
 
 // 3x3 convolution, padding 1, stride x1 (1 or 2): in [k channels][H = m][W = n] at a_off,
 // weights [x0][k][3][3] at b_off, bias at bias_off (or NONE), out [x0][H'][W'] at c_off where
-// H' = (H - 1) / stride + 1. Flags: RELU_IN, RELU, LEAKY2, ACCUMULATE, LEAKY2_LAST, REFLECT. Each thread makes 8 output
-// channels (group wg.z) of one pixel from one read of its 3x3 neighbourhood, with the group's
-// weights for 32 input channels at a time in workgroup memory.
+// H' = (H - 1) / stride + 1. Flags: RELU_IN, EDGE, REFLECT, RELU, LEAKY2, ACCUMULATE,
+// LEAKY2_LAST. Each thread makes 8 output channels (group wg.z) of one pixel from one read of its
+// 3x3 neighbourhood, with the group's weights for 32 input channels at a time in workgroup
+// memory.
 
 // [ci < 32][tap 9][8 output channels]. Plain floats: writing one component of a vec4 in
 // workgroup memory (cw[i][o % 4] = v) lost three of every four writes on Metal.
@@ -279,6 +280,7 @@ fn conv3x3(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     let plane = p.m * p.n;
     let relu_in = (p.flags & RELU_IN) != 0u;
     let edge = (p.flags & EDGE) != 0u;
+    let mirrored = (p.flags & REFLECT) != 0u;
     var acc0 = vec4<f32>(0.0);
     var acc1 = vec4<f32>(0.0);
     for (var c0 = 0u; c0 < p.k; c0 += 32u) {
@@ -297,8 +299,9 @@ fn conv3x3(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
             for (var ci = 0u; ci < kc; ci++) {
                 let src = p.a_off + outer * p.a_os + (c0 + ci) * plane;
                 for (var tap = 0u; tap < 9u; tap++) {
-                    let yy = i32(y * stride) + i32(tap / 3u) - 1;
-                    let xx = i32(x * stride) + i32(tap % 3u) - 1;
+                    var yy = i32(y * stride) + i32(tap / 3u) - 1;
+                    var xx = i32(x * stride) + i32(tap % 3u) - 1;
+                    if (mirrored) { yy = reflect(yy, i32(p.m)); xx = reflect(xx, i32(p.n)); }
                     let inside = edge || (yy >= 0 && yy < i32(p.m) && xx >= 0 && xx < i32(p.n));
                     let at = u32(clamp(yy, 0, i32(p.m) - 1)) * p.n + u32(clamp(xx, 0, i32(p.n) - 1));
                     var v = select(0.0, mem[src + at], inside);
@@ -511,46 +514,15 @@ fn wino_out(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
-// Transposed convolution with kernel = stride = x1 (no overlap): in [k][m][n] at a_off,
-// weights [k][x0][s][s] at b_off (PyTorch's layout), bias at bias_off, out [x0][m*s][n*s] at
-// c_off. One thread per output value.
-@compute @workgroup_size(16, 16)
-fn conv_transpose(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let s = p.x1;
-    let ow = p.n * s;
-    let oh = p.m * s;
-    let x = gid.x;
-    let y = gid.y;
-    let co = gid.z;
-    if (x >= ow || y >= oh || co >= p.x0) { return; }
-    let ix = x / s;
-    let iy = y / s;
-    let tap = (y % s) * s + (x % s);
-    let plane = p.m * p.n;
-    var acc = bias(co);
-    for (var ci = 0u; ci < p.k; ci++) {
-        acc += mem[p.a_off + ci * plane + iy * p.n + ix] * w[p.b_off + (ci * p.x0 + co) * s * s + tap];
-    }
-    mem[p.c_off + co * oh * ow + y * ow + x] = acc;
-}
-
-// Bilinear resize, align_corners = true (or false with EDGE): [k channels][m][n] at a_off to
-// [k][x0][x1] at c_off.
+// Bilinear resize, align_corners = true: [k channels][m][n] at a_off to [k][x0][x1] at c_off.
 @compute @workgroup_size(16, 16)
 fn resize(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
     let y = gid.y;
     let c = gid.z;
     if (x >= p.x1 || y >= p.x0 || c >= p.k) { return; }
-    var fy: f32;
-    var fx: f32;
-    if ((p.flags & EDGE) != 0u) {
-        fy = max((f32(y) + 0.5) * f32(p.m) / f32(p.x0) - 0.5, 0.0);
-        fx = max((f32(x) + 0.5) * f32(p.n) / f32(p.x1) - 0.5, 0.0);
-    } else {
-        fy = f32(y) * select(0.0, f32(p.m - 1u) / f32(p.x0 - 1u), p.x0 > 1u);
-        fx = f32(x) * select(0.0, f32(p.n - 1u) / f32(p.x1 - 1u), p.x1 > 1u);
-    }
+    let fy = f32(y) * select(0.0, f32(p.m - 1u) / f32(p.x0 - 1u), p.x0 > 1u);
+    let fx = f32(x) * select(0.0, f32(p.n - 1u) / f32(p.x1 - 1u), p.x1 > 1u);
     let y0 = min(u32(fy), p.m - 1u);
     let x0 = min(u32(fx), p.n - 1u);
     let y1 = min(y0 + 1u, p.m - 1u);
@@ -569,9 +541,7 @@ fn resize(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn copy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.y * 65535u * 64u + gid.x;
     if (i >= p.m) { return; }
-    if ((p.flags & (ACCUMULATE | EDGE)) == (ACCUMULATE | EDGE)) {
-        mem[p.c_off + i] += w[p.a_off + i];
-    } else if ((p.flags & ACCUMULATE) != 0u) {
+    if ((p.flags & ACCUMULATE) != 0u) {
         mem[p.c_off + i] += mem[p.a_off + i];
     } else if ((p.flags & B_MEM) != 0u) {
         mem[p.c_off + i] = mem[p.a_off + i];

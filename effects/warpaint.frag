@@ -1,6 +1,6 @@
 // War Paint: marks drawn in the face's own coordinates, so they stay on the skin as it moves.
 
-vec3 hue(float t) {
+vec3 soft_hue(float t) {
     return 0.55 + 0.45 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
 }
 
@@ -28,7 +28,7 @@ vec4 effect(vec2 uv) {
     m = max(m, slash(p, vec2(0.07, 0.19), vec2(0.09, 0.11), 0.02));
     m *= (1.0 - eye_at(uv)) * (1.0 - lips_at(uv)) * (1.0 - mouth_at(uv)) * on;
     float beat = u_beat * s_react / 100.0;
-    vec3 ink = hue(float(who) * 0.27 + 0.55 + u_time * 0.02);
+    vec3 ink = soft_hue(float(who) * 0.27 + 0.55 + u_time * 0.02);
     float luma = dot(c, vec3(0.3, 0.59, 0.11));
     c = mix(c, ink * (0.25 + luma * 1.2), m);
     c += ink * m * (0.15 + s_glow / 100.0 * (0.5 + beat * 1.4));

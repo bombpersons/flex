@@ -5,11 +5,10 @@ with SEG_FETCH=1, anywhere: it was run on Colab).
     kaggle kernels status bombpersons/flex-moge-segment-train
     kaggle kernels output bombpersons/flex-moge-segment-train -p runs/moge-segment
 
-The same head as tools/segment's, on MoGe-2 ViT-S instead of Depth Anything V2, which stays
-frozen: it reads the two transformer layers' tokens the neck reads (normed) and the neck's
-64-channel features at 8x the patch grid, which the depth pass has already worked out. It's
-built only from what depth.wgsl can run (1x1 and 3x3 convolutions, ReLU, align_corners
-bilinear resizes, additions).
+A head on MoGe-2 ViT-S, which stays frozen: it reads the two transformer layers' tokens the
+neck reads (normed) and the neck's 64-channel features at 8x the patch grid, which the depth
+pass has already worked out. It's built only from what depth.wgsl can run (1x1 and 3x3
+convolutions, ReLU, align_corners bilinear resizes, additions).
 
 It gives four sets of answers. What each pixel is, of SCENE: from COCO panoptic and ADE20K's
 150-class Scene Parsing set, with their classes mapped by name. For a person's pixels, what
@@ -20,21 +19,34 @@ pixels, which part of the body they are, of BODY, whatever they're wearing: from
 faces and hair are heads). And which person each person's pixel belongs to, as CENTRES: how
 near each person's centre each pixel is (1 at the centre, a Gaussian), and for a person's pixels
 how far it is to their centre (in picture heights, x then y), from COCO's outlines of each
-person and from ATR's one person a picture. Of each batch: 30% COCO, 15% COCO pictures with
-DensePose's people, 35% ADE20K and 20% ATR.
+person and from ATR's one person a picture.
+
+For films' close-ups and crowds, and for drawn people: CIHP (crowds of people, each labelled
+apart, with their parts); Danbooru-Parsing (anime portraits, with skin, hair and clothes); and
+skytnt's anime-segmentation (characters cut out, put over backgrounds without people one to
+three at a time at all sizes, and pictures with their characters' masks). Training pictures with
+someone big enough in them are closed in on them CLOSE_UPS of the time. Of each batch (MIX): 22%
+COCO, 12% COCO pictures with DensePose's people, 27% ADE20K, 10% ATR, 13% CIHP, 5% anime faces,
+3% anime pictures and 8% anime cut-outs.
 COCO's panoptic labels come from cocodataset.org, DensePose's from Meta's dl.fbaipublicfiles.com,
-ATR from Hugging Face (mattmdjaga/human_parsing_dataset), the depth model from Hugging Face at
-the revision Flex uses.
+ATR from Hugging Face (mattmdjaga/human_parsing_dataset), CIHP and Danbooru-Parsing from their
+authors' Google Drive, the anime cut-outs from Hugging Face (skytnt/anime-segmentation), the
+depth model from Hugging Face at the revision Flex uses.
 Everything in /kaggle/working/out comes back as output: head.safetensors (the best so far),
 metrics.json, and samples_*.jpg (validation pictures with their masks).
 
 Scored separately on each dataset's validation set, as IoU (ATR's: its last 500 pictures;
-DensePose's: its minival set), and for CENTRES, how many people's centres are found and how
-many person pixels point within 6 pixels of theirs. SEG_ROOT, SEG_OUT, SEG_PANOPTIC,
-SEG_DENSEPOSE (where DensePose's files go), SEG_DENSEPOSE_TRAIN and SEG_DENSEPOSE_VAL (which of
-them), SEG_MINUTES, SEG_BATCH, SEG_EVAL_MINUTES and SEG_LIMIT (only that many pictures of each
-set, spread through it) are for trying it out away from Kaggle; with SEG_FETCH=1 it downloads the datasets
-itself (as on Colab and Modal).
+DensePose's: its minival set; CIHP's: a quarter of its; Danbooru-Parsing's test set; the last
+300 of skytnt's pictures, for PERSON alone), and for CENTRES (COCO's and CIHP's), how many
+people's centres are found (F1, each found centre matched to one person) and how many person
+pixels point within 6 pixels of theirs.
+
+SEG_ROOT, SEG_OUT, SEG_PANOPTIC, SEG_DENSEPOSE, SEG_CIHP, SEG_ANIME_FACES, SEG_ANIME_CUTOUTS and
+SEG_MOGE (where things go), SEG_DENSEPOSE_TRAIN and SEG_DENSEPOSE_VAL (which of DensePose's
+files), SEG_ATR_REVISION, SEG_RUN (carry on that run from OUT's resume.pt, if it's there),
+SEG_MINUTES, SEG_BATCH, SEG_EVAL_MINUTES, SEG_WORKERS (DataLoader workers) and SEG_LIMIT (only that many pictures of each set, spread through it) are for trying
+it out away from Kaggle; with SEG_FETCH=1 it downloads the datasets itself (as on Colab and
+Modal).
 """
 
 import glob
@@ -73,8 +85,6 @@ MOGE_DIR = os.environ.get("SEG_MOGE", "/tmp/MoGe")
 # The grid crates/flex-app/src/depth.rs runs the model at.
 PATCH, GW, GH = 14, 25, 14
 WIDTH, HEIGHT = GW * PATCH, GH * PATCH
-MEAN = torch.tensor([0.485, 0.456, 0.406])[:, None, None]
-STD = torch.tensor([0.229, 0.224, 0.225])[:, None, None]
 
 SCENE = ["other", "person", "wall", "sky", "ground", "ceiling", "water", "plant", "window", "vehicle", "animal", "building", "furniture"]
 OTHER, PERSON, WALL, SKY, GROUND, CEILING, WATER, PLANT, WINDOW, VEHICLE, ANIMAL, BUILDING, FURNITURE = range(len(SCENE))
@@ -97,13 +107,18 @@ BODY_COLOURS = np.array([[255, 230, 60], [60, 120, 255], [60, 220, 90], [255, 60
 # its and the offsets' errors count against the classes'.
 CENTRE_SIGMA = 6.0
 CENTRE_WEIGHT, OFFSET_WEIGHT = 100.0, 5.0
+# How often a training picture with someone big enough in it is closed in on them (see crop_box).
+CLOSE_UPS = 0.4
+# Of each batch: COCO, COCO with DensePose's people, ADE20K, ATR, CIHP, anime faces, anime pictures
+# and anime cut-outs.
+MIX = [0.22, 0.12, 0.27, 0.1, 0.13, 0.05, 0.03, 0.08]
 DENSEPOSE = os.environ.get("SEG_DENSEPOSE", "/tmp/densepose")
 DENSEPOSE_URL = "https://dl.fbaipublicfiles.com/densepose"
 # DensePose's 14 drawn parts (0 is none): torso, right and left hand, left and right foot, upper
 # legs, lower legs, upper arms, lower arms, head.
 DP_BODY = np.array([IGNORE, TORSO, HAND, HAND, FOOT, FOOT, LEG, LEG, LEG, LEG, ARM, ARM, ARM, ARM, HEAD], dtype=np.uint8)
 ATR = "mattmdjaga/human_parsing_dataset"
-ATR_REVISION = os.environ.get("SEG_ATR_REVISION", "main")
+ATR_REVISION = os.environ.get("SEG_ATR_REVISION", "db120bb5c18c146a8fbd2160f7575a288269fe7d")
 # ATR's labels: 0 background, 1 hat, 2 hair, 3 sunglasses, 4 upper clothes, 5 skirt, 6 pants,
 # 7 dress, 8 belt, 9 and 10 shoes, 11 face, 12 and 13 legs, 14 and 15 arms, 16 bag, 17 scarf.
 ATR_PART = np.full(256, IGNORE, dtype=np.uint8)
@@ -119,6 +134,47 @@ ATR_BODY[[1, 2, 3, 11]] = HEAD
 ATR_BODY[8] = TORSO
 ATR_BODY[[6, 12, 13]] = LEG
 ATR_BODY[[9, 10]] = FOOT
+# SCENE's label for "not a person, but what it is isn't known" (backgrounds that hold no people):
+# it counts against PERSON only.
+NOT_PERSON = 254
+# CIHP (crowds, each person labelled apart): 0 background, 1 hat, 2 hair, 3 glove, 4 sunglasses,
+# 5 upper clothes, 6 dress, 7 coat, 8 socks, 9 pants, 10 torso skin, 11 scarf, 12 skirt, 13 face,
+# 14 and 15 arms, 16 and 17 legs, 18 and 19 shoes. Some small people far off aren't labelled, so
+# its background doesn't count for SCENE.
+CIHP = os.environ.get("SEG_CIHP", "/tmp/cihp")
+CIHP_URL = "https://drive.usercontent.google.com/download?id=1HdqA8yWVxZ8od0hngKzZTziHx_ONzCWj&export=download&confirm=t"
+CIHP_PART = np.full(256, IGNORE, dtype=np.uint8)
+CIHP_PART[[10, 13, 14, 15, 16, 17]] = SKIN
+CIHP_PART[2] = HAIR
+CIHP_PART[[1, 3, 5, 6, 7, 8, 9, 11, 12, 18, 19]] = CLOTHES
+CIHP_SCENE = np.full(256, PERSON, dtype=np.uint8)
+CIHP_SCENE[0] = IGNORE
+# As ATR's: bare arms take in the hands, and tops, dresses and coats cover more than one part.
+CIHP_BODY = np.full(256, IGNORE, dtype=np.uint8)
+CIHP_BODY[[1, 2, 4, 13]] = HEAD
+CIHP_BODY[3] = HAND
+CIHP_BODY[10] = TORSO
+CIHP_BODY[[9, 16, 17]] = LEG
+CIHP_BODY[[18, 19]] = FOOT
+# Danbooru-Parsing (anime portraits, from StyleAnime): 0 background, 1 skin, 2 and 3 brows, 4 and
+# 5 eyes, 6 glasses, 7 and 8 ears, 9 earring, 10 nose, 11 mouth, 12 and 13 lips, 14 neck,
+# 15 necklace, 16 clothes, 17 hair, 18 hat. Hands and what they hold are left as background, so
+# only background well away from the person counts as NOT_PERSON (see `anime_face_classes`).
+ANIME_FACES = os.environ.get("SEG_ANIME_FACES", "/tmp/danbooru-parsing")
+ANIME_FACES_URL = "https://drive.usercontent.google.com/download?id=13C7Jphi8dYkY_0HoqIZeXAIkppyKlzmQ&export=download&confirm=t"
+AF_PART = np.full(256, IGNORE, dtype=np.uint8)
+AF_PART[[1, 2, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14]] = SKIN
+AF_PART[17] = HAIR
+AF_PART[[16, 18]] = CLOTHES
+AF_BODY = np.full(256, IGNORE, dtype=np.uint8)
+AF_BODY[[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 17, 18]] = HEAD
+AF_PERSON = np.zeros(256, dtype=bool)
+AF_PERSON[1:] = True
+# skytnt's anime-segmentation: characters cut out (fg, RGBA) and backgrounds without people (bg),
+# put together here, and pictures with their characters' masks (imgs-masks), from Hugging Face.
+ANIME_CUTOUTS = "skytnt/anime-segmentation"
+ANIME_CUTOUTS_REVISION = "6685505e1e3c02ac0483398e633922b31de89fb0"
+ANIME_CUTOUTS_DIR = os.environ.get("SEG_ANIME_CUTOUTS", "/tmp/anime-cutouts")
 
 
 def scene_of(name):
@@ -154,6 +210,8 @@ def scene_of(name):
 SAMPLES = 8
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+# The CPUs this may use (a container's share, not the whole machine's).
+WORKERS = int(os.environ.get("SEG_WORKERS", len(os.sched_getaffinity(0))))
 
 
 def sh(cmd):
@@ -249,7 +307,10 @@ def densepose(names):
     for name in names:
         path = f"{DENSEPOSE}/{name}"
         if not os.path.exists(path):
-            sh(f"curl -sSfL -o {path}.part {DENSEPOSE_URL}/{name} && mv {path}.part {path}")
+            # Over plain http too if https fails (Meta's certificate for it expired on 11 November
+            # 2026): they're only labels, read as JSON, as COCO's are fetched over http.
+            plain = DENSEPOSE_URL.replace("https://", "http://", 1)
+            sh(f"(curl -sSfL -o {path}.part {DENSEPOSE_URL}/{name} || curl -sSfL -o {path}.part {plain}/{name}) && mv {path}.part {path}")
         with open(path) as f:
             data = json.load(f)
         for a in data["annotations"]:
@@ -351,6 +412,195 @@ def atr_items():
     return items[:-500], items[-500:]
 
 
+# ---- CIHP, Danbooru-Parsing and skytnt's anime-segmentation ----------------------------------
+
+
+def get_cihp():
+    """CIHP from its authors' Google Drive (about 2 GB): Training and Validation, each with
+    Images, Category_ids (the parts) and Human_ids (who's who)."""
+    root = f"{CIHP}/instance-level_human_parsing"
+    if not os.path.exists(f"{root}/Validation/Human_ids"):
+        os.makedirs(CIHP, exist_ok=True)
+        sh(f"curl -sSfL -o /tmp/cihp.tar.gz '{CIHP_URL}' && tar xzf /tmp/cihp.tar.gz -C {CIHP} && rm /tmp/cihp.tar.gz")
+    return root
+
+
+def cihp_items(root, split):
+    names = sorted(os.path.basename(p)[:-4] for p in glob.glob(f"{root}/{split}/Human_ids/*.png"))
+    return [("cihp", f"{root}/{split}/%s/{n}", None, None, None) for n in names]
+
+
+def get_anime_faces():
+    """Danbooru-Parsing from StyleAnime's Google Drive (about 200 MB)."""
+    root = f"{ANIME_FACES}/Danbooru-Parsing"
+    if not os.path.exists(f"{root}/anime_seg_test_68"):
+        os.makedirs(ANIME_FACES, exist_ok=True)
+        sh(f"curl -sSfL -o /tmp/faces.zip '{ANIME_FACES_URL}' && unzip -q -o /tmp/faces.zip -x '__MACOSX/*' '*.DS_Store' -d {ANIME_FACES} && rm /tmp/faces.zip")
+    return root
+
+
+def anime_face_items(root, split):
+    labels = sorted(glob.glob(f"{root}/anime_seg_{split}/*.png"))
+    return [("face", p, None, None, None) for p in labels if os.path.exists(p.replace("anime_seg_", "anime_face_")[:-4] + ".jpg")]
+
+
+# skytnt's zips' members: [(zip, member)], read in each worker through its own open zips.
+CUTOUT_FG, CUTOUT_BG, ZIPS = [], [], {}
+
+
+def zip_read(path, member):
+    # Each process its own: a zip opened before the DataLoader's workers fork would be shared.
+    key = (os.getpid(), path)
+    if key not in ZIPS:
+        ZIPS[key] = zipfile.ZipFile(path)
+    return ZIPS[key].read(member)
+
+
+def get_anime_cutouts():
+    """skytnt's anime-segmentation from Hugging Face (about 17.5 GB, left zipped): the cut-out
+    characters and backgrounds, and its pictures with masks, unpacked. Returns the pictures as
+    items: all but the last 300 for training, those for checking."""
+    from huggingface_hub import hf_hub_download
+
+    names = [f"data/fg-{i:02d}.zip" for i in range(6)] + [f"data/bg-{i:02d}.zip" for i in range(5)] + ["data/imgs-masks.zip"]
+    for name in names:
+        path = hf_hub_download(ANIME_CUTOUTS, name, repo_type="dataset", revision=ANIME_CUTOUTS_REVISION, local_dir=ANIME_CUTOUTS_DIR)
+        if name.endswith("imgs-masks.zip"):
+            if not os.path.exists(f"{ANIME_CUTOUTS_DIR}/masks"):
+                with zipfile.ZipFile(path) as z:
+                    z.extractall(ANIME_CUTOUTS_DIR)
+            continue
+        with zipfile.ZipFile(path) as z:
+            members = [(path, m) for m in z.namelist() if m.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
+        (CUTOUT_FG if "/fg-" in name else CUTOUT_BG).extend(members)
+    pictures = {os.path.splitext(e.name)[0]: e.path for e in os.scandir(f"{ANIME_CUTOUTS_DIR}/imgs")}
+    items = []
+    for m in sorted(glob.glob(f"{ANIME_CUTOUTS_DIR}/masks/*")):
+        stem = os.path.splitext(os.path.basename(m))[0]
+        if stem in pictures:
+            items.append(("animepic", (pictures[stem], m), None, None, None))
+    print(f"anime cut-outs: {len(CUTOUT_FG)} characters, {len(CUTOUT_BG)} backgrounds, {len(items)} pictures with masks", flush=True)
+    return items[:-300], items[-300:]
+
+
+def far_from(mask, fraction):
+    """Where's further than about `fraction` of the picture's smaller side from `mask`."""
+    h, w = mask.shape
+    small = Image.fromarray(mask.astype(np.uint8) * 255).resize((64, max(1, round(64 * h / w))), Image.BILINEAR)
+    near = small.filter(ImageFilter.MaxFilter(2 * max(1, round(64 * fraction * min(h, w) / w)) + 1))
+    return np.asarray(near.resize((w, h), Image.BILINEAR)) < 64
+
+
+def cutouts_picture(index):
+    """One to three of the cut-out characters (the first `index`) over a background, at sizes
+    from small to bigger than the picture (close-ups): the picture, [3][h][w] labels and who's
+    who, at twice the labels' size."""
+    cw, ch = WIDTH * 2, HEIGHT * 2
+    path, member = random.choice(CUTOUT_BG)
+    bg = Image.open(io.BytesIO(zip_read(path, member)))
+    bg.draft("RGB", (cw, ch))
+    bg = bg.convert("RGB")
+    w, h = bg.size
+    s = random.uniform(0.5, 1.0)
+    bw = min(w, h * cw / ch) * s
+    bh = bw * ch / cw
+    x, y = random.uniform(0, w - bw), random.uniform(0, h - bh)
+    canvas = bg.resize((cw, ch), Image.BILINEAR, box=(x, y, min(x + bw, w), min(y + bh, h)))
+    who = np.zeros((ch, cw), dtype=np.uint8)
+    picks = [index] + [random.randrange(len(CUTOUT_FG)) for _ in range(random.choices([0, 1, 2], [0.5, 0.3, 0.2])[0])]
+    for k, i in enumerate(picks, 1):
+        fg = Image.open(io.BytesIO(zip_read(*CUTOUT_FG[i]))).convert("RGBA")
+        box = fg.getchannel("A").point(lambda a: 255 if a > 127 else 0).getbbox()
+        if not box:
+            continue
+        fg = fg.crop(box)
+        tall = ch * (random.uniform(0.3, 1.0) if random.random() < 0.6 else random.uniform(1.0, 2.0))
+        scale = tall / fg.height
+        fg = fg.resize((max(1, round(fg.width * scale)), max(1, round(fg.height * scale))), Image.BILINEAR)
+        fw, fh = fg.size
+        px = round(random.uniform(-0.3 * fw, cw - 0.7 * fw))
+        # Taller than the picture: their top (as a close-up's head and shoulders) is in it.
+        py = round(-random.uniform(0, 0.15) * fh) if fh > ch else round(random.uniform(0, ch - fh))
+        canvas.paste(fg, (px, py), fg)
+        alpha = np.zeros((ch, cw), dtype=bool)
+        x0, y0, x1, y1 = max(px, 0), max(py, 0), min(px + fw, cw), min(py + fh, ch)
+        if x1 > x0 and y1 > y0:
+            alpha[y0:y1, x0:x1] = np.asarray(fg.getchannel("A"))[y0 - py : y1 - py, x0 - px : x1 - px] > 127
+        who[alpha] = k
+    scene = np.where(who > 0, PERSON, NOT_PERSON).astype(np.uint8)
+    unknown = np.full_like(scene, IGNORE)
+    return canvas, np.stack([scene, unknown, unknown]), who
+
+
+def new_source(kind, where, index):
+    """CIHP's, Danbooru-Parsing's and skytnt's pictures: the picture, [3][h][w] labels (SCENE,
+    PARTS, BODY) and who's who (0 nobody, each person a number), None if it isn't known; and
+    where the heat of CENTRES counts (None: wherever SCENE is known)."""
+    if kind == "cihp":
+        img = Image.open(where % "Images" + ".jpg").convert("RGB")
+        a = np.asarray(Image.open(where % "Category_ids" + ".png"))
+        who = np.asarray(Image.open(where % "Human_ids" + ".png")).astype(np.uint8)
+        # Its background doesn't count for CENTRES either: some people there aren't labelled.
+        return img, np.stack([CIHP_SCENE[a], CIHP_PART[a], CIHP_BODY[a]]), who, None
+    if kind == "face":
+        img = Image.open(where.replace("anime_seg_", "anime_face_")[:-4] + ".jpg").convert("RGB")
+        a = np.asarray(Image.open(where).convert("L"))
+        person = AF_PERSON[a]
+        scene = np.where(person, PERSON, np.where(far_from(person, 0.12), NOT_PERSON, IGNORE)).astype(np.uint8)
+        return img, np.stack([scene, AF_PART[a], AF_BODY[a]]), person.astype(np.uint8), None
+    if kind == "animepic":
+        img = Image.open(where[0]).convert("RGB")
+        person = np.asarray(Image.open(where[1]).convert("L").resize(img.size, Image.NEAREST)) > 127
+        scene = np.where(person, PERSON, NOT_PERSON).astype(np.uint8)
+        unknown = np.full_like(scene, IGNORE)
+        # Several characters share one mask: who's who isn't known.
+        return img, np.stack([scene, unknown, unknown]), None, None
+    if kind == "cutouts":
+        img, labels, who = cutouts_picture(index)
+        return img, labels, who, None
+    raise ValueError(kind)
+
+
+def person_boxes(who):
+    """Each person's box (x0, y0, x1, y1) in who's who."""
+    boxes = []
+    for k in np.unique(who):
+        if k:
+            ys, xs = np.nonzero(who == k)
+            boxes.append((xs.min(), ys.min(), xs.max() + 1, ys.max() + 1))
+    return boxes
+
+
+def crop_box(size, boxes, train):
+    """The part of a picture (w, h) the model sees: the largest of its shape when checking; when
+    training, smaller at random, or (CLOSE_UPS of the time, if anyone is big enough) closed in
+    on someone as a film's close-ups and medium shots are, never upscaled by more than 1/0.75."""
+    w, h = size
+    cw = min(w, h * WIDTH / HEIGHT)
+    ch = cw * HEIGHT / WIDTH
+    if not train:
+        x, y = (w - cw) / 2, (h - ch) / 2
+    else:
+        least = HEIGHT * 0.75
+        big = [b for b in boxes if b[3] - b[1] >= least]
+        if big and random.random() < CLOSE_UPS:
+            x0, y0, x1, y1 = random.choice(big)
+            ch = min(ch, max(least, (y1 - y0) * random.uniform(0.3, 1.1)))
+            cw = ch * WIDTH / HEIGHT
+            if cw > w:
+                cw, ch = w, w * HEIGHT / WIDTH
+            x = (x0 + x1) / 2 - cw / 2 + random.uniform(-0.3, 0.3) * cw
+            y = y0 - random.uniform(0.05, 0.25) * ch
+            x, y = min(max(x, 0.0), w - cw), min(max(y, 0.0), h - ch)
+        else:
+            s = random.uniform(0.5, 1.0)
+            cw, ch = cw * s, ch * s
+            x, y = random.uniform(0, w - cw), random.uniform(0, h - ch)
+    # cw * HEIGHT / WIDTH can round to a hair over the picture's size.
+    x, y = max(x, 0.0), max(y, 0.0)
+    return (x, y, min(x + cw, w), min(y + ch, h))
+
+
 def to_classes(label, ids, cls, body):
     """SCENE, PARTS and BODY labels for a label image, [3][h][w], and each person's pixels (as a
     list of masks), or None where who's who isn't known. `body`: DensePose's BODY labels, or
@@ -375,14 +625,15 @@ def to_classes(label, ids, cls, body):
 YS, XS = np.mgrid[0:HEIGHT, 0:WIDTH].astype(np.float32)
 
 
-def centres(scene, people):
+def centres(scene, people, counted=None):
     """CENTRES' targets for one picture: [5][h][w]: the Gaussians, x and y to the centre (in
     picture heights), and how much each pixel counts for the first and for the other two. A
-    crowd's pixels (labelled IGNORE in SCENE, as COCO's crowds are) don't count for the first."""
+    crowd's pixels (labelled IGNORE in SCENE, as COCO's crowds are) don't count for the first,
+    unless `counted` says where it counts."""
     t = np.zeros((5, HEIGHT, WIDTH), dtype=np.float32)
     if people is None:
         return t
-    t[3] = scene != IGNORE
+    t[3] = scene != IGNORE if counted is None else counted
     for m in people:
         if not m.any():
             continue  # cropped out
@@ -422,8 +673,49 @@ class Pictures(Dataset):
     def __len__(self):
         return len(self.items)
 
+    @staticmethod
+    def boxes(label, ids, cls):
+        """The people's boxes in a COCO or ATR label image, for close-ups (ADE20K's people aren't
+        told apart)."""
+        if ids is None:
+            return []
+        a = np.asarray(label)
+        if isinstance(ids, str):
+            return person_boxes((ATR_SCENE[a] == PERSON).astype(np.uint8))
+        v = a[..., 0].astype(np.int64) + a[..., 1].astype(np.int64) * 256 + a[..., 2].astype(np.int64) * 65536
+        who = np.zeros(v.shape, dtype=np.uint8)
+        for k, i in enumerate([i for i, c in zip(ids, cls) if c == PERSON][:255], 1):
+            who[v == i] = k
+        return person_boxes(who)
+
+    def new_source(self, kind, where, i):
+        img, labels, who, counted = new_source(kind, where, i)
+        # Danbooru-Parsing's are close-ups already, and the cut-outs are put together at all sizes.
+        box = crop_box(img.size, person_boxes(who) if kind == "cihp" and self.train else [], self.train)
+        img = img.resize((WIDTH, HEIGHT), Image.BICUBIC, box=box)
+
+        def cut(a):
+            return np.asarray(Image.fromarray(a).resize((WIDTH, HEIGHT), Image.NEAREST, box=box))
+
+        labels = np.stack([cut(a) for a in labels])
+        who = None if who is None else cut(who)
+        counted = None if counted is None else cut(counted.astype(np.uint8)) > 0
+        if self.train:
+            if random.random() < 0.5:
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                labels = labels[:, :, ::-1]
+                who = None if who is None else who[:, ::-1]
+                counted = None if counted is None else counted[:, ::-1]
+            img = grade(img)
+        rgb = torch.from_numpy(np.array(img)).permute(2, 0, 1)
+        people = None if who is None else [who == k for k in np.unique(who) if k]
+        t = centres(labels[0], people, counted)
+        return rgb, torch.from_numpy(labels.copy()).long(), torch.from_numpy(t)
+
     def __getitem__(self, i):
         path, label_path, ids, cls, people = self.items[i]
+        if path in ("cihp", "face", "animepic", "cutouts"):
+            return self.new_source(path, label_path, i)
         if path == "atr":
             picture, mask = ATR_DATA[label_path]
             img = Image.open(io.BytesIO(picture)).convert("RGB")
@@ -433,19 +725,7 @@ class Pictures(Dataset):
             img = Image.open(path).convert("RGB")
             label = Image.open(label_path)
         body = body_label(img.size, people) if people else None
-        w, h = img.size
-        # The largest crop of the model's shape; smaller at random when training.
-        cw = min(w, h * WIDTH / HEIGHT)
-        ch = cw * HEIGHT / WIDTH
-        if self.train:
-            s = random.uniform(0.5, 1.0)
-            cw, ch = cw * s, ch * s
-            x, y = random.uniform(0, w - cw), random.uniform(0, h - ch)
-        else:
-            x, y = (w - cw) / 2, (h - ch) / 2
-        # cw * HEIGHT / WIDTH can round to a hair over the picture's size.
-        x, y = max(x, 0.0), max(y, 0.0)
-        box = (x, y, min(x + cw, w), min(y + ch, h))
+        box = crop_box(img.size, self.boxes(label, ids, cls) if self.train else [], self.train)
         img = img.resize((WIDTH, HEIGHT), Image.BICUBIC, box=box)
         label = label.resize((WIDTH, HEIGHT), Image.NEAREST, box=box)
         if body is not None:
@@ -466,11 +746,11 @@ class Mix(Sampler):
     """Forever: items from consecutive datasets of `sizes`, each picked with its share of
     `weights` however big it is."""
 
-    def __init__(self, sizes, weights):
-        self.sizes, self.weights = sizes, weights
+    def __init__(self, sizes, weights, seed=0):
+        self.sizes, self.weights, self.seed = sizes, weights, seed
 
     def __iter__(self):
-        r = random.Random(0)
+        r = random.Random(self.seed)
         starts = np.cumsum([0] + list(self.sizes))
         while True:
             k = r.choices(range(len(self.sizes)), self.weights)[0]
@@ -493,7 +773,7 @@ class Head(nn.Module):
         self.context = nn.Conv2d(128, 128, 3, padding=1)
         self.mid = nn.Conv2d(128, 64, 3, padding=1)
         self.fused = nn.Conv2d(64, 64, 1)
-        # Wider at the end than tools/segment's (48), for 25 answers instead of four.
+        # Wider at the end than the old Depth Anything head's (48), for 25 answers instead of four.
         self.fine1 = nn.Conv2d(64, 64, 3, padding=1)
         self.fine2 = nn.Conv2d(64, 64, 3, padding=1)
         self.out = nn.Conv2d(64, OUTPUTS, 1)
@@ -590,7 +870,13 @@ def loss_of(logits, y, t):
     """`y` is [batch][3][h][w]: SCENE's labels, then PARTS' and BODY's (on a person's pixels);
     `t` CENTRES' targets (see `centres`)."""
     n1, n2, n3 = len(SCENE), len(SCENE) + len(PARTS), len(CLASSES)
-    loss = part_of(logits[:, :n1], y[:, 0], range(1, len(SCENE)), SCENE_WEIGHTS.to(y.device))
+    # NOT_PERSON: anything but PERSON, as -log(1 - p(person)).
+    nobody = y[:, 0] == NOT_PERSON
+    loss = part_of(logits[:, :n1], y[:, 0].masked_fill(nobody, IGNORE), range(1, len(SCENE)), SCENE_WEIGHTS.to(y.device))
+    if nobody.any():
+        others = [c for c in range(n1) if c != PERSON]
+        not_person = torch.logsumexp(logits[:, others], 1) - torch.logsumexp(logits[:, :n1], 1)
+        loss = loss - not_person[nobody].mean()
     loss = loss + part_of(logits[:, n1:n2], y[:, 1], range(len(PARTS)), None)
     loss = loss + part_of(logits[:, n2:n3], y[:, 2], range(len(BODY)), None)
     heat, offsets = logits[:, n3], logits[:, n3 + 1 : n3 + 3]
@@ -608,7 +894,7 @@ def check_labels(name, items):
     counts = np.zeros(len(CLASSES), dtype=np.int64)
     people, pictures = 0.0, 0
     data = Pictures(items[:: max(1, len(items) // 300)], False)
-    for _, y, t in DataLoader(data, batch_size=16, num_workers=os.cpu_count()):
+    for _, y, t in DataLoader(data, batch_size=16, num_workers=WORKERS):
         for k, (start, names) in enumerate([(0, SCENE), (len(SCENE), PARTS), (len(SCENE) + len(PARTS), BODY)]):
             for c in range(len(names)):
                 counts[start + c] += int((y[:, k] == c).sum())
@@ -637,23 +923,34 @@ def peaks(heat, threshold=0.3):
 def evaluate(depth, head, items, which):
     """IoU of each of SCENE's classes but "other", of PARTS's or of BODY's (`which` 0, 1 or 2);
     or, with `which` 3, how many of the people's centres are found (F1, matched within 8
-    pixels) and how much of their pixels point within 6 pixels of their centre."""
+    pixels) and how much of their pixels point within 6 pixels of their centre; or, with
+    `which` 4, PERSON's IoU where it's known to be a person or NOT_PERSON."""
     head.eval()
-    names = [SCENE, PARTS, BODY][which] if which < 3 else []
+    names = [SCENE, PARTS, BODY][which] if which < 3 else ["person"] if which == 4 else []
     starts = [0, len(SCENE), len(SCENE) + len(PARTS), len(CLASSES)]
     inter, union = np.zeros(len(names)), np.zeros(len(names))
     found = wanted = guessed = 0
     near = person = 0.0
-    for rgb, y, t in DataLoader(Pictures(items, False), batch_size=BATCH, num_workers=os.cpu_count()):
+    for rgb, y, t in DataLoader(Pictures(items, False), batch_size=BATCH, num_workers=WORKERS):
         rgb, y, t = rgb.to(device), y.to(device), t.to(device)
         logits = logits_of(head, features(depth, rgb))
+        if which == 4:
+            p, y = logits[:, : len(SCENE)].argmax(1) == PERSON, y[:, 0]
+            known = (y == PERSON) | (y == NOT_PERSON)
+            inter[0] += int((p & (y == PERSON) & known).sum())
+            union[0] += int(((p | (y == PERSON)) & known).sum())
+            continue
         if which == 3:
             out = logits[:, starts[3] :]
             mine, theirs = peaks(out[:, 0]), peaks(t[:, 0], 0.99)
             guessed += len(mine)
             wanted += len(theirs)
-            for b, py, px in theirs:
-                if any(b == b2 and (py - y2) ** 2 + (px - x2) ** 2 <= 64 for b2, y2, x2 in mine):
+            # One to one: each peak (strongest first) takes the nearest centre not yet taken.
+            left = list(theirs)
+            for b, py, px in mine:
+                d = [((py - y2) ** 2 + (px - x2) ** 2, j) for j, (b2, y2, x2) in enumerate(left) if b2 == b]
+                if d and min(d)[0] <= 64:
+                    left.pop(min(d)[1])
                     found += 1
             miss = ((out[:, 1:3] - t[:, 1:3]) * HEIGHT).norm(dim=1)
             on = t[:, 4]
@@ -717,6 +1014,11 @@ def save_samples(depth, head, items, path):
 def main():
     os.makedirs(OUT, exist_ok=True)
     sh("nvidia-smi --query-gpu=name,memory.total --format=csv || true; nproc; df -h /tmp | tail -1")
+    # The new sets download alongside the others (CIHP's Google Drive can be slow).
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = ThreadPoolExecutor(3)
+    fetching = [pool.submit(get_cihp), pool.submit(get_anime_faces), pool.submit(get_anime_cutouts)]
     if os.environ.get("SEG_FETCH"):
         fetch_data()
     get_panoptic()
@@ -733,13 +1035,21 @@ def main():
     coco_train = [(*it[:4], taught.get(image_id(it))) for it in coco_train]
     dp_train = [it for it in coco_train if it[4]]
     dp_val = [(*it[:4], kept[image_id(it)]) for it in coco_train + coco_val if image_id(it) in kept]
+    cihp, faces, (anime_train, anime_val) = (f.result() for f in fetching)
+    cihp_train, cihp_val = cihp_items(cihp, "Training"), cihp_items(cihp, "Validation")[::4]
+    face_train, face_val = anime_face_items(faces, "train"), anime_face_items(faces, "test_68")
+    cutouts = [("cutouts", None, None, None, None)] * len(CUTOUT_FG)
     print(f"COCO {len(coco_train)} + {len(coco_val)}, ADE20K {len(ade_train)} + {len(ade_val)}, ATR {len(atr_train)} + {len(atr_val)}, "
-          f"DensePose {len(dp_train)} + {len(dp_val)} pictures", flush=True)
+          f"DensePose {len(dp_train)} + {len(dp_val)}, CIHP {len(cihp_train)} + {len(cihp_val)}, anime faces {len(face_train)} + {len(face_val)}, "
+          f"anime pictures {len(anime_train)} + {len(anime_val)}, anime cut-outs {len(cutouts)} pictures", flush=True)
     assert coco_train and coco_val and ade_train and ade_val and atr_train and dp_train and dp_val
+    assert cihp_train and cihp_val and face_train and face_val and anime_train and anime_val and CUTOUT_FG and CUTOUT_BG
     if os.environ.get("SEG_LIMIT"):
         n = int(os.environ["SEG_LIMIT"])
-        coco_train, coco_val, ade_train, ade_val, atr_train, atr_val, dp_train, dp_val = (
-            x[:: max(1, len(x) // n)][:n] for x in (coco_train, coco_val, ade_train, ade_val, atr_train, atr_val, dp_train, dp_val)
+        (coco_train, coco_val, ade_train, ade_val, atr_train, atr_val, dp_train, dp_val, cihp_train, cihp_val, face_train, face_val,
+         anime_train, anime_val, cutouts) = (
+            x[:: max(1, len(x) // n)][:n] for x in (coco_train, coco_val, ade_train, ade_val, atr_train, atr_val, dp_train, dp_val,
+                                                    cihp_train, cihp_val, face_train, face_val, anime_train, anime_val, cutouts)
         )
 
     check_labels("COCO", coco_train)
@@ -750,6 +1060,13 @@ def main():
     share = check_labels("DensePose", dp_train)
     b = len(SCENE) + len(PARTS)
     assert share[b + TORSO] > share[b + HEAD] > 0 and share[b + LEG] > share[b + FOOT] > 0 and share[b + ARM] > share[b + HAND] > 0, "DensePose's parts aren't what this expects"
+    share = check_labels("CIHP", cihp_train)
+    p = len(SCENE)
+    assert share[p + CLOTHES] > share[p + SKIN] > 0 and share[p + HAIR] > 0 and share[b + HEAD] > share[b + FOOT] > 0, "CIHP's labels aren't what this expects"
+    share = check_labels("anime faces", face_train)
+    assert share[p + HAIR] > share[p + SKIN] > share[p + CLOTHES] > 0 and share[b + HEAD] > 0, "Danbooru-Parsing's labels aren't what this expects"
+    check_labels("anime pictures", anime_train)
+    check_labels("anime cut-outs", cutouts)
 
     depth = load_moge().eval().to(device).requires_grad_(False)
     global normalized_view_plane_uv
@@ -758,11 +1075,20 @@ def main():
     params = sum(p.numel() for p in head.parameters())
     print(f"head: {params} weights, {params * 4 / 1e6:.2f} MB", flush=True)
     opt = torch.optim.AdamW(head.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    # A run restarted after its machine was taken back (as Modal may) carries on from its last
+    # checkpoint. SEG_RUN names the run, so another run's checkpoint is never picked up.
+    run_id, resume_path, resumed = os.environ.get("SEG_RUN", ""), f"{OUT}/resume.pt", None
+    if run_id and os.path.exists(resume_path):
+        saved = torch.load(resume_path, map_location=device, weights_only=False)
+        if saved.get("run") == run_id:
+            resumed = saved
+            head.load_state_dict(saved["head"])
+            opt.load_state_dict(saved["opt"])
 
-    sources = [coco_train, dp_train, ade_train, atr_train]
+    sources = [coco_train, dp_train, ade_train, atr_train, cihp_train, face_train, anime_train, cutouts]
     data = torch.utils.data.ConcatDataset([Pictures(items, True) for items in sources])
     loader = DataLoader(
-        data, batch_size=BATCH, sampler=Mix([len(items) for items in sources], [0.3, 0.15, 0.35, 0.2]), num_workers=os.cpu_count(),
+        data, batch_size=BATCH, sampler=Mix([len(items) for items in sources], MIX, resumed["step"] if resumed else 0), num_workers=WORKERS,
         pin_memory=device == "cuda", persistent_workers=True, prefetch_factor=4,
     )
 
@@ -770,7 +1096,12 @@ def main():
     total = MINUTES * 60 - (began - START)
     print(f"setup took {(began - START) / 60:.1f} min, training for {total / 60:.0f} min", flush=True)
     history, best, step, running, shown, skipped = [], -1.0, 0, 0.0, time.time(), 0
-    next_eval = began + EVAL_MINUTES * 60
+    if resumed:
+        total, trained = resumed["total"], resumed["trained"]
+        began -= trained
+        history, best, step = resumed["history"], resumed["best"], resumed["step"]
+        print(f"carrying on run {run_id} from step {step}: {trained / 60:.0f} of {total / 60:.0f} min trained", flush=True)
+    next_eval = time.time() + EVAL_MINUTES * 60
 
     def checkpoint():
         nonlocal best
@@ -781,24 +1112,43 @@ def main():
             "ATR": evaluate(depth, head, atr_val, 1),
             "DensePose": evaluate(depth, head, dp_val[::2], 2),
             "people": evaluate(depth, head, coco_val[::2], 3),
+            "CIHP": evaluate(depth, head, cihp_val, 1),
+            "CIHP body": evaluate(depth, head, cihp_val, 2),
+            "CIHP people": evaluate(depth, head, cihp_val, 3),
+            "anime faces": evaluate(depth, head, face_val, 1),
+            "anime people": evaluate(depth, head, anime_val, 4),
         }
         score = float(np.mean([np.mean(list(s.values())) for s in scores.values()]))
+        # The first run's score (its five sets), to compare with.
+        first = float(np.mean([np.mean(list(scores[k].values())) for k in ("COCO", "ADE20K", "ATR", "DensePose", "people")]))
         minutes = (time.time() - began) / 60
-        history.append({"step": step, "minutes": round(minutes, 1), "score": round(score, 4), **scores})
-        print(f"step {step} ({minutes:.0f} min): score {score:.4f} {scores}", flush=True)
-        with open(f"{OUT}/metrics.json", "w") as f:
+        history.append({"step": step, "minutes": round(minutes, 1), "score": round(score, 4), "first run's score": round(first, 4), **scores})
+        print(f"step {step} ({minutes:.0f} min): score {score:.4f} (first run's {first:.4f}) {scores}", flush=True)
+        # Written whole then renamed: the volume is saved while this runs.
+        with open(f"{OUT}/metrics.json.part", "w") as f:
             json.dump(history, f, indent=1)
+        os.replace(f"{OUT}/metrics.json.part", f"{OUT}/metrics.json")
         save_samples(depth, head, coco_val, f"{OUT}/samples_{step:07d}_coco.jpg")
         save_samples(depth, head, ade_val, f"{OUT}/samples_{step:07d}_ade.jpg")
         save_samples(depth, head, atr_val, f"{OUT}/samples_{step:07d}_atr.jpg")
         save_samples(depth, head, dp_val, f"{OUT}/samples_{step:07d}_densepose.jpg")
+        save_samples(depth, head, cihp_val, f"{OUT}/samples_{step:07d}_cihp.jpg")
+        save_samples(depth, head, face_val, f"{OUT}/samples_{step:07d}_anime_faces.jpg")
+        save_samples(depth, head, anime_val, f"{OUT}/samples_{step:07d}_anime.jpg")
         if score > best:
             best = score
-            save_file({k: v.cpu().contiguous() for k, v in head.state_dict().items()}, f"{OUT}/head.safetensors", {
+            save_file({k: v.cpu().contiguous() for k, v in head.state_dict().items()}, f"{OUT}/head.safetensors.part", {
                 "scene": ",".join(SCENE), "parts": ",".join(PARTS), "body": ",".join(BODY), "centres": ",".join(CENTRES),
                 "offsets": "picture heights", "model": MODEL, "revision": REVISION,
             })
+            os.replace(f"{OUT}/head.safetensors.part", f"{OUT}/head.safetensors")
             print("best so far: saved", flush=True)
+        if run_id:
+            torch.save({
+                "run": run_id, "head": head.state_dict(), "opt": opt.state_dict(), "step": step,
+                "trained": time.time() - began, "total": total, "history": history, "best": best,
+            }, f"{resume_path}.part")
+            os.replace(f"{resume_path}.part", resume_path)
 
     for rgb, y, t in loader:
         now = time.time()

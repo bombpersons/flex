@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod ambient;
+mod art;
 mod audio_tap;
 mod app;
 mod awake;
@@ -32,6 +33,7 @@ mod scenery;
 mod screens;
 mod shared;
 mod signals;
+mod sound_effects;
 mod sound_kind;
 mod sync;
 mod system_sound;
@@ -43,6 +45,7 @@ mod update;
 mod volume;
 mod youtube;
 mod widgets;
+mod worker;
 
 use std::path::PathBuf;
 

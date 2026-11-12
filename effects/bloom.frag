@@ -1,10 +1,5 @@
 // Mind Bloom: the picture folded into a kaleidoscope, added to a zoomed copy of the last frame.
 
-vec3 hue(vec3 c, float a) {
-    vec3 k = vec3(0.57735);
-    return c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
-}
-
 vec4 effect(vec2 uv) {
     if (uv != clamp(uv, u_video_rect.xy, u_video_rect.zw)) {
         return vec4(0.0, 0.0, 0.0, 1.0);
@@ -27,7 +22,7 @@ vec4 effect(vec2 uv) {
     q = u_video_rect.xy + size * min(q, 2.0 - q);
     vec3 scope = texture(u_video, q).rgb;
     vec2 inward = centre + (uv - centre) * (0.985 - 0.02 * u_beat);
-    vec3 past = hue(texture(u_prev, inward).rgb, 0.05 + 0.2 * u_beat);
+    vec3 past = hue_rotate(texture(u_prev, inward).rgb, 0.05 + 0.2 * u_beat);
     float keep = 0.6 + 0.37 * s_bloom / 100.0;
     return vec4(max(scope * (1.05 - keep * 0.55), past * keep), 1.0);
 }

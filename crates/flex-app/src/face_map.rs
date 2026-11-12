@@ -89,35 +89,76 @@ impl FaceMap {
     pub unsafe fn new(gl: &glow::Context, version: &str, embedded: bool) -> Result<Self, String> {
         unsafe {
             let first = start(version, embedded);
-            let map_program = crate::effects::compile(gl, &vertex_map(&first), &fragment_map(&first, embedded))?;
-            let atlas_program = crate::effects::compile(gl, &vertex_atlas(&first), &fragment_atlas(&first, embedded))?;
-            let map = texture(gl, glow::RGBA16F, glow::FLOAT, MAP_SIZE)?;
-            let parts = texture(gl, glow::RGBA8, glow::UNSIGNED_BYTE, MAP_SIZE)?;
-            let parts2 = texture(gl, glow::RGBA8, glow::UNSIGNED_BYTE, MAP_SIZE)?;
-            let atlas = texture(gl, glow::RGBA8, glow::UNSIGNED_BYTE, ATLAS_SIZE)?;
-            let depth = gl.create_renderbuffer()?;
-            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
+            // Everything is made before any of it is set up, so that if something can't be,
+            // what was made can be deleted.
+            let map_program = crate::effects::compile(gl, &vertex_map(&first), &fragment_map(&first, embedded));
+            let atlas_program = crate::effects::compile(gl, &vertex_atlas(&first), &fragment_atlas(&first, embedded));
+            let map = texture(gl, glow::RGBA16F, glow::FLOAT, MAP_SIZE);
+            let parts = texture(gl, glow::RGBA8, glow::UNSIGNED_BYTE, MAP_SIZE);
+            let parts2 = texture(gl, glow::RGBA8, glow::UNSIGNED_BYTE, MAP_SIZE);
+            let atlas = texture(gl, glow::RGBA8, glow::UNSIGNED_BYTE, ATLAS_SIZE);
+            let depth = gl.create_renderbuffer();
+            let fbo = gl.create_framebuffer();
+            let atlas_fbo = gl.create_framebuffer();
+            let vao = gl.create_vertex_array();
+            let vertices = gl.create_buffer();
+            let all = || -> Result<Self, String> {
+                Ok(Self {
+                    fbo: fbo.clone()?,
+                    depth: depth.clone()?,
+                    map: map.clone()?,
+                    parts: parts.clone()?,
+                    parts2: parts2.clone()?,
+                    atlas_fbo: atlas_fbo.clone()?,
+                    atlas: atlas.clone()?,
+                    vertices: vertices.clone()?,
+                    vao: vao.clone()?,
+                    map_program: map_program.clone()?,
+                    atlas_program: atlas_program.clone()?,
+                })
+            };
+            let made = match all() {
+                Ok(made) => made,
+                Err(e) => {
+                    for p in [map_program, atlas_program].into_iter().flatten() {
+                        gl.delete_program(p);
+                    }
+                    for t in [map, parts, parts2, atlas].into_iter().flatten() {
+                        gl.delete_texture(t);
+                    }
+                    for f in [fbo, atlas_fbo].into_iter().flatten() {
+                        gl.delete_framebuffer(f);
+                    }
+                    if let Ok(depth) = depth {
+                        gl.delete_renderbuffer(depth);
+                    }
+                    if let Ok(vao) = vao {
+                        gl.delete_vertex_array(vao);
+                    }
+                    if let Ok(vertices) = vertices {
+                        gl.delete_buffer(vertices);
+                    }
+                    return Err(e);
+                }
+            };
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(made.depth));
             gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, MAP_SIZE.0, MAP_SIZE.1);
             gl.bind_renderbuffer(glow::RENDERBUFFER, None);
-            let fbo = gl.create_framebuffer()?;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            for (i, t) in [map, parts, parts2].into_iter().enumerate() {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(made.fbo));
+            for (i, t) in [made.map, made.parts, made.parts2].into_iter().enumerate() {
                 gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0 + i as u32, glow::TEXTURE_2D, Some(t), 0);
             }
-            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth));
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(made.depth));
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::COLOR_ATTACHMENT1, glow::COLOR_ATTACHMENT2]);
             let complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
-            let atlas_fbo = gl.create_framebuffer()?;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(atlas_fbo));
-            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(atlas), 0);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(made.atlas_fbo));
+            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(made.atlas), 0);
             let complete = complete && gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
 
-            let vao = gl.create_vertex_array()?;
-            let vertices = gl.create_buffer()?;
             let floats = corners();
-            gl.bind_vertex_array(Some(vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
+            gl.bind_vertex_array(Some(made.vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(made.vertices));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, std::slice::from_raw_parts(floats.as_ptr().cast::<u8>(), floats.len() * 16), glow::STATIC_DRAW);
             let stride = 4 * 4;
             gl.enable_vertex_attrib_array(0);
@@ -128,7 +169,6 @@ impl FaceMap {
             gl.vertex_attrib_pointer_f32(2, 1, glow::FLOAT, false, stride, 12);
             gl.bind_vertex_array(None);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
-            let made = Self { fbo, depth, map, parts, parts2, atlas_fbo, atlas, vertices, vao, map_program, atlas_program };
             if !complete {
                 made.release(gl);
                 return Err("the face map's framebuffers are incomplete".into());

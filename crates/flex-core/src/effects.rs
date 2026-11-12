@@ -7,7 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
-use flex_plugin::Settings;
+use flex_plugin::{Choice, Settings};
 use serde::{Deserialize, Serialize};
 
 use crate::Db;
@@ -15,84 +15,58 @@ use crate::plugins::{SettingDrift, SettingKind, SettingSpec};
 
 /// `<id>.toml`.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
 pub struct Manifest {
     /// Shown in Settings; defaults to the file's name.
-    #[serde(default)]
     pub name: String,
-    #[serde(default)]
     pub description: String,
     /// Give the shader its own previous output (`u_prev`), for trails and feedback.
-    #[serde(default)]
     pub feedback: bool,
     /// Give the shader the sound, as measured by a filter inside mpv.
-    #[serde(default)]
     pub audio: bool,
     /// Give the shader depth (`u_depth`), from a neural network on the GPU. Costs GPU time
     /// and a 99 MB download the first time.
-    #[serde(default)]
     pub depth: bool,
     /// Give the shader where people, walls and sky are (`person_at`, `wall_at`, `sky_at`), from
     /// a small network that runs on top of depth's.
-    #[serde(default)]
     pub segment: bool,
     /// Give the shader where faces are (`u_faces`, `face_at`), from a small neural network on
     /// the GPU.
-    #[serde(default)]
     pub faces: bool,
     /// As well as `faces`, look closer at them: a 478-point mesh (`mesh_point`), how open eyes
     /// and mouths are (`u_face_open`) and which way heads point (`u_face_turn`).
-    #[serde(default)]
     pub mesh: bool,
     /// Keep the last second or so of frames for `history_at`.
-    #[serde(default)]
     pub history: bool,
     /// Work out how things are moving, for `flow_at`.
-    #[serde(default)]
     pub flow: bool,
     /// Build up the room behind people, for `plate_at`. Runs the masks.
-    #[serde(default)]
     pub plate: bool,
     /// Find scene cuts, for `u_cut` and `u_since_cut`.
-    #[serde(default)]
     pub cuts: bool,
     /// Measure the picture's palette and brightness.
-    #[serde(default)]
     pub stats: bool,
     /// Work out where the camera is, so things can be pinned to the world (`world_at`). Runs depth
     /// and the masks.
-    #[serde(default)]
     pub camera: bool,
     /// The kinds of shot or scene this suits, out of `SUITS`: with shuffle at scene cuts, it comes
     /// up more often in those and less often otherwise.
-    #[serde(default)]
     pub suits: Vec<String>,
     /// Work out what sort of shot this is and what's going on across the last few (`u_shot_size`,
     /// `u_camera`, `u_handheld`, `u_pace`, `u_scene`). Runs depth, masks, faces and the sound.
-    #[serde(default)]
     pub scene: bool,
     /// Redraw the whole picture with a network (an anime style, say) before the shader sees it:
     /// `u_video` is the redrawn picture, and `u_original` the real one. Names the choice setting
     /// that picks the network: its options' ids are the networks' (see `RESTYLES`).
-    #[serde(default)]
     pub restyle: Option<String>,
     /// Size to work at, relative to the screen (0.25–1): lower is lighter on the GPU.
-    #[serde(default = "full")]
     pub scale: f32,
     /// Whether shuffle picks this effect unless told otherwise: false for test views.
-    #[serde(default = "yes")]
     pub shuffle: bool,
-    #[serde(default)]
     pub settings: Vec<SettingSpec>,
 }
 
-fn full() -> f32 {
-    1.0
-}
-
-fn yes() -> bool {
-    true
-}
-
+/// What a missing `.toml`, or a field left out of one, comes to.
 impl Default for Manifest {
     fn default() -> Self {
         Self { name: String::new(), description: String::new(), suits: Vec::new(), feedback: false, audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, camera: false, restyle: None, scale: 1.0, shuffle: true, settings: Vec::new() }
@@ -114,6 +88,12 @@ impl Effect {
     /// Settings Flex can show and pass to the shader (not text or buttons).
     pub fn settings(&self) -> impl Iterator<Item = &SettingSpec> {
         self.manifest.settings.iter().filter(|s| matches!(s.kind, SettingKind::Number | SettingKind::Bool | SettingKind::Choice))
+    }
+
+    /// Whether it can paint in styles from pictures (`ART`), so pictures put in the styles
+    /// folder are offered too.
+    pub fn takes_art(&self) -> bool {
+        self.manifest.settings.iter().any(|s| s.kind == SettingKind::Choice && s.options.iter().any(|o| o.id.starts_with(ART)))
     }
 }
 
@@ -205,12 +185,21 @@ pub struct Needs {
     /// The network to restyle the picture with (see `Manifest::restyle`): the chosen effect's,
     /// or the one fading out's. One at a time: shuffle doesn't start them ahead.
     pub restyle: Option<String>,
+    /// Whether a sound effect might play: the sound effects are kept ready while one might.
+    pub sound: bool,
     /// The largest size any of them works at (0.25–1).
     pub scale: f32,
 }
 
 /// The networks `Manifest::restyle` can pick from, by id.
 pub const RESTYLES: [&str; 14] = ["hayao", "hayao-warm", "hayao-vivid", "shinkai", "shinkai-bold", "ghibli", "sketch", "mosaic", "candy", "rain-princess", "udnie", "pointilism", "lines", "lines-anime"];
+
+/// Styles `Manifest::restyle` can pick too: painting in the style of a picture, by Magenta's
+/// stylization ("art:starry-night"; "art:morph", from one to the next; see flex-app's `art`).
+pub const ART: &str = "art:";
+/// The pictures put in the styles folder, "art:mine:<file name>": added to every setting that
+/// offers `ART` styles by `Effects::set_art_styles`.
+pub const ART_MINE: &str = "art:mine:";
 
 /// The living textures `Manifest::restyle` can pick too, by id: grown on the GL side, not by a
 /// network worker (see flex-app's nca.rs).
@@ -287,11 +276,14 @@ pub struct Shuffle {
     /// How far each effect's settings are moved at random whenever it comes up, in percent:
     /// 0 leaves them alone, 100 can land anywhere in their range.
     pub randomise: f32,
+    /// How likely each turn is to come with a sound effect, picked at random, in percent. At 0
+    /// the sound effect picked on its own plays throughout.
+    pub sounds: f32,
 }
 
 impl Default for Shuffle {
     fn default() -> Self {
-        Self { on: false, shortest: 20.0, longest: 60.0, fade: 4.0, at_cuts: false, by_shot: true, randomise: 0.0 }
+        Self { on: false, shortest: 20.0, longest: 60.0, fade: 4.0, at_cuts: false, by_shot: true, randomise: 0.0, sounds: 0.0 }
     }
 }
 
@@ -318,10 +310,59 @@ const DRIFT_PERIOD: f64 = 90.0;
 /// An effect on its way out.
 struct Fading {
     from: String,
+    /// The sound effect that was playing.
+    from_sound: Option<String>,
     elapsed: f32,
 }
 
+/// A sound effect, as the panel shows it (flex-sound's `EFFECTS`).
+#[derive(Clone, Debug)]
+pub struct SoundEffect {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub settings: Vec<SettingSpec>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SoundManifest {
+    name: String,
+    description: String,
+    settings: Vec<SettingSpec>,
+}
+
+fn sound_effects() -> Vec<SoundEffect> {
+    flex_sound::EFFECTS
+        .iter()
+        .filter_map(|(id, text)| match toml::from_str::<SoundManifest>(text) {
+            Ok(m) => Some(SoundEffect { id: (*id).to_owned(), name: m.name, description: m.description, settings: m.settings }),
+            Err(e) => {
+                log::warn!("sound effect {id}: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Where a sound effect's settings are kept, beside the video effects'.
+pub fn sound_settings_id(id: &str) -> String {
+    format!("sound:{id}")
+}
+
+/// A sound effect playing, with its settings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveSound {
+    pub id: String,
+    pub numbers: Vec<(String, f32)>,
+    /// Choice settings, by the chosen option's id.
+    pub choices: Vec<(String, String)>,
+}
+
 const CHOSEN_KEY: &str = "video_effect";
+const SOUND_KEY: &str = "video_effect_sound";
+/// "1" when sound effects are switched on.
+const SOUND_ON_KEY: &str = "video_effect_sound_on";
 /// "0" when effects are switched off. Before this existed, off was having none chosen.
 const ON_KEY: &str = "video_effects_on";
 const SHUFFLE_KEY: &str = "video_effect_shuffle";
@@ -363,6 +404,15 @@ pub struct Effects {
     drift_clock: f64,
     /// `drift.amount` (as 0–1), eased, so turning it on doesn't jolt the picture.
     drift_now: f64,
+    /// The pictures in the styles folder, from `set_art_styles`, put back after `refresh`.
+    art_mine: Vec<Choice>,
+    sounds: Vec<SoundEffect>,
+    /// The sound effect picked on its own (kept while they're off).
+    sound: Option<String>,
+    /// Whether sound effects are switched on, which is separate from the video effects.
+    sound_on: bool,
+    /// The sound effect shuffle paired with this turn's effect, when it pairs them.
+    turn_sound: Option<String>,
 }
 
 impl Effects {
@@ -371,7 +421,9 @@ impl Effects {
         let shuffle = db.setting(SHUFFLE_KEY).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let drift = db.setting(DRIFT_KEY).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let on = db.setting(ON_KEY).ok().flatten().map_or(chosen.is_some(), |s| s != "0");
-        let mut effects = Self { chosen, on, shuffle, drift, ..Self::default() };
+        let sound = db.setting(SOUND_KEY).ok().flatten().filter(|s| !s.is_empty());
+        let sound_on = db.setting(SOUND_ON_KEY).ok().flatten().map_or(sound.is_some(), |s| s == "1");
+        let mut effects = Self { chosen, on, shuffle, drift, sound, sound_on, sounds: sound_effects(), ..Self::default() };
         effects.refresh(dirs, db);
         effects.wait();
         effects
@@ -388,6 +440,15 @@ impl Effects {
             }
             self.settings.insert(e.id.clone(), settings);
         }
+        for sound in &self.sounds {
+            let id = sound_settings_id(&sound.id);
+            let mut settings: Settings = sound.settings.iter().filter_map(|s| Some((s.key.clone(), s.default.clone()?))).collect();
+            if let Some(Ok(serde_json::Value::Object(saved))) = db.setting(&settings_key(&id)).ok().flatten().map(|s| serde_json::from_str(&s)) {
+                settings.extend(saved);
+            }
+            self.settings.insert(id, settings);
+        }
+        self.offer_art_mine();
         log::info!("video effects: {}", self.effects.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(", "));
     }
 
@@ -587,7 +648,9 @@ impl Effects {
         let amount = f64::from(self.shuffle.randomise / 100.0).clamp(0.0, 1.0);
         let Some(effect) = self.effects.iter().find(|e| e.id == id).cloned().filter(|_| amount > 0.0) else { return };
         let mut rolled = Settings::default();
-        for spec in effect.settings() {
+        // Not the network it restyles with: another might not be downloaded, or have nothing
+        // to paint with.
+        for spec in effect.settings().filter(|s| effect.manifest.restyle.as_deref() != Some(s.key.as_str())) {
             let current = self.settings.get(id).and_then(|s| s.get(&spec.key));
             let value = match spec.kind {
                 SettingKind::Number => {
@@ -635,6 +698,7 @@ impl Effects {
     }
 
     fn change_turn(&mut self, may_fade: bool, hint: Option<ShotHint>) {
+        let from_sound = self.sound_id().map(str::to_owned);
         self.wait();
         let Some(next) = hint.and_then(|hint| self.next_suiting(hint)).or_else(|| self.next_turn()) else { return };
         let most_recent = self.effects.iter().filter(|e| self.in_shuffle(&e.id)).count() / RECENT_SHARE;
@@ -646,7 +710,12 @@ impl Effects {
         self.roll_settings(&next);
         let from = self.chosen.replace(next);
         self.status = None;
-        self.fading = from.filter(|_| may_fade && self.shuffle.fade > 0.0).map(|from| Fading { from, elapsed: 0.0 });
+        if self.pairs_sounds() {
+            let paired = self.roll() * 100.0 < self.shuffle.sounds;
+            let at = (self.roll() * self.sounds.len() as f32) as usize;
+            self.turn_sound = self.sounds.get(at).filter(|_| paired).map(|s| s.id.clone());
+        }
+        self.fading = from.filter(|_| may_fade && self.shuffle.fade > 0.0).map(|from| Fading { from, from_sound, elapsed: 0.0 });
     }
 
     /// Whether the player should look for scene cuts.
@@ -672,6 +741,102 @@ impl Effects {
         Some((self.to_draw(from), t * t * (3.0 - 2.0 * t)))
     }
 
+    /// The sound effects there are.
+    pub fn sound_effects(&self) -> &[SoundEffect] {
+        &self.sounds
+    }
+
+    /// The sound effect picked on its own, whether or not it's playing.
+    pub fn chosen_sound(&self) -> Option<&SoundEffect> {
+        let id = self.sound.as_deref()?;
+        self.sounds.iter().find(|s| s.id == id)
+    }
+
+    /// Picks the sound effect to play, switching sound effects on (none switches them off).
+    pub fn choose_sound(&mut self, id: Option<&str>, db: &Db) {
+        self.sound = id.map(str::to_owned);
+        if let Err(e) = db.set_setting(SOUND_KEY, id.unwrap_or("")) {
+            log::warn!("saving the sound effect: {e:#}");
+        }
+        self.set_sound_on(id.is_some(), db);
+    }
+
+    pub fn sound_is_on(&self) -> bool {
+        self.sound_on
+    }
+
+    /// Switches sound effects off or on, keeping which one; on with none picked picks the first.
+    pub fn set_sound_on(&mut self, on: bool, db: &Db) {
+        self.sound_on = on;
+        if on && self.chosen_sound().is_none() {
+            self.sound = self.sounds.first().map(|s| s.id.clone());
+            if let Err(e) = db.set_setting(SOUND_KEY, self.sound.as_deref().unwrap_or("")) {
+                log::warn!("saving the sound effect: {e:#}");
+            }
+        }
+        if let Err(e) = db.set_setting(SOUND_ON_KEY, if on { "1" } else { "0" }) {
+            log::warn!("saving whether sound effects are on: {e:#}");
+        }
+    }
+
+    /// Whether shuffle picks the sound effects, rather than the one picked on its own playing:
+    /// only while video effects are on and taking turns.
+    pub fn pairs_sounds(&self) -> bool {
+        self.on && self.shuffle.on && self.shuffle.sounds > 0.0
+    }
+
+    fn sound_id(&self) -> Option<&str> {
+        if !self.sound_on {
+            None
+        } else if self.pairs_sounds() {
+            self.turn_sound.as_deref()
+        } else {
+            self.chosen_sound().map(|s| s.id.as_str())
+        }
+    }
+
+    /// The sound effect playing now, if any.
+    pub fn sound_playing(&self) -> Option<&SoundEffect> {
+        let id = self.sound_id()?;
+        self.sounds.iter().find(|s| s.id == id)
+    }
+
+    /// The sound effect playing, with its settings.
+    pub fn active_sound(&self) -> Option<ActiveSound> {
+        self.to_play(self.sound_id()?)
+    }
+
+    /// During a fade that changes the sound effect, the one fading out (or none), and how far
+    /// the new one has faded in over it (0–1): the same as the picture.
+    pub fn sound_fading(&self) -> Option<(Option<ActiveSound>, f32)> {
+        let fading = self.fading.as_ref()?;
+        if fading.from_sound.as_deref() == self.sound_id() {
+            return None;
+        }
+        let t = (fading.elapsed / self.shuffle.fade.max(0.01)).clamp(0.0, 1.0);
+        Some((fading.from_sound.as_deref().and_then(|id| self.to_play(id)), t * t * (3.0 - 2.0 * t)))
+    }
+
+    fn to_play(&self, id: &str) -> Option<ActiveSound> {
+        let sound = self.sounds.iter().find(|s| s.id == id)?;
+        let settings_id = sound_settings_id(id);
+        let (mut numbers, mut choices) = (Vec::new(), Vec::new());
+        for spec in &sound.settings {
+            let value = self.value(&settings_id, &spec.key);
+            match spec.kind {
+                SettingKind::Bool => numbers.push((spec.key.clone(), f32::from(u8::from(value.and_then(serde_json::Value::as_bool).unwrap_or(false))))),
+                SettingKind::Choice => {
+                    let picked = value.and_then(serde_json::Value::as_str).filter(|v| spec.options.iter().any(|o| o.id == *v));
+                    if let Some(id) = picked.or_else(|| spec.options.first().map(|o| o.id.as_str())) {
+                        choices.push((spec.key.clone(), id.to_owned()));
+                    }
+                }
+                _ => numbers.push((spec.key.clone(), value.and_then(serde_json::Value::as_f64).unwrap_or(spec.min.unwrap_or(0.0)) as f32)),
+            }
+        }
+        Some(ActiveSound { id: id.to_owned(), numbers, choices })
+    }
+
     /// Everything the chosen effect needs and, with shuffle on, everything any effect it
     /// might pick needs. That keeps the sound filter and the depth model running between
     /// effects, so sound doesn't drop out and the picture's hold doesn't change at each one.
@@ -681,7 +846,7 @@ impl Effects {
             let id = Some(e.id.as_str());
             self.on && (id == self.chosen.as_deref() || id == fading || (self.shuffle.on && self.in_shuffle(&e.id)))
         });
-        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, camera: false, restyle: None, scale: 0.25 };
+        let mut needs = Needs { audio: false, depth: false, segment: false, faces: false, mesh: false, history: false, flow: false, plate: false, cuts: false, stats: false, scene: false, camera: false, restyle: None, sound: false, scale: 0.25 };
         for e in counted {
             let m = &e.manifest;
             // Shuffle needs to know about the shot to choose an effect that suits it.
@@ -700,6 +865,7 @@ impl Effects {
             needs.scene |= scene;
             needs.scale = needs.scale.max(usable_scale(m.scale));
         }
+        needs.sound = self.sound_on && (self.chosen_sound().is_some() || self.pairs_sounds());
         if self.on {
             needs.restyle = [self.chosen.as_deref(), fading].into_iter().flatten().find_map(|id| self.restyle_for(id));
             // Restyled pictures are steadied along the movement.
@@ -715,7 +881,27 @@ impl Effects {
         let spec = e.settings().find(|s| s.key == key);
         let picked = self.value(id, key).and_then(serde_json::Value::as_str).map(str::to_owned);
         let first = spec.and_then(|s| s.default.as_ref()?.as_str().map(str::to_owned)).or_else(|| spec?.options.first().map(|o| o.id.clone()));
-        picked.or(first).filter(|m| RESTYLES.contains(&m.as_str()) || TEXTURES.contains(&m.as_str()))
+        picked.or(first).filter(|m| RESTYLES.contains(&m.as_str()) || TEXTURES.contains(&m.as_str()) || m.starts_with(ART))
+    }
+
+    /// The pictures in the styles folder, offered (after the other `ART` styles) by every
+    /// setting that offers `ART` styles, in place of the ones offered before.
+    pub fn set_art_styles(&mut self, mine: &[Choice]) {
+        self.art_mine = mine.to_vec();
+        self.offer_art_mine();
+    }
+
+    fn offer_art_mine(&mut self) {
+        for e in &mut self.effects {
+            for s in &mut e.manifest.settings {
+                if s.kind != SettingKind::Choice || !s.options.iter().any(|o| o.id.starts_with(ART) && !o.id.starts_with(ART_MINE)) {
+                    continue;
+                }
+                s.options.retain(|o| !o.id.starts_with(ART_MINE));
+                let after = s.options.iter().rposition(|o| o.id.starts_with(ART)).map_or(s.options.len(), |i| i + 1);
+                s.options.splice(after..after, self.art_mine.iter().cloned());
+            }
+        }
     }
 
     fn roll(&mut self) -> f32 {
@@ -939,6 +1125,111 @@ mod tests {
     }
 
     #[test]
+    fn the_sound_effects_are_all_there_and_described() {
+        let sounds = sound_effects();
+        assert_eq!(sounds.len(), flex_sound::EFFECTS.len(), "each one's .toml reads");
+        for sound in &sounds {
+            assert!(!sound.name.is_empty() && !sound.description.is_empty(), "{}", sound.id);
+            assert!(flex_sound::make(&sound.id, 48_000, &Default::default()).is_some(), "{}", sound.id);
+        }
+        // Each choice's options are ones the engine knows.
+        let instruments: Vec<&str> = flex_sound::ddsp::INSTRUMENTS.iter().map(|(id, _)| *id).collect();
+        let scales: Vec<&str> = flex_sound::SCALES.iter().map(|(id, _)| *id).collect();
+        let harmonies: Vec<&str> = flex_sound::HARMONIES.iter().map(|(id, _)| *id).collect();
+        let known: [(&str, &str, &[&str]); 9] = [
+            ("voice", "voice", &flex_sound::VOICES),
+            ("autotune", "key", &flex_sound::KEYS),
+            ("autotune", "scale", &scales),
+            ("autotune", "harmony", &harmonies),
+            ("synth", "sound", &flex_sound::SOUNDS),
+            ("instrument", "instrument", &instruments),
+            ("reverb", "space", &flex_sound::SPACES),
+            ("old", "style", &flex_sound::STYLES),
+            ("dialogue", "mode", &flex_sound::MODES),
+        ];
+        for (effect, key, ids) in known {
+            let sound = sounds.iter().find(|s| s.id == effect).unwrap();
+            for option in &sound.settings.iter().find(|s| s.key == key).unwrap().options {
+                assert!(ids.contains(&option.id.as_str()), "{effect} has no {key} {}", option.id);
+            }
+        }
+    }
+
+    #[test]
+    fn the_sound_effect_picked_plays_with_any_effect() {
+        let root = std::env::temp_dir().join(format!("flex-effects-sound-{}", std::process::id()));
+        write(&root, "plain.frag", "");
+        let db = Db::open_in_memory().unwrap();
+        let mut effects = Effects::new(std::slice::from_ref(&root), &db);
+        effects.choose(Some("plain"), &db);
+        assert!(!effects.needs().sound);
+        assert_eq!(effects.active_sound(), None);
+        effects.choose_sound(Some("voice"), &db);
+        assert!(effects.needs().sound);
+        let playing = effects.active_sound().unwrap();
+        assert_eq!(playing.choices, vec![("voice".to_owned(), "chipmunk".to_owned())], "its default");
+        assert!(playing.numbers.contains(&("amount".to_owned(), 100.0)));
+        effects.set_setting(&sound_settings_id("voice"), "voice", serde_json::json!("deep"), &db);
+        assert_eq!(effects.active_sound().unwrap().choices, vec![("voice".to_owned(), "deep".to_owned())]);
+        // On its own, with the video effects off.
+        effects.set_on(false, &db);
+        assert_eq!(effects.active_sound().map(|s| s.id), Some("voice".to_owned()));
+        assert!(effects.needs().sound);
+        // Kept, but silent, while sound effects are off; and remembered.
+        effects.set_on(true, &db);
+        effects.set_sound_on(false, &db);
+        assert_eq!(effects.active_sound(), None);
+        assert!(!effects.needs().sound);
+        assert_eq!(effects.chosen_sound().map(|s| s.id.as_str()), Some("voice"));
+        let again = Effects::new(std::slice::from_ref(&root), &db);
+        assert_eq!(again.chosen_sound().map(|s| s.id.as_str()), Some("voice"));
+        assert!(!again.sound_is_on());
+        assert_eq!(again.value(&sound_settings_id("voice"), "voice"), Some(&serde_json::json!("deep")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shuffle_pairs_sound_effects_and_changes_them_with_the_picture() {
+        let root = std::env::temp_dir().join(format!("flex-effects-pair-{}", std::process::id()));
+        for id in ["a", "b", "c"] {
+            write(&root, &format!("{id}.frag"), "");
+        }
+        let db = Db::open_in_memory().unwrap();
+        let mut effects = Effects::new(std::slice::from_ref(&root), &db);
+        effects.choose_sound(Some("voice"), &db);
+        let shuffle = Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, ..Shuffle::default() };
+        // Not pairing: the one picked plays throughout, with no fade of its own.
+        effects.set_shuffle(shuffle, &db);
+        effects.step(10.5, true);
+        assert!(effects.fading().is_some());
+        assert!(effects.sound_fading().is_none());
+        assert_eq!(effects.active_sound().map(|s| s.id), Some("voice".to_owned()));
+        // Always pairing: every turn comes with one, from when the turn changes.
+        effects.set_shuffle(Shuffle { sounds: 100.0, ..shuffle }, &db);
+        assert!(effects.needs().sound);
+        assert_eq!(effects.active_sound(), None, "until the next turn");
+        effects.step(10.5, true);
+        let paired = effects.active_sound().map(|s| s.id).expect("a sound effect with the turn");
+        assert!(flex_sound::EFFECTS.iter().any(|(id, _)| *id == paired));
+        let (from, t) = effects.sound_fading().expect("it fades in with the picture");
+        assert_eq!((from, t), (None, effects.fading().unwrap().1));
+        effects.step(2.0, true);
+        assert!(effects.sound_fading().is_none());
+        // Hardly ever pairing: most turns have none, whatever's picked on its own.
+        effects.set_shuffle(Shuffle { sounds: 1.0, ..shuffle }, &db);
+        let mut quiet = false;
+        for _ in 0..20 {
+            effects.step(12.5, true);
+            quiet |= effects.active_sound().is_none();
+        }
+        assert!(quiet, "at 1%, most turns have none");
+        // With the video effects off there are no turns: the one picked plays.
+        effects.set_on(false, &db);
+        assert_eq!(effects.active_sound().map(|s| s.id), Some("voice".to_owned()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_restyled_effect_asks_for_the_style_its_setting_picks() {
         let root = std::env::temp_dir().join(format!("flex-effects-restyle-{}", std::process::id()));
         write(&root, "anime.frag", "");
@@ -967,6 +1258,36 @@ mod tests {
     }
 
     #[test]
+    fn pictures_in_the_styles_folder_are_offered_where_painting_styles_are() {
+        let root = std::env::temp_dir().join(format!("flex-effects-art-{}", std::process::id()));
+        write(&root, "art.frag", "");
+        write(
+            &root,
+            "art.toml",
+            "restyle = \"style\"\n[[settings]]\nkey = \"style\"\nlabel = \"Style\"\ntype = \"choice\"\ndefault = \"art:morph\"\n\
+             options = [{ id = \"art:morph\", label = \"All of them\" }, { id = \"art:scream\", label = \"The Scream\" }, { id = \"tex-foam\", label = \"Foam\" }]\n",
+        );
+        write(&root, "anime.frag", "");
+        write(&root, "anime.toml", "restyle = \"style\"\n[[settings]]\nkey = \"style\"\nlabel = \"Style\"\ntype = \"choice\"\noptions = [{ id = \"hayao\", label = \"Hayao\" }]\n");
+        let db = Db::open_in_memory().unwrap();
+        let mut effects = Effects::new(std::slice::from_ref(&root), &db);
+        effects.choose(Some("art"), &db);
+        assert_eq!(effects.needs().restyle.as_deref(), Some("art:morph"));
+        let mine = |names: &[&str]| names.iter().map(|n| Choice { id: format!("{ART_MINE}{n}"), label: (*n).into() }).collect::<Vec<_>>();
+        effects.set_art_styles(&mine(&["cat.jpg", "fabric.png"]));
+        effects.set_art_styles(&mine(&["cat.jpg"]));
+        let ids = |effects: &Effects, id: &str| effects.list().iter().find(|e| e.id == id).unwrap().manifest.settings[0].options.iter().map(|o| o.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&effects, "art"), ["art:morph", "art:scream", "art:mine:cat.jpg", "tex-foam"], "replaced, not added to, and with the other paintings");
+        assert_eq!(ids(&effects, "anime"), ["hayao"]);
+        effects.refresh(std::slice::from_ref(&root), &db);
+        assert_eq!(ids(&effects, "art"), ["art:morph", "art:scream", "art:mine:cat.jpg", "tex-foam"], "still there after looking again");
+        assert!(effects.list().iter().find(|e| e.id == "art").unwrap().takes_art());
+        effects.set_setting("art", "style", serde_json::json!("art:mine:cat.jpg"), &db);
+        assert_eq!(effects.needs().restyle.as_deref(), Some("art:mine:cat.jpg"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn shuffle_takes_turns_and_fades() {
         let root = std::env::temp_dir().join(format!("flex-effects-shuffle-{}", std::process::id()));
         write(&root, "a.frag", "");
@@ -981,7 +1302,7 @@ mod tests {
         let mut effects = Effects::new(&dirs, &db);
         assert!(!effects.needs().audio, "nothing's on");
 
-        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, by_shot: false, randomise: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
         let first = effects.chosen().expect("shuffle starts one").id.clone();
         let needs = effects.needs();
         assert_eq!((needs.audio, needs.depth, needs.faces, needs.scale), (true, true, false, 1.0), "all that it might pick");
@@ -1018,7 +1339,7 @@ mod tests {
         assert!(effects.fading().is_none());
 
         // At cuts: not before the shortest turn, and only when asked to.
-        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 30.0, fade: 2.0, at_cuts: true, by_shot: false, randomise: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 30.0, fade: 2.0, at_cuts: true, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
         let before = effects.chosen().unwrap().id.clone();
         effects.step(9.0, true);
         effects.scene_changed(ShotHint::default());
@@ -1033,18 +1354,18 @@ mod tests {
         effects.step(2.0, true);
         assert_ne!(effects.chosen().unwrap().id, at_cut);
         // A fade of 0 switches at once, whichever way it's changing.
-        effects.set_shuffle(Shuffle { on: true, shortest: 1.0, longest: 30.0, fade: 0.0, at_cuts: true, by_shot: false, randomise: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 1.0, longest: 30.0, fade: 0.0, at_cuts: true, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
         effects.step(2.0, true);
         let sharp = effects.chosen().unwrap().id.clone();
         effects.scene_changed(ShotHint::default());
         assert_ne!(effects.chosen().unwrap().id, sharp);
         assert!(effects.fading().is_none());
-        effects.set_shuffle(Shuffle { on: true, shortest: 5.0, longest: 5.0, fade: 0.0, at_cuts: false, by_shot: false, randomise: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 5.0, longest: 5.0, fade: 0.0, at_cuts: false, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
         let sharp = effects.chosen().unwrap().id.clone();
         effects.step(6.0, true);
         assert_ne!(effects.chosen().unwrap().id, sharp);
         assert!(effects.fading().is_none());
-        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, by_shot: false, randomise: 0.0 }, &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 10.0, longest: 10.0, fade: 2.0, at_cuts: false, by_shot: false, randomise: 0.0, sounds: 0.0 }, &db);
         effects.step(2.0, false);
         effects.step(11.0, true);
         let moved = effects.chosen().unwrap().id.clone();
@@ -1111,7 +1432,7 @@ mod tests {
         let dirs = [root.clone()];
         let mut effects = Effects::new(&dirs, &db);
         effects.choose(Some("one"), &db);
-        let on = Shuffle { on: true, shortest: 1.0, longest: 1.0, fade: 0.0, at_cuts: false, by_shot: false, randomise: 100.0 };
+        let on = Shuffle { on: true, shortest: 1.0, longest: 1.0, fade: 0.0, at_cuts: false, by_shot: false, randomise: 100.0, sounds: 0.0 };
         effects.set_shuffle(on, &db);
 
         let mut seen = std::collections::HashSet::new();
@@ -1150,6 +1471,33 @@ mod tests {
     }
 
     #[test]
+    fn shuffle_leaves_the_restyle_network_alone() {
+        let root = std::env::temp_dir().join(format!("flex-effects-roll-restyle-{}", std::process::id()));
+        let toml = "restyle = \"style\"\n\
+                    [[settings]]\nkey = \"style\"\nlabel = \"Style\"\ntype = \"choice\"\ndefault = \"hayao\"\n\
+                    options = [{ id = \"hayao\", label = \"Hayao\" }, { id = \"art:morph\", label = \"All of them\" }]\n\
+                    [[settings]]\nkey = \"mode\"\nlabel = \"Mode\"\ntype = \"choice\"\ndefault = \"a\"\n\
+                    options = [{ id = \"a\", label = \"A\" }, { id = \"b\", label = \"B\" }]\n";
+        for name in ["one", "two"] {
+            write(&root, &format!("{name}.frag"), "");
+            write(&root, &format!("{name}.toml"), toml);
+        }
+        let db = Db::open_in_memory().unwrap();
+        let mut effects = Effects::new(std::slice::from_ref(&root), &db);
+        effects.choose(Some("one"), &db);
+        effects.set_shuffle(Shuffle { on: true, shortest: 1.0, longest: 1.0, fade: 0.0, at_cuts: false, by_shot: false, randomise: 100.0, sounds: 0.0 }, &db);
+        let mut modes = std::collections::HashSet::new();
+        for _ in 0..100 {
+            effects.step(2.0, true);
+            let id = effects.chosen().unwrap().id.clone();
+            assert_eq!(effects.value(&id, "style").unwrap(), "hayao");
+            modes.insert(effects.value(&id, "mode").unwrap().as_str().unwrap().to_owned());
+        }
+        assert_eq!(modes.len(), 2, "the other choices are still rolled");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn settings_drift_slowly_and_stay_in_range() {
         let root = std::env::temp_dir().join(format!("flex-effects-drift-{}", std::process::id()));
         write(&root, "a.frag", "");
@@ -1171,13 +1519,13 @@ mod tests {
         effects.step(0.016, true);
         assert!((uniform(&effects, 0) - 50.0).abs() < 2.0, "eases in rather than jumping");
 
-        let (mut low, mut high, mut last) = (f32::MAX, f32::MIN, None);
+        let (mut low, mut high, mut last) = (f32::MAX, f32::MIN, None::<f32>);
         for _ in 0..30000 {
             effects.step(0.033, true);
             let wide = uniform(&effects, 0);
             assert!((0.0..=100.0).contains(&wide));
             if let Some(last) = last {
-                assert!((wide - last as f32).abs() < 0.5, "slowly");
+                assert!((wide - last).abs() < 0.5, "slowly");
             }
             last = Some(wide);
             (low, high) = (low.min(wide), high.max(wide));
@@ -1189,8 +1537,9 @@ mod tests {
 
         // Paused, nothing moves.
         let held = uniform(&effects, 0);
-        let eased = (0..200).fold((), |_, _| effects.step(0.033, false));
-        let _ = eased;
+        for _ in 0..200 {
+            effects.step(0.033, false);
+        }
         assert!((uniform(&effects, 0) - held).abs() < 0.01);
         assert_eq!(Effects::new(&dirs, &db).drift().amount, 100.0, "kept");
         let _ = std::fs::remove_dir_all(&root);

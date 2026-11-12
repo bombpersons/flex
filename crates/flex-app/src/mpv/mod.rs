@@ -111,6 +111,18 @@ impl Mpv {
         self.check(code, &format!("option {name}={value}"))
     }
 
+    /// Has `change` change the audio going through the "flexsound" filter, and tells `reset`
+    /// when the filter's cleared, if this libmpv is patched for it. Returns whether it is.
+    pub fn set_sound(&self, change: ffi::SoundChange, reset: ffi::Callback, ctx: *mut c_void) -> bool {
+        match self.api.flex_set_sound {
+            Some(set) => {
+                unsafe { set(Some(change), Some(reset), ctx) };
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Sends the audio through the "flextap" filter to `tap`, if this is Flex's patched libmpv.
     /// Returns whether it is.
     pub fn set_audio_tap(&self, tap: ffi::AudioTap) -> bool {

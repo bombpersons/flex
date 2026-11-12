@@ -2,13 +2,8 @@
 // sight is followed down into it, so whatever's deep in the fog is hidden by more of it, and what
 // stands above it isn't.
 
-float hash(vec3 p) {
-    p = fract(p * vec3(0.1031, 0.1137, 0.1279));
-    p += dot(p, p.yzx + 33.33);
-    return fract((p.x + p.y) * p.z);
-}
-
-float noise(vec2 p) {
+// Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
+float noise_h3(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
     float a = hash(vec3(i, 0.0)), b = hash(vec3(i + vec2(1.0, 0.0), 0.0));
@@ -16,23 +11,14 @@ float noise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-float fbm(vec2 p) {
+float fbm_h3(vec2 p) {
     float sum = 0.0, amount = 0.5;
     for (int i = 0; i < 4; i++) {
-        sum += amount * noise(p);
+        sum += amount * noise_h3(p);
         p = p * 2.03 + vec2(17.1, 9.2);
         amount *= 0.5;
     }
     return sum;
-}
-
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
-// How tall something `size` big in the world looks on screen, `away` from the camera.
-float screen_size(float size, float away) {
-    return u_world_lens.x * size / max(away, 1e-3) / u_world_lens.z * (u_video_rect.w - u_video_rect.y);
 }
 
 vec4 effect(vec2 uv) {
@@ -71,9 +57,9 @@ vec4 effect(vec2 uv) {
     vec2 flat_at = vec2(dot(at, across), dot(at, cross(up, across))) / eye;
     // Wind heard in the film churns it, and blows a quicker layer of it through.
     float wind = u_sound_wind;
-    vec2 churn = vec2(fbm(flat_at * 1.6 + vec2(t * 0.21, 3.7)), fbm(flat_at * 1.6 + vec2(8.3, -t * 0.17))) - 0.5;
-    float slow = fbm(flat_at * 0.7 + vec2(t * 0.06, t * 0.025) + churn * 1.2 * wind);
-    float quick = fbm(flat_at * 0.9 + vec2(t * 0.42, t * 0.12) + churn * 1.5);
+    vec2 churn = vec2(fbm_h3(flat_at * 1.6 + vec2(t * 0.21, 3.7)), fbm_h3(flat_at * 1.6 + vec2(8.3, -t * 0.17))) - 0.5;
+    float slow = fbm_h3(flat_at * 0.7 + vec2(t * 0.06, t * 0.025) + churn * 1.2 * wind);
+    float quick = fbm_h3(flat_at * 0.9 + vec2(t * 0.42, t * 0.12) + churn * 1.5);
     float billow = 0.55 + 0.9 * mix(slow, quick, 0.6 * wind);
     // Thicker the further down into it.
     float depth_in = clamp(1.0 - dot(at - g0, up) / max(top, 1e-3), 0.0, 1.0);

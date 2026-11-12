@@ -2,31 +2,6 @@
 // go. Straight at the camera, they float upwards instead. Singing, laughter and sweet music send
 // out more and bigger hearts; crying and sad music turn them blue, and they crack and sink.
 
-struct Face {
-    vec2 right, left, eyes, nose, mouth, up, across;
-    float spread, height;
-};
-
-// A face's points with the screen's shape taken out, and its own up and across.
-Face face_frame(int i, vec2 aspect) {
-    Face f;
-    f.right = face_point(i, 0) * aspect;
-    f.left = face_point(i, 1) * aspect;
-    f.eyes = 0.5 * (f.right + f.left);
-    f.nose = face_point(i, 2) * aspect;
-    f.mouth = 0.5 * (face_point(i, 3) + face_point(i, 4)) * aspect;
-    f.height = max(length(f.eyes - f.mouth), 0.004);
-    f.up = (f.eyes - f.mouth) / f.height;
-    f.across = vec2(f.up.y, -f.up.x);
-    f.spread = max(length(f.left - f.right), f.height * 0.55);
-    return f;
-}
-
-// How much of a soft oval `p` is in.
-float oval(vec2 p, vec2 centre, Face f, vec2 half_size) {
-    vec2 rel = p - centre;
-    return 1.0 - smoothstep(0.7, 1.0, length(vec2(dot(rel, f.across), dot(rel, f.up)) / half_size));
-}
 // Which way a face points on screen: length 0 straight at the camera, nearing 1 side on.
 vec2 facing(Face f) {
     vec2 aim = vec2(dot(f.nose - 0.5 * (f.eyes + f.mouth), f.across) / f.height, 0.53 - dot(f.eyes - f.nose, f.up) / f.height) / 0.5;

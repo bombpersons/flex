@@ -349,8 +349,7 @@ impl FlowGl {
     /// The movement worked out for the frame nearest `time`.
     pub fn at(&self, time: f32) -> Option<glow::Texture> {
         let o = self.objects.as_ref()?;
-        let nearest = o.kept.iter().filter_map(|(target, t)| t.map(|t| (target, (t - time).abs()))).min_by(|a, b| a.1.total_cmp(&b.1))?;
-        Some(nearest.0.texture)
+        crate::effects::nearest(o.kept.iter().filter_map(|(target, t)| t.map(|t| (target, t))), time).map(|(target, _)| target.texture)
     }
 
     pub unsafe fn release(&mut self, gl: &glow::Context) {

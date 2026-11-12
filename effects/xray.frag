@@ -15,7 +15,8 @@ vec3 skull(vec2 a, float open, vec3 film) {
     // Sockets.
     float socket = length((p - vec2(0.155, 0.61)) / vec2(0.115, 0.095));
     c = mix(c, vec3(0.0, 0.01, 0.03), 1.0 - smoothstep(0.86, 1.05, socket));
-    c += vec3(0.3, 0.5, 0.8) * 0.5 * exp(-pow(socket - 1.05, 2.0) * 60.0);
+    float rim = socket - 1.05;
+    c += vec3(0.3, 0.5, 0.8) * 0.5 * exp(-rim * rim * 60.0);
     // The nose: an upside-down heart.
     vec2 n = vec2(p.x, a.y - 0.43);
     float nose = max(n.x * 1.5 + n.y * 0.55 - 0.05, -n.y - 0.03);
@@ -38,7 +39,8 @@ vec4 effect(vec2 uv) {
     float sweep = fract(u_time * s_speed / 200.0) * (1.0 + wide * 2.0) - wide;
     float band = abs(uv.x - sweep);
     float inside = 1.0 - smoothstep(wide * 0.9, wide, band);
-    float line = exp(-pow((band - wide) * 90.0, 2.0));
+    float off_line = (band - wide) * 90.0;
+    float line = exp(-off_line * off_line);
     if (inside > 0.0) {
         vec3 negative = 1.0 - c;
         float luma = dot(negative, vec3(0.3, 0.59, 0.11));

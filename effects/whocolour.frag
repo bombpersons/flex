@@ -1,9 +1,5 @@
 // Everyone's Colour: who_at says which face each bit of person belongs with.
 
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     float person = smoothstep(0.4, 0.65, person_at(uv));

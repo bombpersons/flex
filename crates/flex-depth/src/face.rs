@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 
+use crate::{Kernel, Kernels, Mem, Ops, Runner, transpose};
+
 const YUNET: &str = "yunet.bin";
 const FACE_MESH: &str = "face_mesh.bin";
 const HEAD_ANGLE: &str = "head_angle.bin";
@@ -24,7 +26,6 @@ const STRIDES: [usize; 3] = [8, 16, 32];
 const MIN_SCORE: f32 = 0.6;
 /// Boxes overlapping this much are the same face.
 const SAME_FACE: f32 = 0.3;
-const SLOT: u64 = 256;
 /// Workgroups in a row of a dispatch (as in face.wgsl).
 const ROW: usize = 65535;
 /// Convolutions with at most this many outputs, each summing at least `REDUCE_SUM` products,
@@ -63,8 +64,6 @@ struct Params {
     parts: u32,
     part_at: u32,
 }
-
-const KERNELS: [&str; 7] = ["conv", "pool", "add_up", "gap", "conv_reduce", "conv1_tile", "sum_parts"];
 
 /// One face, in pixels of the picture given. Points are the right eye, left eye, nose and the
 /// right and left corners of the mouth (the person's own right and left).
@@ -119,71 +118,17 @@ pub(crate) fn from_f16(bits: u16) -> f32 {
     })
 }
 
-/// What every network shares.
-#[derive(Clone)]
-struct Gpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    layout: wgpu::BindGroupLayout,
-    pipelines: Vec<wgpu::ComputePipeline>,
-    _shared: super::Gpu,
-}
-
-impl Gpu {
-    fn new() -> Result<(Self, String)> {
-        let shared = super::Gpu::shared()?;
-        let (device, queue) = (shared.0.device.clone(), shared.0.queue.clone());
-        let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None };
-        let storage_entry = |read_only| wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("flex-face"),
-            entries: &[
-                entry(0, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64) }),
-                entry(1, storage_entry(false)),
-                entry(2, storage_entry(true)),
-            ],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("flex-face"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let source = wgpu::ShaderModuleDescriptor { label: Some("face.wgsl"), source: wgpu::ShaderSource::Wgsl(include_str!("face.wgsl").into()) };
-        // SAFETY: our own shaders, and every offset and size comes from a plan, which each
-        // network's `mem` and weights are made to fit.
-        let module = unsafe { device.create_shader_module_trusted(source, wgpu::ShaderRuntimeChecks::unchecked()) };
-        let pipelines = KERNELS
-            .iter()
-            .map(|entry| {
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pipeline_layout),
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    cache: None,
-                })
-            })
-            .collect();
-        let adapter = shared.0.adapter.clone();
-        Ok((Self { device, queue, layout, pipelines, _shared: shared }, adapter))
-    }
-}
-
-/// One network: its plan, weights and memory.
+/// One network: its plan on the GPU, and where the outputs asked for are.
 struct Net {
-    gpu: Gpu,
-    mem: wgpu::Buffer,
-    bind: wgpu::BindGroup,
-    readback: wgpu::Buffer,
-    ops: Vec<(usize, [u32; 3])>,
-    /// Where the outputs asked for are, and the part of `mem` that holds them.
+    run: Runner<Params>,
     outputs: Vec<Tensor>,
-    span: (u64, u64),
-    /// Each dispatch's, for `report`.
-    #[cfg_attr(not(test), allow(dead_code))]
-    params: Vec<Params>,
+    /// The part of `mem` that holds them: where it starts, and how many floats.
+    span: (u32, usize),
 }
 
 impl Net {
     /// `input` is the picture's channels, height and width; `wanted` the outputs to read.
-    fn new(gpu: &Gpu, model: &[u8], input: (usize, usize, usize), wanted: &[String]) -> Result<Self> {
+    fn new(kernels: &Kernels, model: &[u8], input: (usize, usize, usize), wanted: &[String]) -> Result<Self> {
         if model.len() < 4 {
             bail!("the face model is empty");
         }
@@ -198,10 +143,9 @@ impl Net {
 
         let mut tensors: HashMap<String, Tensor> = HashMap::new();
         let (channels, height, width) = input;
-        let mut end = (channels * height * width) as u32;
-        tensors.insert("input".into(), Tensor { at: 0, channels, h: height, w: width });
-        let mut ops = Vec::new();
-        let mut params = Vec::new();
+        let mut m = Mem::default();
+        tensors.insert("input".into(), Tensor { at: m.take(channels * height * width), channels, h: height, w: width });
+        let mut ops = Ops::default();
         let mut transposed = std::collections::HashSet::new();
         for op in plan["ops"].as_array().context("the plan has no ops")? {
             let input = *tensors.get(name(op, "in")?).context("an op's input comes before it's made")?;
@@ -231,50 +175,49 @@ impl Net {
                     };
                     // Few outputs with long sums share each sum among a workgroup.
                     let reduce = p.groups == 1 && cout * oh * ow <= REDUCE_OUTPUTS && p.cin as usize * size * size >= REDUCE_SUM;
-                    let kernel = if reduce { 4 } else if size == 1 && p.groups == 1 && stride == 1 { 5 } else { 0 };
-                    if kernel == 5 {
+                    let kernel = if reduce {
+                        Kernel::ConvReduce
+                    } else if size == 1 && p.groups == 1 && stride == 1 {
+                        Kernel::Conv1Tile
+                    } else {
+                        Kernel::FaceConv
+                    };
+                    if matches!(kernel, Kernel::Conv1Tile) {
                         // conv1_tile reads the weights as [cin][cout].
                         let (cin, at) = (p.cin as usize, p.weights as usize);
                         if !transposed.insert(at) {
                             bail!("two 1x1 convolutions share weights");
                         }
-                        let block = weights[at..at + cout * cin].to_vec();
-                        for (co, row) in block.chunks(cin).enumerate() {
-                            for (ci, v) in row.iter().enumerate() {
-                                weights[at + ci * cout + co] = *v;
-                            }
-                        }
+                        let block = transpose(&weights[at..at + cout * cin], cout, cin);
+                        weights[at..at + cout * cin].copy_from_slice(&block);
                     }
                     (kernel, p, Tensor { at: 0, channels: cout, h: oh, w: ow })
                 }
-                "pool" => (1, Params::default(), Tensor { at: 0, channels: input.channels, h: input.h / 2, w: input.w / 2 }),
+                "pool" => (Kernel::Pool, Params::default(), Tensor { at: 0, channels: input.channels, h: input.h / 2, w: input.w / 2 }),
                 "add_up" => {
                     let up = *tensors.get(name(op, "up")?).context("an op's input comes before it's made")?;
                     if up.h * 2 != input.h || up.w * 2 != input.w {
                         bail!("the picture's size has to be a multiple of 32");
                     }
-                    (2, Params { b: up.at, ..Default::default() }, Tensor { at: 0, channels: input.channels, h: input.h, w: input.w })
+                    (Kernel::AddUp, Params { b: up.at, ..Default::default() }, Tensor { at: 0, channels: input.channels, h: input.h, w: input.w })
                 }
-                "gap" => (3, Params::default(), Tensor { at: 0, channels: input.channels, h: 1, w: 1 }),
+                "gap" => (Kernel::Gap, Params::default(), Tensor { at: 0, channels: input.channels, h: 1, w: 1 }),
                 other => bail!("unknown op {other}"),
             };
-            let out = Tensor { at: end, ..out };
-            end += (out.channels * out.h * out.w) as u32;
-            if kernel == 5 {
+            let out = Tensor { at: m.take(out.channels * out.h * out.w), ..out };
+            if matches!(kernel, Kernel::Conv1Tile) {
                 let pixels = out.h * out.w;
                 let tiles = pixels.div_ceil(32) * out.channels.div_ceil(32);
                 // Enough workgroups to go round, each part summing at least 64 channels.
                 let parts = TILE_TARGET.div_ceil(tiles).min(input.channels / 64).max(1);
                 p.parts = parts as u32;
                 if parts > 1 {
-                    p.part_at = end;
-                    end += (parts * out.channels * pixels) as u32;
+                    p.part_at = m.take(parts * out.channels * pixels);
                 }
             }
             // add_up's h and w are B's; the others' are the input's.
-            let (h, w) = if kernel == 2 { (input.h / 2, input.w / 2) } else { (input.h, input.w) };
+            let (h, w) = if matches!(kernel, Kernel::AddUp) { (input.h / 2, input.w / 2) } else { (input.h, input.w) };
             p = Params { h: h as u32, w: w as u32, a: input.at, c: out.at, oh: out.h as u32, ow: out.w as u32, cout: out.channels as u32, ..p };
-            params.push(p);
             // One thread per output (conv_reduce: a workgroup per output), 64 to a workgroup, in
             // rows of ROW workgroups (face.wgsl); conv1_tile as it says.
             let flat = |n: usize| {
@@ -282,15 +225,14 @@ impl Net {
                 [groups.min(ROW) as u32, groups.div_ceil(ROW) as u32, 1]
             };
             match kernel {
-                4 => ops.push((kernel, flat(out.channels * out.h * out.w * 64))),
-                5 => {
-                    ops.push((kernel, [out.channels.div_ceil(32) as u32, (out.h * out.w).div_ceil(32) as u32, p.parts]));
+                Kernel::ConvReduce => ops.push(kernel, p, flat(out.channels * out.h * out.w * 64)),
+                Kernel::Conv1Tile => {
+                    ops.push(kernel, p, [out.channels.div_ceil(32) as u32, (out.h * out.w).div_ceil(32) as u32, p.parts]);
                     if p.parts > 1 {
-                        params.push(p);
-                        ops.push((6, flat(out.channels * out.h * out.w)));
+                        ops.push(Kernel::SumParts, p, flat(out.channels * out.h * out.w));
                     }
                 }
-                _ => ops.push((kernel, flat(out.channels * out.h * out.w))),
+                _ => ops.push(kernel, p, flat(out.channels * out.h * out.w)),
             }
             tensors.insert(name(op, "out")?.to_owned(), out);
         }
@@ -299,147 +241,67 @@ impl Net {
             let name = plan["outputs"][kind].as_str().context("the plan has no output")?;
             outputs.push(*tensors.get(name).context("the plan's output isn't made")?);
         }
-        let first = outputs.iter().map(|t| t.at).min().unwrap_or(0) as u64 * 4;
-        let last = outputs.iter().map(|t| t.at as u64 + (t.channels * t.h * t.w) as u64).max().unwrap_or(0) * 4;
-
-        let device = &gpu.device;
-        let storage = |label, size: u64, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
-        let w = storage("weights", weights.len() as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-        gpu.queue.write_buffer(&w, 0, bytemuck::cast_slice(&weights));
-        let mem = storage("mem", end as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
-        let readback = storage("readback", last - first, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
-        let slots = storage("params", SLOT * params.len() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
-        let mut bytes = vec![0u8; params.len() * SLOT as usize];
-        for (i, p) in params.iter().enumerate() {
-            bytes[i * SLOT as usize..][..std::mem::size_of::<Params>()].copy_from_slice(bytemuck::bytes_of(p));
-        }
-        gpu.queue.write_buffer(&slots, 0, &bytes);
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("flex-face"),
-            layout: &gpu.layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &slots, offset: 0, size: wgpu::BufferSize::new(std::mem::size_of::<Params>() as u64) }) },
-                wgpu::BindGroupEntry { binding: 1, resource: mem.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: w.as_entire_binding() },
-            ],
-        });
-        Ok(Self { gpu: gpu.clone(), mem, bind, readback, ops, outputs, span: (first, last), params })
+        let first = outputs.iter().map(|t| t.at).min().unwrap_or(0);
+        let last = outputs.iter().map(|t| t.at as usize + t.channels * t.h * t.w).max().unwrap_or(0);
+        let run = Runner::with(kernels.clone(), &weights, ops, Vec::new(), m.end, "faces")?;
+        Ok(Self { run, outputs, span: (first, last - first as usize) })
     }
 
     /// For tuning: each dispatch's time (ms), grouped by what it is, then the whole run in one
     /// submission.
     #[cfg(test)]
     fn report(&self) {
-        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
-        let time = |range: std::ops::Range<usize>, times: usize| {
-            let mut enc = device.create_command_encoder(&Default::default());
-            {
-                let mut pass = enc.begin_compute_pass(&Default::default());
-                for i in range {
-                    for _ in 0..times {
-                        let (kernel, g) = self.ops[i];
-                        pass.set_pipeline(&self.gpu.pipelines[kernel]);
-                        pass.set_bind_group(0, &self.bind, &[(i as u64 * SLOT) as u32]);
-                        pass.dispatch_workgroups(g[0], g[1], g[2]);
-                    }
-                }
-            }
-            let started = std::time::Instant::now();
-            queue.submit([enc.finish()]);
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            started.elapsed().as_secs_f64() * 1000.0
-        };
-        let mut groups: Vec<(String, f64, usize)> = Vec::new();
-        let mut total = 0.0;
-        for i in 0..self.ops.len() {
-            time(i..i + 1, 1);
-            let t = (time(i..i + 1, 11) - time(i..i + 1, 1)) / 10.0;
-            total += t;
-            let (kernel, _) = self.ops[i];
-            let p = &self.params[i];
+        self.run.report(|_, kernel, p| {
             let kind = match kernel {
-                0 if p.groups > 1 => format!("depthwise {}x{}", p.kernel, p.kernel),
-                0 => format!("conv {}x{} {}->{}", p.kernel, p.kernel, p.cin, p.cout),
-                4 => format!("shared {}x{} {}->{}", p.kernel, p.kernel, p.cin, p.cout),
-                5 => format!("tiled 1x1 in {} parts", p.parts),
-                6 => "sum parts".to_owned(),
-                k => KERNELS[k].to_owned(),
+                Kernel::FaceConv if p.groups > 1 => format!("depthwise {}x{}", p.kernel, p.kernel),
+                Kernel::FaceConv => format!("conv {}x{} {}->{}", p.kernel, p.kernel, p.cin, p.cout),
+                Kernel::ConvReduce => format!("shared {}x{} {}->{}", p.kernel, p.kernel, p.cin, p.cout),
+                Kernel::Conv1Tile => format!("tiled 1x1 in {} parts", p.parts),
+                Kernel::SumParts => "sum parts".to_owned(),
+                k => format!("{k:?}"),
             };
-            let name = format!("{kind} at {}x{}", p.ow, p.oh);
-            match groups.iter_mut().find(|g| g.0 == name) {
-                Some(g) => {
-                    g.1 += t;
-                    g.2 += 1;
-                }
-                None => groups.push((name, t, 1)),
-            }
-        }
-        groups.sort_by(|a, b| b.1.total_cmp(&a.1));
-        time(0..self.ops.len(), 1);
-        let whole = (0..5).map(|_| time(0..self.ops.len(), 1)).sum::<f64>() / 5.0;
-        eprintln!("{} dispatches: {total:.2} ms one by one, {whole:.2} ms in one submission", self.ops.len());
-        for (name, t, n) in groups.iter().take(16) {
-            eprintln!("{t:7.3} ms  {n:3}x  {name}");
-        }
+            format!("{kind} at {}x{}", p.ow, p.oh)
+        });
+        eprintln!("{:.2} ms in one submission", self.run.time_first(self.run.ops.list.len(), 5));
     }
 
     /// The asked-for outputs of a picture, channels first, each as the shaders leave it.
     fn run(&mut self, input: &[f32]) -> Result<Vec<Vec<f32>>> {
-        let (device, queue) = (&self.gpu.device, &self.gpu.queue);
-        queue.write_buffer(&self.mem, 0, bytemuck::cast_slice(input));
+        self.run.write(0, input);
         // As one submission: each costs a little, and these are short enough not to hold up
         // what else is drawing.
-        let mut enc = device.create_command_encoder(&Default::default());
-        {
-            let mut pass = enc.begin_compute_pass(&Default::default());
-            for (i, (kernel, g)) in self.ops.iter().enumerate() {
-                pass.set_pipeline(&self.gpu.pipelines[*kernel]);
-                pass.set_bind_group(0, &self.bind, &[(i as u64 * SLOT) as u32]);
-                pass.dispatch_workgroups(g[0], g[1], g[2]);
-            }
-        }
-        queue.submit([enc.finish()]);
-        let (first, last) = self.span;
-        let mut enc = device.create_command_encoder(&Default::default());
-        enc.copy_buffer_to_buffer(&self.mem, first, &self.readback, 0, last - first);
-        queue.submit([enc.finish()]);
-        let slice = self.readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let out = {
-            let view = slice.get_mapped_range().map_err(|e| anyhow::anyhow!("{e}"))?;
-            let floats: &[f32] = bytemuck::cast_slice(&view);
-            self.outputs.iter().map(|t| floats[(t.at as usize - first as usize / 4)..][..t.channels * t.h * t.w].to_vec()).collect()
-        };
-        self.readback.unmap();
-        Ok(out)
+        self.run.submit(0..self.run.ops.list.len());
+        let (first, len) = self.span;
+        let floats = self.run.read(first, len)?;
+        Ok(self.outputs.iter().map(|t| floats[(t.at - first) as usize..][..t.channels * t.h * t.w].to_vec()).collect())
     }
 }
 
 pub struct Face {
-    gpu: Gpu,
+    /// face.wgsl's, which all three networks share.
+    kernels: Kernels,
     yunet: Net,
     /// Made when first asked for, as most effects only want boxes.
     mesh: Option<Net>,
     head: Option<Net>,
-    adapter: String,
     /// The tensors YuNet's outputs are read from, scale by scale.
     shapes: [[Tensor; 4]; 3],
 }
 
 impl Face {
     pub fn new() -> Result<Self> {
-        let (gpu, adapter) = Gpu::new()?;
+        let all = [Kernel::FaceConv, Kernel::Pool, Kernel::AddUp, Kernel::Gap, Kernel::ConvReduce, Kernel::Conv1Tile, Kernel::SumParts];
+        let kernels = Kernels::new::<Params>("face.wgsl", include_str!("face.wgsl"), all)?;
         let wanted: Vec<String> = STRIDES.iter().flat_map(|s| ["cls", "obj", "bbox", "kps"].map(|k| format!("{k}_{s}"))).collect();
-        let yunet = Net::new(&gpu, &super::models::load(YUNET)?, (3, HEIGHT, WIDTH), &wanted)?;
+        let yunet = Net::new(&kernels, &super::models::load(YUNET)?, (3, HEIGHT, WIDTH), &wanted)?;
         let at = |scale: usize, kind: usize| yunet.outputs[scale * 4 + kind];
         let shapes = [0, 1, 2].map(|s| [0, 1, 2, 3].map(|k| at(s, k)));
-        Ok(Self { gpu, yunet, mesh: None, head: None, adapter, shapes })
+        Ok(Self { kernels, yunet, mesh: None, head: None, shapes })
     }
 
     /// The GPU it runs on.
     pub fn adapter(&self) -> &str {
-        &self.adapter
+        &self.yunet.run.adapter
     }
 
     /// Faces in a picture of `WIDTH` × `HEIGHT`, as RGB bytes row by row from the top.
@@ -453,7 +315,7 @@ impl Face {
             bail!("expected a {MESH_SIZE} square of RGB, got {} bytes", rgb.len());
         }
         if self.mesh.is_none() {
-            self.mesh = Some(Net::new(&self.gpu, &super::models::load(FACE_MESH)?, (3, MESH_SIZE, MESH_SIZE), &["points".to_owned(), "present".to_owned()])?);
+            self.mesh = Some(Net::new(&self.kernels, &super::models::load(FACE_MESH)?, (3, MESH_SIZE, MESH_SIZE), &["points".to_owned(), "present".to_owned()])?);
         }
         let mut input = vec![0.0f32; 3 * MESH_SIZE * MESH_SIZE];
         for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
@@ -472,7 +334,7 @@ impl Face {
             bail!("expected a {HEAD_SIZE} square of RGB, got {} bytes", rgb.len());
         }
         if self.head.is_none() {
-            self.head = Some(Net::new(&self.gpu, &super::models::load(HEAD_ANGLE)?, (3, HEAD_SIZE, HEAD_SIZE), &["six".to_owned()])?);
+            self.head = Some(Net::new(&self.kernels, &super::models::load(HEAD_ANGLE)?, (3, HEAD_SIZE, HEAD_SIZE), &["six".to_owned()])?);
         }
         let mut input = vec![0.0f32; 3 * HEAD_SIZE * HEAD_SIZE];
         for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {

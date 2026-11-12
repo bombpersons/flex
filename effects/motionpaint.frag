@@ -1,10 +1,6 @@
 // Motion Paint: colour from the direction things are moving in, strength from how fast, carried
 // along with the movement frame after frame.
 
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     vec2 v = flow_at(uv);

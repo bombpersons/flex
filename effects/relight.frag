@@ -6,10 +6,6 @@
 
 const float RELIEF = 0.6;
 
-vec3 rainbow(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 // The surface's direction, with its tilt made more or less of by s_bump.
 vec3 bumped_normal(vec2 uv) {
     vec3 n = normal_at(uv);
@@ -43,7 +39,7 @@ vec4 effect(vec2 uv) {
         // A reflection of a slowly turning room of colour.
         vec3 r = reflect(vec3(0.0, 0.0, -1.0), n);
         float bands = sin(r.x * 7.0 + t) + sin(r.y * 9.0 - 0.7 * t) + 3.0 * d;
-        vec3 chrome = rainbow(0.18 * bands + 0.03 * t) * (0.45 + 0.55 * pow(1.0 - n.z, 1.5)) + pow(max(r.y, 0.0), 12.0);
+        vec3 chrome = hue(0.18 * bands + 0.03 * t) * (0.45 + 0.55 * pow(1.0 - n.z, 1.5)) + pow(max(r.y, 0.0), 12.0);
         return vec4(mix(video * 0.4, chrome, 0.85), 1.0);
     }
 
@@ -63,7 +59,7 @@ vec4 effect(vec2 uv) {
         );
         // Lights stay where they are in the room when the camera moves.
         at.xy = (world_pin_nearby(at.xy / vec2(aspect, 1.0) + 0.5, 1.2) - 0.5) * vec2(aspect, 1.0);
-        vec3 colour = rainbow(f * 0.31 + 0.1 + 0.03 * t) * 1.4;
+        vec3 colour = hue(f * 0.31 + 0.1 + 0.03 * t) * 1.4;
         vec3 to = at - p;
         float dist2 = dot(to, to);
         vec3 l = to / sqrt(dist2);

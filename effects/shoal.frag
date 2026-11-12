@@ -2,13 +2,8 @@
 // grid around where the camera is looking, so there are always some about wherever it goes.
 // Whatever's nearer than a fish stands in front of it.
 
-float hash(vec3 p) {
-    p = fract(p * vec3(0.1031, 0.1137, 0.1279));
-    p += dot(p, p.yzx + 33.33);
-    return fract((p.x + p.y) * p.z);
-}
-
-float noise(vec2 p) {
+// Value noise on hash(vec3) rather than hash(vec2), and four octaves of it.
+float noise_h3(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
     float a = hash(vec3(i, 0.0)), b = hash(vec3(i + vec2(1.0, 0.0), 0.0));
@@ -16,23 +11,19 @@ float noise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-float fbm(vec2 p) {
+float fbm_h3(vec2 p) {
     float sum = 0.0, amount = 0.5;
     for (int i = 0; i < 4; i++) {
-        sum += amount * noise(p);
+        sum += amount * noise_h3(p);
         p = p * 2.03 + vec2(17.1, 9.2);
         amount *= 0.5;
     }
     return sum;
 }
 
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 // How tall something looks on screen `away` from the camera, if it's `size` of the picture's height
 // 1 away. A shot's world has no real scale, so sizes go by the picture instead.
-float screen_size(float size, float away) {
+float picture_size(float size, float away) {
     return size / max(away, 1e-3) * (u_video_rect.w - u_video_rect.y);
 }
 
@@ -93,7 +84,7 @@ vec4 effect(vec2 uv) {
                 if (place.z < 0.1) continue;
                 vec2 heading = (world_to_screen(next).xy - place.xy) * aspect;
                 heading = length(heading) > 1e-6 ? normalize(heading) : vec2(1.0, 0.0);
-                float long_ = screen_size(0.035 * s_size / 100.0 * (0.8 + 0.4 * hash(seed + 5.0)), place.z);
+                float long_ = picture_size(0.035 * s_size / 100.0 * (0.8 + 0.4 * hash(seed + 5.0)), place.z);
                 vec2 d = (uv - place.xy) * aspect;
                 vec2 q = vec2(dot(d, heading), dot(d, vec2(-heading.y, heading.x))) / long_;
                 if (abs(q.x) > 1.2 || abs(q.y) > 0.6) continue;

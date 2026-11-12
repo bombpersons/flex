@@ -4,11 +4,6 @@
 
 const float TAU = 6.2831853;
 
-vec2 rotate(vec2 p, float a) {
-    float c = cos(a), s = sin(a);
-    return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
-}
-
 vec3 hue_turn(vec3 c, float a) {
     const vec3 k = vec3(0.57735);
     return c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));

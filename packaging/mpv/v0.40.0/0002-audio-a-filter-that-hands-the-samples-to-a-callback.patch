@@ -1,7 +1,7 @@
-From 70e2d69ecf1f9dd6fba7b7a6d9711b97fd413d63 Mon Sep 17 00:00:00 2001
+From 2861161c9b12f3cef998e50c1fec2500bbc459b8 Mon Sep 17 00:00:00 2001
 From: flex-build <build@localhost>
 Date: Mon, 9 Nov 2026 20:41:01 +0000
-Subject: [PATCH 2/2] audio: a filter that hands the samples to a callback
+Subject: [PATCH 2/3] audio: a filter that hands the samples to a callback
 
 ---
  audio/filter/af_flextap.c | 90 +++++++++++++++++++++++++++++++++++++++

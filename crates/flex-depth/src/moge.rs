@@ -18,9 +18,7 @@
 
 use anyhow::{Result, bail};
 
-use crate::{
-    ACCUMULATE, Conv, D, EDGE, GELU, HEADS, LAYERS, Linear, MAX_TOKENS, NONE, Ops, PATCH, POS_GRID, RELU, RELU_IN, Runner, Upload, Weights, Wino, bicubic_scaled, norm, patches_of,
-};
+use crate::{ACCUMULATE, Block, Conv, D, EDGE, Encoder, EncoderMem, Linear, MAX_TOKENS, MaskHead, MaskMem, Mem, NONE, Ops, PATCH, RELU_IN, Runner, Upload, Weights, Wino, norm, patches_of};
 
 /// The model this is a port of, and the version of its weights it was checked against.
 pub const MODEL: &str = "Ruicheng/moge-2-vits-normal";
@@ -30,20 +28,34 @@ pub const WEIGHTS_URL: &str = "https://huggingface.co/Ruicheng/moge-2-vits-norma
 pub const WEIGHTS_SHA256: &str = "79a16621928c2bf0ed04659218c55c01075e950507f40bb3332fb4c873d3e1dc";
 pub const WEIGHTS_BYTES: u64 = 140_550_416;
 
-/// The head that finds people, walls and sky on MoGe-2's features (tools/moge/segment), when
-/// there is one.
-pub const MASK_HEAD: Option<&[u8]> = None;
+/// The head that finds people, walls, sky and more on MoGe-2's features (tools/moge/segment),
+/// in Flex's models folder.
+pub const MASK_HEAD: &str = "moge-segment.safetensors";
 
-/// What its head tells apart: each pixel is one of SCENE, and a person's pixels one of PARTS.
-pub const SCENE: [&str; 9] = ["other", "person", "wall", "sky", "ground", "ceiling", "water", "plant", "window"];
+/// The head, from the models folder.
+pub fn mask_head() -> Result<Vec<u8>> {
+    crate::models::load(MASK_HEAD)
+}
+
+/// What its head tells apart: each pixel is one of SCENE; a person's pixels one of PARTS (what
+/// they're made of) and one of BODY (which part of the body); and CENTRES, which person.
+pub const SCENE: [&str; 13] = ["other", "person", "wall", "sky", "ground", "ceiling", "water", "plant", "window", "vehicle", "animal", "building", "furniture"];
 pub const PARTS: [&str; 3] = ["skin", "hair", "clothes"];
+pub const BODY: [&str; 6] = ["head", "torso", "arm", "hand", "leg", "foot"];
+/// How near each pixel is to a person's centre (1 at the centre), and for a person's pixels the
+/// way to their centre, in picture heights (x to the right, y down).
+pub const CENTRES: [&str; 3] = ["centre", "to centre x", "to centre y"];
+const OUTPUTS: usize = SCENE.len() + PARTS.len() + BODY.len() + CENTRES.len();
 
 /// How likely each pixel is to be each class, as planes of `Moge::out_size()`, rows from the top.
 pub struct Masks {
-    /// SCENE's classes (or, from a head that only knows them, other, person, wall and sky).
+    /// SCENE's classes (each pixel's add up to 1).
     pub scene: Vec<f32>,
-    /// PARTS', of a person (each pixel's add up to 1), when the head knows them.
-    pub parts: Option<Vec<f32>>,
+    /// PARTS' and BODY's, of a person (each pixel's add up to 1 in each).
+    pub parts: Vec<f32>,
+    pub body: Vec<f32>,
+    /// CENTRES' three planes, as the head gives them.
+    pub centres: Vec<f32>,
 }
 
 /// Blocks whose (normed) output feeds the neck.
@@ -57,13 +69,7 @@ const HEADS_OUT: [&str; 2] = ["normal_head", "points_head"];
 /// Where things are in `mem`.
 #[derive(Debug, Default, Clone)]
 struct Layout {
-    patches: u32,
-    x: u32,
-    xn: u32,
-    qkv: u32,
-    scores: u32,
-    attn: u32,
-    hidden: u32,
+    enc: EncoderMem,
     /// The normed outputs of the TAPS blocks, [tokens][D] each (the class token first).
     tokens: [u32; 2],
     /// The neck's features at each level, [CHANNELS[i]][gh << i][gw << i].
@@ -77,15 +83,8 @@ struct Layout {
     /// [3][8 gh][8 gw] each.
     normal: u32,
     points: u32,
-    /// The masks' head (as in lib.rs), and its output [classes][8 gh][8 gw].
-    token_sum: u32,
-    context: u32,
-    context_up: u32,
-    mid: u32,
-    mid_up: u32,
-    fine1: u32,
-    fine2: u32,
-    logits: u32,
+    /// The masks' head's (as in lib.rs).
+    mask: MaskMem,
     end: u32,
 }
 
@@ -108,7 +107,7 @@ pub struct Moge {
     with_masks: bool,
     mask_classes: usize,
     /// Where each part of the network ends in the dispatches, for tuning.
-    #[allow(dead_code)]
+    #[cfg(test)]
     marks: Vec<(&'static str, usize)>,
 }
 
@@ -219,56 +218,23 @@ impl Moge {
         let mut up = Upload::default();
         let enc = "encoder.backbone";
 
-        // Patch embedding, and the position embedding stretched as DINOv2 does (by a scale
-        // factor a tenth of a patch bigger than the grid), with the class token's own added.
-        let (pe_in, pe_out, pe_w) = wt.transposed(&format!("{enc}.patch_embed.proj.weight"), None)?;
-        let pe = Linear { w: up.push(&pe_w), b: up.push(&wt.vec(&format!("{enc}.patch_embed.proj.bias"))?), inp: pe_in, out: pe_out };
-        let pos = &wt.get(&format!("{enc}.pos_embed"))?.1;
-        let cls = wt.vec(&format!("{enc}.cls_token"))?;
-        if pos.len() != (POS_GRID * POS_GRID + 1) * D {
-            bail!("unexpected position embedding size");
-        }
-        let mut grid_pos = vec![0.0; D * POS_GRID * POS_GRID];
-        for i in 0..POS_GRID * POS_GRID {
-            for c in 0..D {
-                grid_pos[c * POS_GRID * POS_GRID + i] = pos[(1 + i) * D + c];
-            }
-        }
-        let ratio = (POS_GRID as f64 / (gh as f64 + 0.1), POS_GRID as f64 / (gw as f64 + 0.1));
-        let stretched = bicubic_scaled(&grid_pos, D, (POS_GRID, POS_GRID), (gh, gw), ratio);
-        let mut start = vec![0.0; tokens * D];
-        for c in 0..D {
-            start[c] = cls[c] + pos[c];
-            for i in 0..n {
-                start[(1 + i) * D + c] = stretched[c * n + i];
-            }
-        }
-        let start_at = up.push(&start);
-
-        struct Block {
-            n1: crate::Norm,
-            qkv: Linear,
-            out: Linear,
-            n2: crate::Norm,
-            fc1: Linear,
-            fc2: Linear,
-        }
+        // The position embedding is stretched as DINOv2 does it, by a scale factor a tenth of a
+        // patch bigger than the grid.
         let lin = |up: &mut Upload, name: &str, scale: Option<&[f32]>| crate::linear(up, &wt, name, scale);
-        let mut blocks = Vec::new();
-        for i in 0..LAYERS {
+        let names = ["patch_embed.proj", "pos_embed", "cls_token", "norm"].map(|name| format!("{enc}.{name}"));
+        let encoder = Encoder::load(&mut up, &wt, (gw, gh), names.each_ref().map(String::as_str), 0.1, |up, i| {
             let p = format!("{enc}.blocks.{i}");
             let ls1 = wt.vec(&format!("{p}.ls1.gamma"))?;
             let ls2 = wt.vec(&format!("{p}.ls2.gamma"))?;
-            blocks.push(Block {
-                n1: norm(&mut up, &wt, &format!("{p}.norm1"))?,
-                qkv: lin(&mut up, &format!("{p}.attn.qkv"), None)?,
-                out: lin(&mut up, &format!("{p}.attn.proj"), Some(&ls1))?,
-                n2: norm(&mut up, &wt, &format!("{p}.norm2"))?,
-                fc1: lin(&mut up, &format!("{p}.mlp.fc1"), None)?,
-                fc2: lin(&mut up, &format!("{p}.mlp.fc2"), Some(&ls2))?,
-            });
-        }
-        let final_norm = norm(&mut up, &wt, &format!("{enc}.norm"))?;
+            Ok(Block {
+                n1: norm(up, &wt, &format!("{p}.norm1"))?,
+                qkv: lin(up, &format!("{p}.attn.qkv"), None)?,
+                out: lin(up, &format!("{p}.attn.proj"), Some(&ls1))?,
+                n2: norm(up, &wt, &format!("{p}.norm2"))?,
+                fc1: lin(up, &format!("{p}.mlp.fc1"), None)?,
+                fc2: lin(up, &format!("{p}.mlp.fc2"), Some(&ls2))?,
+            })
+        })?;
 
         // The neck's first level: the two taps projected and summed, with the view plane's u and
         // v beside them, through a 1x1 convolution. All linear, so one matrix from each tap and
@@ -407,90 +373,41 @@ impl Moge {
 
         let mask_head = match mask_head {
             Some(bytes) => {
-                let wt = Weights { t: crate::read_safetensors(bytes)? };
-                let lin = |up: &mut Upload, name: &str| crate::linear(up, &wt, name, None);
-                let conv = |up: &mut Upload, name: &str| crate::conv(up, &wt, name);
-                let width = wt.get("fine1.weight")?.0[0];
-                let classes = wt.get("out.weight")?.0[0];
-                if classes != SCENE.len() + PARTS.len() && classes != crate::MASK_CLASSES {
-                    bail!("a mask head with {classes} classes");
+                let head = MaskHead::load(&mut up, bytes)?;
+                if head.classes != OUTPUTS {
+                    bail!("a mask head with {} outputs, not {OUTPUTS}", head.classes);
                 }
-                Some((width, classes, crate::MaskHead {
-                    token9: lin(&mut up, "token9")?,
-                    token12: lin(&mut up, "token12")?,
-                    context: conv(&mut up, "context")?,
-                    mid: conv(&mut up, "mid")?,
-                    fused: lin(&mut up, "fused")?,
-                    fine1: conv(&mut up, "fine1")?,
-                    fine2: conv(&mut up, "fine2")?,
-                    out: lin(&mut up, "out")?,
-                }))
+                Some(head)
             }
             None => None,
         };
-        let (mask_width, mask_classes) = mask_head.as_ref().map_or((0, 0), |(w, c, _)| (*w, *c));
+        let mask_classes = mask_head.as_ref().map_or(0, |h| h.classes);
 
         // Memory.
-        let mut end = 0u32;
-        let mut alloc = |len: usize| {
-            let at = end;
-            end += len as u32;
-            at
-        };
-        let mut s = Layout {
-            patches: alloc(n * pe_in),
-            x: alloc(tokens * D),
-            xn: alloc(tokens * D),
-            qkv: alloc(tokens * 3 * D),
-            scores: alloc(HEADS * tokens * tokens),
-            attn: alloc(tokens * D),
-            hidden: alloc(tokens * 4 * D),
-            ..Default::default()
-        };
-        s.tokens = [alloc(tokens * D), alloc(tokens * D)];
+        let mut m = Mem::default();
+        let mut s = Layout { enc: encoder.mem(&mut m, n), ..Default::default() };
+        s.tokens = [m.take(tokens * D), m.take(tokens * D)];
         #[allow(clippy::needless_range_loop)] // i gives the size too
         for i in 0..4 {
-            s.neck[i] = alloc(CHANNELS[i] * pixels(i));
+            s.neck[i] = m.take(CHANNELS[i] * pixels(i));
             // Both heads' (they run together), one after the other.
-            s.head[i] = if i == 0 { 0 } else { alloc(2 * CHANNELS[i] * pixels(i)) };
+            s.head[i] = if i == 0 { 0 } else { m.take(2 * CHANNELS[i] * pixels(i)) };
         }
         let biggest = (1..4).map(|i| CHANNELS[i] * pixels(i)).max().unwrap_or(0);
         let scratch = (1..3).map(|i| Wino::scratch(CHANNELS[i], CHANNELS[i], size(i))).max().unwrap_or(0);
-        s.up = alloc(2 * biggest);
-        s.t = alloc(2 * biggest);
-        s.scratch = alloc(2 * scratch);
-        s.normal = alloc(3 * pixels(3));
-        s.points = alloc(3 * pixels(3));
-        if mask_head.is_some() {
-            s.token_sum = alloc(128 * n);
-            s.context = alloc(128 * n);
-            s.context_up = alloc(128 * pixels(2));
-            s.mid = alloc(64 * pixels(2));
-            s.mid_up = alloc(64 * pixels(3));
-            s.fine1 = alloc(mask_width * pixels(3));
-            s.fine2 = alloc(mask_width * pixels(3));
-            s.logits = alloc(mask_classes * pixels(3));
+        s.up = m.take(2 * biggest);
+        s.t = m.take(2 * biggest);
+        s.scratch = m.take(2 * scratch);
+        s.normal = m.take(3 * pixels(3));
+        s.points = m.take(3 * pixels(3));
+        if let Some(h) = &mask_head {
+            s.mask = h.mem(&mut m, (gh, gw));
         }
-        s.end = end;
+        s.end = m.end;
 
         // The forward pass: the encoder, as for Depth Anything.
         let mut ops = Ops::default();
-        ops.copy(start_at, tokens * D, s.x, 0);
-        ops.linear((s.patches, pe_in), n, pe, (s.x + D as u32, D), ACCUMULATE);
-        let mut tap = 0;
-        for (i, b) in blocks.iter().enumerate() {
-            ops.norm(s.x, tokens, b.n1, s.xn);
-            ops.linear((s.xn, D), tokens, b.qkv, (s.qkv, 3 * D), 0);
-            ops.attention_at(s.qkv, s.scores, s.attn, tokens);
-            ops.linear((s.attn, D), tokens, b.out, (s.x, D), ACCUMULATE);
-            ops.norm(s.x, tokens, b.n2, s.xn);
-            ops.linear((s.xn, D), tokens, b.fc1, (s.hidden, 4 * D), GELU);
-            ops.linear((s.hidden, 4 * D), tokens, b.fc2, (s.x, D), ACCUMULATE);
-            if TAPS.contains(&i) {
-                ops.norm(s.x, tokens, final_norm, s.tokens[tap]);
-                tap += 1;
-            }
-        }
+        encoder.ops(&mut ops, &s.enc, n, &TAPS, &s.tokens);
         let mut marks = vec![("encoder", ops.list.len())];
         // The neck's first level.
         ops.copy(level0_at, D * n, s.neck[0], 0);
@@ -515,18 +432,8 @@ impl Moge {
         }
         marks.push(("neck", ops.list.len()));
         // People, walls and sky, from the taps and the neck's level 3 (as tools/moge/segment).
-        if let Some((width, _, h)) = &mask_head {
-            let (near, fine) = (size(2), size(3));
-            ops.tokens_to_image(s.tokens[0] + D as u32, n, h.token9, s.token_sum, 0);
-            ops.tokens_to_image(s.tokens[1] + D as u32, n, h.token12, s.token_sum, ACCUMULATE);
-            ops.conv3x3(s.token_sum, 128, (gh, gw), h.context, 128, s.context, 1, RELU_IN | RELU);
-            ops.resize(s.context, 128, (gh, gw), near, s.context_up);
-            ops.conv3x3(s.context_up, 128, near, h.mid, 64, s.mid, 1, RELU);
-            ops.resize(s.mid, 64, near, fine, s.mid_up);
-            ops.conv1x1(s.neck[3], pixels(3), h.fused, s.mid_up, ACCUMULATE);
-            ops.conv3x3(s.mid_up, 64, fine, h.fine1, *width, s.fine1, 1, RELU_IN | RELU);
-            ops.conv3x3(s.fine1, *width, fine, h.fine2, *width, s.fine2, 1, RELU);
-            ops.conv1x1(s.fine2, pixels(3), h.out, s.logits, 0);
+        if let Some(h) = &mask_head {
+            h.ops(&mut ops, &s.mask, (gh, gw), s.tokens, s.neck[3]);
             marks.push(("masks", ops.list.len()));
         }
         // The two heads together: each dispatch is the normal head's, run a second time for the
@@ -569,7 +476,7 @@ impl Moge {
         marks.push(("both heads", ops.list.len()));
         let with_masks = mask_head.is_some();
         let run = Runner::new(&up, ops, s.end, "MoGe-2")?;
-        Ok(Self { run, s, grid: (gw, gh), with_masks, mask_classes, marks })
+        Ok(Self { run, s, grid: (gw, gh), with_masks, mask_classes, #[cfg(test)] marks })
     }
 
     /// The picture size it takes, in pixels.
@@ -590,7 +497,7 @@ impl Moge {
     /// results on the GPU for `geometry`.
     pub fn submit(&mut self, rgb: &[u8]) -> Result<()> {
         let patches = patches_of(rgb, self.grid)?;
-        self.run.write(self.s.patches, &patches);
+        self.run.write(self.s.enc.patches, &patches);
         self.run.run()
     }
 
@@ -612,9 +519,11 @@ impl Moge {
         }
         let (w, h) = self.out_size();
         let pixels = w * h;
-        let mut logits = self.run.read(self.s.logits, self.mask_classes * pixels)?;
-        let parts = (self.mask_classes == SCENE.len() + PARTS.len()).then(|| crate::softmax_planes(logits.split_off(SCENE.len() * pixels), pixels));
-        Ok(Masks { scene: crate::softmax_planes(logits, pixels), parts })
+        let mut logits = self.run.read(self.s.mask.logits, self.mask_classes * pixels)?;
+        let centres = logits.split_off((OUTPUTS - CENTRES.len()) * pixels);
+        let body = crate::softmax_planes(logits.split_off((SCENE.len() + PARTS.len()) * pixels), pixels);
+        let parts = crate::softmax_planes(logits.split_off(SCENE.len() * pixels), pixels);
+        Ok(Masks { scene: crate::softmax_planes(logits, pixels), parts, body, centres })
     }
 
     /// After `submit`, the picture's depth and normals.
@@ -759,7 +668,7 @@ mod tests {
             stages.push((format!("neck.{i}"), s.neck[i]));
         }
         if moge.with_masks {
-            stages.push(("logits".into(), s.logits));
+            stages.push(("logits".into(), s.mask.logits));
         }
         stages.push(("normal.half".into(), s.normal));
         stages.push(("points.half".into(), s.points));

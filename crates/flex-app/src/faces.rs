@@ -11,12 +11,13 @@
 //! report, so a mesh is always drawn over the picture it was made from.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use flex_depth::face::{Detection, Face, HEAD_SIZE, MESH_SIZE};
 
 pub use flex_depth::face::{HEIGHT, MESH_POINTS, WIDTH};
+
+use crate::worker::{Job, Worker, push_capped};
 
 pub const MAX_FACES: usize = 8;
 /// Everything known about a face, all of it smoothed and blended the same way. First its box
@@ -45,8 +46,6 @@ const ROI_MARGIN: f32 = 1.5;
 const EYE_SHUT: f32 = 0.1;
 const EYE_RANGE: f32 = 0.2;
 const MOUTH_RANGE: f32 = 0.6;
-/// Nothing wanted faces for this long: stop.
-const IDLE: Duration = Duration::from_secs(20);
 /// Least time between detections, and the least it can be as a multiple of how long one takes,
 /// so a slow GPU isn't kept busy with this.
 const MIN_INTERVAL: Duration = Duration::from_millis(20);
@@ -68,8 +67,9 @@ const HOLD: f64 = 0.3;
 const WEIGHTS: [f32; 3] = [3.0, 2.0, 1.0];
 const DETAILED_REACH: usize = 2;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum Status {
+    #[default]
     Off,
     Starting,
     Ready {
@@ -129,55 +129,46 @@ struct Input {
     cut: bool,
 }
 
-struct State {
+#[derive(Default)]
+pub struct State {
     status: Status,
-    running: bool,
     /// Whether anything's asked for the closer look lately.
     detail: bool,
     input: Option<Input>,
     busy: bool,
     reports: VecDeque<Report>,
-    last_wanted: Instant,
+}
+
+impl Job for State {
+    type Status = Status;
+    fn status(&self) -> &Status {
+        &self.status
+    }
+    fn failed(&self) -> bool {
+        matches!(self.status, Status::Failed(_))
+    }
+    fn starting(&mut self) {
+        self.status = Status::Starting;
+    }
+    fn fail(&mut self, why: String) {
+        self.status = Status::Failed(why);
+    }
+    fn stopped(&mut self) {
+        self.reports.clear();
+        if matches!(self.status, Status::Ready { .. }) {
+            self.status = Status::Off;
+        }
+    }
 }
 
 /// Shared between the UI, the paint callback and the worker.
-#[derive(Clone)]
-pub struct Link(Arc<(Mutex<State>, Condvar)>);
-
-impl Default for Link {
-    fn default() -> Self {
-        let state = State { status: Status::Off, running: false, detail: false, input: None, busy: false, reports: VecDeque::new(), last_wanted: Instant::now() };
-        Self(Arc::new((Mutex::new(state), Condvar::new())))
-    }
-}
+pub type Link = Worker<State>;
 
 impl Link {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.0.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// An effect wants faces, and maybe a closer look at them: starts the worker if it isn't
     /// running. Call every frame.
     pub fn wanted(&self, detail: bool) {
-        let mut state = self.lock();
-        state.last_wanted = Instant::now();
-        state.detail = detail;
-        if state.running || matches!(state.status, Status::Failed(_)) {
-            return;
-        }
-        state.running = true;
-        state.status = Status::Starting;
-        drop(state);
-        let link = self.clone();
-        if let Err(e) = std::thread::Builder::new().name("faces".into()).spawn(move || link.work()) {
-            let mut state = self.lock();
-            state.running = false;
-            state.status = Status::Failed(format!("couldn't start: {e}"));
-        }
-    }
-
-    pub fn status(&self) -> Status {
-        self.lock().status.clone()
+        self.want("faces", |state| state.detail = detail, |link| link.work());
     }
 
     /// How many times `WIDTH` × `HEIGHT` frames should be.
@@ -195,7 +186,7 @@ impl Link {
     /// picture filling `filled` of it from the top left. `time` is its position in the video.
     pub fn submit(&self, rgba: Vec<u8>, scale: usize, filled: (f32, f32), time: f32, cut: bool) {
         self.lock().input = Some(Input { rgba, scale, filled, time, cut });
-        self.0.1.notify_all();
+        self.notify();
     }
 
     /// The reports that have come in since the last call, oldest first.
@@ -204,10 +195,7 @@ impl Link {
     }
 
     fn publish(&self, reports: impl IntoIterator<Item = Report>) {
-        let mut state = self.lock();
-        state.reports.extend(reports);
-        let extra = state.reports.len().saturating_sub(MOST_WAITING);
-        state.reports.drain(..extra);
+        push_capped(&mut self.lock().reports, reports, MOST_WAITING);
     }
 
     fn work(&self) {
@@ -231,21 +219,11 @@ impl Link {
         let mut large = Vec::new();
         let mut last_time: Option<f32> = None;
         let mut after_cut = true;
-        loop {
-            let input = {
-                let mut state = self.lock();
-                loop {
-                    if let Some(input) = state.input.take() {
-                        state.busy = true;
-                        break Some(input);
-                    }
-                    if state.last_wanted.elapsed() > IDLE {
-                        break None;
-                    }
-                    state = self.0.1.wait_timeout(state, Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
-                }
-            };
-            let Some(input) = input else { break };
+        while let Some(input) = self.next(|state| {
+            let input = state.input.take()?;
+            state.busy = true;
+            Some(input)
+        }) {
             let detailed = input.scale > 1;
             if detailed {
                 large.resize(WIDTH * HEIGHT * input.scale * input.scale * 3, 0);
@@ -297,12 +275,7 @@ impl Link {
         }
         drop(face);
         log::info!("faces: stopped");
-        let mut state = self.lock();
-        state.running = false;
-        state.reports.clear();
-        if matches!(state.status, Status::Ready { .. }) {
-            state.status = Status::Off;
-        }
+        self.stop();
     }
 }
 

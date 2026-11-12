@@ -3,19 +3,7 @@
 // behind, so what you see around it is the room lensed, and by more the further back it is.
 // Anything nearer than the hole stands in front of it, and the disc lights up the room.
 
-float hash(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-
-float fbm(vec2 p) {
+float fbm4(vec2 p) {
     float sum = 0.0, amount = 0.5;
     for (int i = 0; i < 4; i++) {
         sum += amount * noise(p);
@@ -53,7 +41,7 @@ vec3 disc_colour(vec3 at, vec3 axis, vec3 towards_eye, vec3 u, vec3 v) {
     float spin = u_time * (1.0 + 2.0 * u_beat * s_react / 100.0);
     float angle = atan(dot(at, v), dot(at, u)) + spin * 2.6 / pow(r, 1.5);
     vec2 ring = vec2(cos(angle), sin(angle));
-    float cloud = fbm(ring * 2.6 + vec2(r * 1.4, -r * 0.7));
+    float cloud = fbm4(ring * 2.6 + vec2(r * 1.4, -r * 0.7));
     cloud = 0.25 + 1.5 * cloud * cloud;
     // The side coming towards you is brighter and bluer.
     float beta = 0.55 / sqrt(r);
@@ -168,7 +156,8 @@ vec4 effect(vec2 uv) {
         // Dimmed close in, where most of the light has been pulled away.
         if (!fell && glow_alpha < 1.0) lensed *= mix(0.4, 1.0, smoothstep(2.6, 6.0, b));
         // Light that's been round the hole, along the edge of its shadow.
-        lensed += vec3(1.0, 0.82, 0.6) * exp(-pow((b - SHADOW) / 0.16, 2.0)) * 1.6 * s_glow / 100.0;
+        float off_edge = (b - SHADOW) / 0.16;
+        lensed += vec3(1.0, 0.82, 0.6) * exp(-off_edge * off_edge) * 1.6 * s_glow / 100.0;
     }
 
     vec3 shown = mix(lensed, c, front);

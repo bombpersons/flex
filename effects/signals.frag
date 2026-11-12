@@ -1,9 +1,5 @@
 // Signals: draws each of the inputs on its own. See EFFECTS.md for what they are.
 
-vec3 hue(float t) {
-    return 0.5 + 0.5 * cos(6.2831853 * (t + vec3(0.0, 0.33, 0.67)));
-}
-
 vec4 effect(vec2 uv) {
     vec3 c = texture(u_video, uv).rgb;
     if (s_view < 0.5) {

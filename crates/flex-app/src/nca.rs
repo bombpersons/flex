@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 use eframe::egui_glow;
@@ -98,6 +99,8 @@ struct State {
     wanted: &'static Texture,
     models: Option<Arc<HashMap<String, Arc<Vec<f32>>>>>,
     loading: bool,
+    /// When `wanted()` first saw the models had failed, for trying again (see `gpu::still_failed`).
+    failed_seen: Option<Instant>,
 }
 
 /// Shared between the player (which says what's wanted) and the GL side (which grows it).
@@ -106,7 +109,7 @@ pub struct Link(Arc<Mutex<State>>);
 
 impl Default for Link {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(State { status: Status::Off, wanted: &TEXTURES[0], models: None, loading: false })))
+        Self(Arc::new(Mutex::new(State { status: Status::Off, wanted: &TEXTURES[0], models: None, loading: false, failed_seen: None })))
     }
 }
 
@@ -124,7 +127,7 @@ impl Link {
         if state.models.is_some() {
             state.status = Status::Ready(t.label);
         }
-        if state.models.is_some() || state.loading || matches!(state.status, Status::Failed(_)) {
+        if state.models.is_some() || state.loading || (matches!(state.status, Status::Failed(_)) && crate::gpu::still_failed(&mut state.failed_seen)) {
             return;
         }
         state.loading = true;
@@ -164,17 +167,7 @@ impl Link {
     }
 
     fn load(&self) -> Result<HashMap<String, Arc<Vec<f32>>>> {
-        let path = flex_core::data_dir().join("models").join(FILE);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let progress = |done: u64| {
-            let pct = (done * 100 / BYTES).min(100) as u8;
-            if done < BYTES {
-                self.lock().status = Status::Downloading(pct);
-            }
-        };
-        flex_core::update::download_verified(URL, "the textures", BYTES, SHA256, &path, progress)?;
+        let path = crate::worker::fetch_model(FILE, URL, "the textures", BYTES, SHA256, |pct| self.lock().status = Status::Downloading(pct))?;
         read_models(&std::fs::read(&path)?)
     }
 }
@@ -466,8 +459,7 @@ impl NcaGl {
             }
             if self.out.as_ref().is_none_or(|(_, s)| *s != size) {
                 if let Some((t, _)) = self.out.take() {
-                    gl.delete_framebuffer(t.fbo);
-                    gl.delete_texture(t.texture);
+                    crate::signals::delete_target(gl, t);
                 }
                 self.out = Some((create_target(gl, size, &[(glow::RGBA8, glow::UNSIGNED_BYTE)])?, size));
             }
@@ -500,8 +492,7 @@ impl NcaGl {
                 gl.delete_texture(t);
             }
             if let Some((t, _)) = self.out.take() {
-                gl.delete_framebuffer(t.fbo);
-                gl.delete_texture(t.texture);
+                crate::signals::delete_target(gl, t);
             }
             *self = Self { failed: self.failed, ..Default::default() };
         }
